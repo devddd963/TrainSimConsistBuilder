@@ -1,0 +1,83 @@
+Your understanding is spot on. Bypassing the native Windows file browser and pre-indexing/scanning in favor of **on-demand file streaming** directly fixes the loading and waiting times completely. You read only what is needed directly from the kernel and stream it directly into a virtual UI list.
+
+Here is the step-by-step implementation plan designed to get your DOpus-style dual-pane UI built systematically.
+
+---
+
+### Task 1: Create the Base Dual-Pane Window & Tab Control
+
+**Goal:** Get a working Win32 desktop window rendering with a modern tab bar and split left/right layout.
+
+* **Task 1.1: Register Window Class & Create Main Frame**
+* Set up `wWinMain` in `TrainSimConsistBuilder.cpp`.
+* Register a custom `WNDCLASS` and spawn the primary window container using `CreateWindowExW`.
+
+
+* **Task 1.2: Add Top Bar & Tab Control**
+* Create a standard Win32 Tab Control (`WC_TABCONTROL`) pinned at the top.
+* Add the primary tab: **"Consists (.CON)"** (and leave room for future tabs like Assets/Activities).
+
+
+* **Task 1.3: Create Dual-Pane Splitter Layout**
+* Divide the client area into two side-by-side pane containers below the tab bar:
+* **Left Pane Container:** Reserved for available `.eng` / `.wag` files.
+* **Right Pane Container:** Reserved for the active `.con` composition list.
+
+
+
+
+* **Task 1.4: Add Address/Path Navigation Bar**
+* Place an Edit Control (`WC_EDIT`) and a "Go" button (`WC_BUTTON`) directly above the Left Pane to serve as your custom fast-path input bar.
+
+
+
+---
+
+### Task 2: Implement On-Demand File Streaming Engine
+
+**Goal:** Enable instant directory reading without invoking Windows Explorer dialogs or scanning unnecessary subfolders.
+
+* **Task 2.1: Implement High-Speed Kernel Traversal**
+* In `TrainSimConsistBuilder.cpp`, write `ScanDirectoryStream()` using `FindFirstFileExW` with the `FIND_FIRST_EX_LARGE_FETCH` flag.
+* Filter for relevant file extensions (`.eng` and `.wag` when building consists) and extract parent folder names.
+
+
+* **Task 2.2: Setup Virtual List Views (`LVS_OWNERDATA`)**
+* Instantiate a `SysListView32` in the Left Pane with `LVS_REPORT` and `LVS_OWNERDATA` styles.
+* This ensures the UI never holds thousands of UI nodes—it only renders what fits on screen.
+
+
+* **Task 2.3: Connect Address Bar to Streamer**
+* Wire the Address Bar's `EN_CHANGE` or Enter key event to trigger `ScanDirectoryStream()`.
+* When a path is entered, clear the local memory vector, stream the directory contents, and call `ListView_SetItemCount()` to update the UI instantly.
+
+
+* **Task 2.4: Implement Flattened Column Rendering**
+* Handle the `LVN_GETDISPINFO` notification in your window message loop (`WndProc`).
+* Populate columns dynamically: **Filename**, **Parent Directory**, and **Type** (Locomotive / Wagon).
+
+
+
+---
+
+### Task 3: Link Left and Right Panes (Composition Engine)
+
+**Goal:** Move selected assets from the Left Pane streamer into the Right Pane consist builder in memory.
+
+* **Task 3.1: Initialize Right Pane Consist Grid**
+* Set up a second Virtual ListView in the Right Pane with columns: **Seq #**, **Asset Name**, **Folder Pack**, and **Orientation**.
+
+
+* **Task 3.2: Implement Selection & Append Controls**
+* Handle `NM_DBLCLK` (Double-Click) on the Left Pane list to push the selected `AssetRecord` into the active consist vector.
+* Add quick action buttons between panes (`[ Add ➔ ]`, `[  Insert ]`, `[ ✖ Remove ]`).
+
+
+* **Task 3.3: Native OLE Drag-and-Drop (Optional Enhancement)**
+* Implement `IDropTarget` on the Right Pane to allow smooth click-and-drag asset assembly from left to right.
+
+
+
+---
+
+Shall we start with **Task 1.1** and write the C++ code to spawn your base Win32 window and initial tab control?

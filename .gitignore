@@ -1,0 +1,71 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Visual Studio temporary cache & index files
+.vs/
+*.ipch
+*.vsidx
+*.suo
+*.user
+*.db
+*.VC.db
+
+# Large reference assets/images (optional)
+REFERENCES/
+
+# MSVC build logs and tracking files
+*.tlog
+*.lastbuildstate
+*.log
+*.recipe
+*.ilk
+*.res
+*.idb
+*.pdb
+*.FileListAbsolute.txt
+
+# Additional build folders
+TrainSim.*/
+
+# Ignore all x64 output and debug directories (covers RCa files, AppData, and build outputs)
+x64/
+Debug/
+Release/
+
+# Local application cache and data files
+*.dat
+AppData/
+
+# Resource compiler temp files
+RCa*
+RCb*

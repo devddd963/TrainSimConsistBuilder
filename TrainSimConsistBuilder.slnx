@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="TrainSimConsistBuilder/TrainSimConsistBuilder.vcxproj" Id="604564d5-2225-481d-93b2-0e2a5b8fd87c" />
+</Solution>

@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>18.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{604564d5-2225-481d-93b2-0e2a5b8fd87c}</ProjectGuid>
+    <RootNamespace>TrainSimConsistBuilder</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+    <Manifest>
+      <EnableSegmentHeap>true</EnableSegmentHeap>
+    </Manifest>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+    <Manifest>
+      <EnableSegmentHeap>true</EnableSegmentHeap>
+    </Manifest>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>
+      </AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+    <Manifest>
+      <EnableSegmentHeap>true</EnableSegmentHeap>
+    </Manifest>
+    <PostBuildEvent>
+      <Command>xcopy /y /d "$(OutDir)$(TargetName).*" "$(ProjectDir)..\x64\$(Configuration)\"</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+    <Manifest>
+      <EnableSegmentHeap>true</EnableSegmentHeap>
+    </Manifest>
+    <PostBuildEvent>
+      <Command>xcopy /y /d "$(OutDir)$(TargetName).*" "$(ProjectDir)..\x64\$(Configuration)\"</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClInclude Include="src\framework.h" />
+    <ClInclude Include="src\Resource.h" />
+    <ClInclude Include="src\targetver.h" />
+    <ClInclude Include="src\TrainSimConsistBuilder.h" />
+    <ClInclude Include="ui\AddressBar.h" />
+    <ClInclude Include="ui\NavToolbar.h" />
+    <ClInclude Include="ui\CommandBar.h" />
+    <ClInclude Include="src\ConsistReader.h" />
+    <ClInclude Include="ui\CustomListControl.h" />
+    <ClInclude Include="ui\FluentDragGhost.h" />
+    <ClInclude Include="ui\FilterPopup.h" />
+    <ClInclude Include="src\AssetsParser.h" />
+    <ClInclude Include="src\ControlParser.h" />
+    <ClInclude Include="src\DieselParser.h" />
+    <ClInclude Include="src\ElectricParser.h" />
+    <ClInclude Include="src\SteamParser.h" />
+    <ClInclude Include="src\PassengerParser.h" />
+    <ClInclude Include="src\FreightParser.h" />
+    <ClInclude Include="src\TenderParser.h" />
+    <ClInclude Include="ui\UITheme.h" />
+    <ClInclude Include="src\ConsistWriter.h" />
+    <ClInclude Include="ui\ModernMessageBox.h" />
+    <ClInclude Include="ui\VisualConsistView.h" />
+    <ClInclude Include="ui\ModernContextMenu.h" />
+    <ClInclude Include="src\ActivityConsistReader.h" />
+    <ClInclude Include="src\ActivityConsistWriter.h" />
+    <ClInclude Include="src\BatchConsistGenerationWizard.h" />
+    <ClInclude Include="ui\BatchConsistGenerationWizardDlg.h" />
+    <ClInclude Include="src\PoolManager.h" />
+    <ClInclude Include="src\BatchConsistGenerator.h" />
+    <ClInclude Include="ui\PoolManagerDlg.h" />
+    <ClInclude Include="ui\BatchConsistGeneratorDlg.h" />
+    <ClInclude Include="src\PoolMutator.h" />
+    <ClInclude Include="ui\PoolMutatorDlg.h" />
+    <ClInclude Include="ui\CustomTitleBar.h" />
+    <ClInclude Include="ui\CustomScrollBar.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\TrainSimConsistBuilder.cpp" />
+    <ClCompile Include="ui\AddressBar.cpp" />
+    <ClCompile Include="ui\NavToolbar.cpp" />
+    <ClCompile Include="ui\CommandBar.cpp" />
+    <ClCompile Include="src\ConsistReader.cpp" />
+    <ClCompile Include="ui\CustomListControl.cpp" />
+    <ClCompile Include="ui\FluentDragGhost.cpp" />
+    <ClCompile Include="ui\FilterPopup.cpp" />
+    <ClCompile Include="src\AssetsParser.cpp" />
+    <ClCompile Include="src\ControlParser.cpp" />
+    <ClCompile Include="src\DieselParser.cpp" />
+    <ClCompile Include="src\ElectricParser.cpp" />
+    <ClCompile Include="src\SteamParser.cpp" />
+    <ClCompile Include="src\PassengerParser.cpp" />
+    <ClCompile Include="src\FreightParser.cpp" />
+    <ClCompile Include="src\TenderParser.cpp" />
+    <ClCompile Include="src\ConsistWriter.cpp" />
+    <ClCompile Include="ui\ModernMessageBox.cpp" />
+    <ClCompile Include="ui\VisualConsistView.cpp" />
+    <ClCompile Include="ui\ModernContextMenu.cpp" />
+    <ClCompile Include="src\ActivityConsistReader.cpp" />
+    <ClCompile Include="src\ActivityConsistWriter.cpp" />
+    <ClCompile Include="src\BatchConsistGenerationWizard.cpp" />
+    <ClCompile Include="ui\BatchConsistGenerationWizardDlg.cpp" />
+    <ClCompile Include="src\PoolManager.cpp" />
+    <ClCompile Include="src\BatchConsistGenerator.cpp" />
+    <ClCompile Include="ui\PoolManagerDlg.cpp" />
+    <ClCompile Include="ui\BatchConsistGeneratorDlg.cpp" />
+    <ClCompile Include="src\PoolMutator.cpp" />
+    <ClCompile Include="ui\PoolMutatorDlg.cpp" />
+    <ClCompile Include="ui\CustomTitleBar.cpp" />
+    <ClCompile Include="ui\CustomScrollBar.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="TrainSimConsistBuilder.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="Resources\small.ico" />
+    <Image Include="Resources\TrainSimConsistBuilder.ico" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>
