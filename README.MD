@@ -2,7 +2,7 @@
 
 A high-performance, native Win32/C++ consist and activity editor designed for **Open Rails (ORTS)**. Built as a free, lightweight, open-source utility, this application delivers instant library indexing, real-time metrics calculations, and complete file-explorer-style control over rolling stock assets.
 
-![Main Application Workspace](PREVIEWS/1.png)
+![Main Application Workspace](PREVIEWS/1.jpg)
 
 ---
 
