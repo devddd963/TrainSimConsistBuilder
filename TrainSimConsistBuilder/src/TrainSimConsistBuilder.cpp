@@ -9,6 +9,7 @@ ActivePane g_ActivePane = PANE_CONSIST;
 #include "TrainSimConsistBuilder.h"
 #include "../ui/AddressBar.h"
 #include "../ui/UITheme.h"
+#include "../ui/CustomTreeView.h"
 #include <vector>
 #include <string>
 #include <sstream>
@@ -33,18 +34,18 @@ HFONT hUIFont = NULL;
 std::vector<size_t> g_FilteredStockIndices;
 
 // Tree Node Handles
-HTREEITEM g_hNodeEngines = NULL;
-HTREEITEM g_hNodeWagons = NULL;
-HTREEITEM g_hNodeEnginesAll = NULL;
-HTREEITEM g_hNodeWagonsAll = NULL;
-HTREEITEM g_hNodeDiesel = NULL;
-HTREEITEM g_hNodeElectric = NULL;
-HTREEITEM g_hNodeSteam = NULL;
-HTREEITEM g_hNodeControl = NULL;
+CustomTreeNode* g_pNodeEngines = nullptr;
+CustomTreeNode* g_pNodeWagons = nullptr;
+CustomTreeNode* g_pNodeEnginesAll = nullptr;
+CustomTreeNode* g_pNodeWagonsAll = nullptr;
+CustomTreeNode* g_pNodeDiesel = nullptr;
+CustomTreeNode* g_pNodeElectric = nullptr;
+CustomTreeNode* g_pNodeSteam = nullptr;
+CustomTreeNode* g_pNodeControl = nullptr;
 
-HTREEITEM g_hNodePassenger = NULL;
-HTREEITEM g_hNodeFreight = NULL;
-HTREEITEM g_hNodeTender = NULL;
+CustomTreeNode* g_pNodePassenger = nullptr;
+CustomTreeNode* g_pNodeFreight = nullptr;
+CustomTreeNode* g_pNodeTender = nullptr;
 
 #include "AssetsParser.h"
 #include "../ui/FilterPopup.h"
@@ -65,9 +66,12 @@ LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 #include "ConsistWriter.h"
 #include "ActivityConsistReader.h"
 #include "ActivityConsistWriter.h"
+#include "Updater.h"
 CustomListControl g_ConsistList;
 CustomListControl g_AssetList;
 CustomListControl g_EditorUnitList;
+CustomTreeView g_RouteTreeView;
+CustomTreeView g_CategoryTreeView;
 
 static ActivityConsistReader::ActivityData g_CurrentActivityData;
 static std::wstring g_CurrentActivityFilePath;
@@ -603,7 +607,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 
     HWND hWnd = CreateWindowExW(0,
         L"TrainSimConsistBuilderClass",
-        L"Train Sim Consist Builder",
+        L"Train Sim Consist Builder for Open Rails",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, width, height,
         nullptr, nullptr, hInstance, nullptr);
@@ -662,71 +666,35 @@ static DragState GetSplitterUnderMouse(int x, int y, int width, int height)
 
 static void PopulateCategoryTree()
 {
-    if (!g_hCategoryTree) return;
-
-    // Clear existing items
-    TreeView_DeleteAllItems(g_hCategoryTree);
-
-    TVINSERTSTRUCTW tvis = { 0 };
-    tvis.hParent = TVI_ROOT;
-    tvis.hInsertAfter = TVI_LAST;
-    tvis.item.mask = TVIF_TEXT;
+    g_CategoryTreeView.Clear();
 
     // 1. Engines Node
-    tvis.item.pszText = (LPWSTR)L"Engines";
-    g_hNodeEngines = TreeView_InsertItem(g_hCategoryTree, &tvis);
+    g_pNodeEngines = g_CategoryTreeView.AddRoot(L"Engines", L"Engines", 0, true);
 
     // Engines Sub-nodes (Alphabetical: All, Control, Diesel, Electric, Steam)
-    TVINSERTSTRUCTW tvisSub = { 0 };
-    tvisSub.hParent = g_hNodeEngines;
-    tvisSub.hInsertAfter = TVI_LAST;
-    tvisSub.item.mask = TVIF_TEXT;
-
-    tvisSub.item.pszText = (LPWSTR)L"All";
-    g_hNodeEnginesAll = TreeView_InsertItem(g_hCategoryTree, &tvisSub);
-
-    tvisSub.item.pszText = (LPWSTR)L"Control";
-    g_hNodeControl = TreeView_InsertItem(g_hCategoryTree, &tvisSub);
-
-    tvisSub.item.pszText = (LPWSTR)L"Diesel";
-    g_hNodeDiesel = TreeView_InsertItem(g_hCategoryTree, &tvisSub);
-
-    tvisSub.item.pszText = (LPWSTR)L"Electric";
-    g_hNodeElectric = TreeView_InsertItem(g_hCategoryTree, &tvisSub);
-
-    tvisSub.item.pszText = (LPWSTR)L"Steam";
-    g_hNodeSteam = TreeView_InsertItem(g_hCategoryTree, &tvisSub);
+    g_pNodeEnginesAll = g_CategoryTreeView.AddChild(g_pNodeEngines, L"All", L"EnginesAll", 0, false);
+    g_pNodeControl = g_CategoryTreeView.AddChild(g_pNodeEngines, L"Control", L"Control", 0, false);
+    g_pNodeDiesel = g_CategoryTreeView.AddChild(g_pNodeEngines, L"Diesel", L"Diesel", 0, false);
+    g_pNodeElectric = g_CategoryTreeView.AddChild(g_pNodeEngines, L"Electric", L"Electric", 0, false);
+    g_pNodeSteam = g_CategoryTreeView.AddChild(g_pNodeEngines, L"Steam", L"Steam", 0, false);
 
     // 2. Wagons Node
-    tvis.hParent = TVI_ROOT;
-    tvis.item.pszText = (LPWSTR)L"Wagons";
-    g_hNodeWagons = TreeView_InsertItem(g_hCategoryTree, &tvis);
+    g_pNodeWagons = g_CategoryTreeView.AddRoot(L"Wagons", L"Wagons", 0, true);
 
     // Wagons Sub-nodes (Alphabetical: All, Freight, Passenger, Tender)
-    tvisSub.hParent = g_hNodeWagons;
-
-    tvisSub.item.pszText = (LPWSTR)L"All";
-    g_hNodeWagonsAll = TreeView_InsertItem(g_hCategoryTree, &tvisSub);
-
-    tvisSub.item.pszText = (LPWSTR)L"Freight";
-    g_hNodeFreight = TreeView_InsertItem(g_hCategoryTree, &tvisSub);
-
-    tvisSub.item.pszText = (LPWSTR)L"Passenger";
-    g_hNodePassenger = TreeView_InsertItem(g_hCategoryTree, &tvisSub);
-
-    tvisSub.item.pszText = (LPWSTR)L"Tender";
-    g_hNodeTender = TreeView_InsertItem(g_hCategoryTree, &tvisSub);
+    g_pNodeWagonsAll = g_CategoryTreeView.AddChild(g_pNodeWagons, L"All", L"WagonsAll", 0, false);
+    g_pNodeFreight = g_CategoryTreeView.AddChild(g_pNodeWagons, L"Freight", L"Freight", 0, false);
+    g_pNodePassenger = g_CategoryTreeView.AddChild(g_pNodeWagons, L"Passenger", L"Passenger", 0, false);
+    g_pNodeTender = g_CategoryTreeView.AddChild(g_pNodeWagons, L"Tender", L"Tender", 0, false);
 
     // Auto-expand root category nodes
-    TreeView_Expand(g_hCategoryTree, g_hNodeEngines, TVE_EXPAND);
-    TreeView_Expand(g_hCategoryTree, g_hNodeWagons, TVE_EXPAND);
+    g_CategoryTreeView.ExpandNode(g_pNodeEngines, true);
+    g_CategoryTreeView.ExpandNode(g_pNodeWagons, true);
 }
 
 static void PopulateRouteActivityTree()
 {
-    if (!g_hRouteTree) return;
-
-    TreeView_DeleteAllItems(g_hRouteTree);
+    g_RouteTreeView.Clear();
     if (g_szBasePath.empty()) return;
 
     std::wstring routesDir = g_szBasePath;
@@ -751,12 +719,7 @@ static void PopulateRouteActivityTree()
             if (actAttr != INVALID_FILE_ATTRIBUTES && (actAttr & FILE_ATTRIBUTE_DIRECTORY))
             {
                 // Add Route folder parent node
-                TVINSERTSTRUCTW tvis = { 0 };
-                tvis.hParent = TVI_ROOT;
-                tvis.hInsertAfter = TVI_LAST;
-                tvis.item.mask = TVIF_TEXT;
-                tvis.item.pszText = (LPWSTR)routeFolder.c_str();
-                HTREEITEM hRouteNode = TreeView_InsertItem(g_hRouteTree, &tvis);
+                CustomTreeNode* pRouteNode = g_RouteTreeView.AddRoot(routeFolder, routeFolder, 0, true);
 
                 // Scan for *.act files inside the ACTIVITIES folder
                 std::wstring actSearch = actDir + L"\\*.act";
@@ -768,12 +731,7 @@ static void PopulateRouteActivityTree()
                     {
                         if (!(actFfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
                         {
-                            TVINSERTSTRUCTW tvisChild = { 0 };
-                            tvisChild.hParent = hRouteNode;
-                            tvisChild.hInsertAfter = TVI_LAST;
-                            tvisChild.item.mask = TVIF_TEXT;
-                            tvisChild.item.pszText = actFfd.cFileName;
-                            TreeView_InsertItem(g_hRouteTree, &tvisChild);
+                            g_RouteTreeView.AddChild(pRouteNode, actFfd.cFileName, actFfd.cFileName, 0, false);
                         }
                     } while (FindNextFileW(hActFind, &actFfd));
                     FindClose(hActFind);
@@ -784,28 +742,76 @@ static void PopulateRouteActivityTree()
     FindClose(hFind);
 }
 
-static void UpdateLibraryTheme(BOOL /*bDarkMode*/)
-{
-    COLORREF bgCol = UITheme::DarkBackground;
-    COLORREF fgCol = UITheme::TextPrimary;
-    COLORREF lineCol = RGB(65, 65, 65);
+static void PopulateActivityConsistList();
+static void LoadAndDisplayActivityConsist(HWND hWnd, int consistIndex);
 
+static void OnRouteActivitySelected(HWND hWnd, CustomTreeNode* pItem)
+{
+    if (!pItem) return;
+
+    if (pItem->parent != nullptr) // Selected an .act file child node!
+    {
+        // Save current consist state before switching activities
+        SaveCurrentConsistSessionState();
+
+        // Reset activity consist index pointer and clear workspace before loading new file
+        g_CurrentActivityConsistIndex = -1;
+        g_LoadedConsistUnits.clear();
+
+        std::wstring szRouteFolder = pItem->parent->text;
+        std::wstring szActFile = pItem->text;
+
+        std::wstring fullActPath = g_szBasePath;
+        if (!fullActPath.empty() && fullActPath.back() != L'\\') fullActPath += L'\\';
+        fullActPath += L"ROUTES\\" + szRouteFolder + L"\\ACTIVITIES\\" + szActFile;
+
+        g_CurrentActivityFilePath = fullActPath;
+        g_CurrentActivityData = ActivityConsistReader::LoadActivityConsists(fullActPath, g_szBasePath);
+
+        for (const auto& con : g_CurrentActivityData.consists)
+        {
+            if (con.isBroken)
+            {
+                g_InitiallyBrokenConsists.insert(g_CurrentActivityFilePath + L"#" + con.id);
+            }
+        }
+
+        PopulateActivityConsistList();
+
+        // Automatically select and load first consist into workspace if available
+        if (!g_CurrentActivityData.consists.empty())
+        {
+            g_ConsistList.SetSelectedIndex(0);
+            LoadAndDisplayActivityConsist(hWnd, 0);
+        }
+        else
+        {
+            ResetConsistEditorWorkspace(hWnd);
+        }
+    }
+    else
+    {
+        // Root route node selected: clear activity consist list and reset workspace
+        g_CurrentActivityData = ActivityConsistReader::ActivityData();
+        g_CurrentActivityFilePath = L"";
+        g_ConsistList.Clear();
+        SetWindowTextW(g_hConsistHeader, L"  Activity Consists");
+        ResetConsistEditorWorkspace(hWnd);
+    }
+}
+
+static void UpdateLibraryTheme(BOOL bDarkMode)
+{
     if (g_hCategoryTree)
     {
-        SetWindowTheme(g_hCategoryTree, L"DarkMode_Explorer", NULL);
-        TreeView_SetBkColor(g_hCategoryTree, bgCol);
-        TreeView_SetTextColor(g_hCategoryTree, fgCol);
-        TreeView_SetLineColor(g_hCategoryTree, lineCol);
-        InvalidateRect(g_hCategoryTree, NULL, TRUE);
+        g_CategoryTreeView.SetDarkMode(bDarkMode ? true : false);
+        g_CategoryTreeView.Invalidate();
     }
 
     if (g_hRouteTree)
     {
-        SetWindowTheme(g_hRouteTree, L"DarkMode_Explorer", NULL);
-        TreeView_SetBkColor(g_hRouteTree, bgCol);
-        TreeView_SetTextColor(g_hRouteTree, fgCol);
-        TreeView_SetLineColor(g_hRouteTree, lineCol);
-        InvalidateRect(g_hRouteTree, NULL, TRUE);
+        g_RouteTreeView.SetDarkMode(bDarkMode ? true : false);
+        g_RouteTreeView.Invalidate();
     }
 
     if (g_hConsistList)
@@ -817,227 +823,6 @@ static void UpdateLibraryTheme(BOOL /*bDarkMode*/)
     {
         g_AssetList.Invalidate();
     }
-}
-
-// ---------------------------------------------------------------------------
-// Modern Fluent Dark Toast / Tooltip Subclass for TreeViews
-// ---------------------------------------------------------------------------
-LRESULT CALLBACK ModernToolTipSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
-{
-    switch (uMsg)
-    {
-    case WM_ERASEBKGND:
-        return TRUE;
-
-    case WM_WINDOWPOSCHANGING:
-    {
-        WINDOWPOS* pwp = (WINDOWPOS*)lParam;
-        if (pwp && !(pwp->flags & SWP_NOSIZE))
-        {
-            WCHAR szText[512] = { 0 };
-            GetWindowTextW(hWnd, szText, 512);
-            if (wcslen(szText) == 0)
-            {
-                TOOLINFOW ti = { sizeof(ti) };
-                ti.lpszText = szText;
-                SendMessageW(hWnd, TTM_GETCURRENTTOOLW, 0, (LPARAM)&ti);
-            }
-            if (wcslen(szText) > 0)
-            {
-                HDC hdc = GetDC(hWnd);
-                HFONT hFontToUse = hUIFont ? hUIFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-                HFONT hOldFont = (HFONT)SelectObject(hdc, hFontToUse);
-                SIZE sz = { 0, 0 };
-                GetTextExtentPoint32W(hdc, szText, (int)wcslen(szText), &sz);
-                SelectObject(hdc, hOldFont);
-                ReleaseDC(hWnd, hdc);
-
-                // Add generous horizontal (24px) and vertical (10px) padding for modern Windows 11 toast pill
-                int reqW = sz.cx + 24;
-                int reqH = sz.cy + 10;
-                if (pwp->cx < reqW) pwp->cx = reqW;
-                if (pwp->cy < reqH) pwp->cy = reqH;
-            }
-        }
-        break;
-    }
-
-    case WM_WINDOWPOSCHANGED:
-    {
-        WINDOWPOS* pwp = (WINDOWPOS*)lParam;
-        if (pwp && !(pwp->flags & SWP_NOSIZE) && pwp->cx > 0 && pwp->cy > 0)
-        {
-            HRGN hRgn = CreateRoundRectRgn(0, 0, pwp->cx + 1, pwp->cy + 1, 8, 8);
-            SetWindowRgn(hWnd, hRgn, TRUE);
-        }
-        break;
-    }
-
-    case WM_PAINT:
-    {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
-        RECT rc;
-        GetClientRect(hWnd, &rc);
-
-        // Double buffer DC
-        HDC hmemDC = CreateCompatibleDC(hdc);
-        HBITMAP hbm = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
-        HBITMAP holdBm = (HBITMAP)SelectObject(hmemDC, hbm);
-
-        // Modern Fluent Dark Toast Theme
-        COLORREF clrBg = RGB(36, 36, 38);
-        COLORREF clrBorder = RGB(70, 70, 75);
-        COLORREF clrText = RGB(245, 245, 245);
-
-        HBRUSH hbr = CreateSolidBrush(clrBg);
-        HPEN hPen = CreatePen(PS_SOLID, 1, clrBorder);
-        HBRUSH holdBr = (HBRUSH)SelectObject(hmemDC, hbr);
-        HPEN holdPen = (HPEN)SelectObject(hmemDC, hPen);
-
-        RoundRect(hmemDC, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
-
-        SelectObject(hmemDC, holdBr);
-        SelectObject(hmemDC, holdPen);
-        DeleteObject(hbr);
-        DeleteObject(hPen);
-
-        // Anti-aliased text with full margin visibility
-        WCHAR szText[512] = { 0 };
-        GetWindowTextW(hWnd, szText, 512);
-        if (wcslen(szText) > 0)
-        {
-            HFONT hFontToUse = hUIFont ? hUIFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-            HFONT hOldF = (HFONT)SelectObject(hmemDC, hFontToUse);
-            SetBkMode(hmemDC, TRANSPARENT);
-            SetTextColor(hmemDC, clrText);
-            RECT rcText = rc;
-            InflateRect(&rcText, -10, -2);
-            DrawTextW(hmemDC, szText, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            SelectObject(hmemDC, hOldF);
-        }
-
-        BitBlt(hdc, 0, 0, rc.right, rc.bottom, hmemDC, 0, 0, SRCCOPY);
-        SelectObject(hmemDC, holdBm);
-        DeleteObject(hbm);
-        DeleteDC(hmemDC);
-        EndPaint(hWnd, &ps);
-        return 0;
-    }
-
-    case WM_NCDESTROY:
-        RemoveWindowSubclass(hWnd, ModernToolTipSubclassProc, uIdSubclass);
-        break;
-    }
-    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-}
-
-// ---------------------------------------------------------------------------
-// Modern TreeView Subclass (Hover Tracking, Double-Click Expand/Collapse, No Focus Outline)
-// ---------------------------------------------------------------------------
-LRESULT CALLBACK ModernTreeSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
-{
-    switch (uMsg)
-    {
-    case WM_NCHITTEST:
-    {
-        POINT pt = { (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) };
-        ScreenToClient(hWnd, &pt);
-        RECT rcClient;
-        GetClientRect(hWnd, &rcClient);
-
-        // Rightmost 6 pixels and bottom 6 pixels yield to parent for Splitter 2 / 3
-        if (pt.x >= rcClient.right - 6 || pt.y >= rcClient.bottom - 6)
-        {
-            return HTTRANSPARENT;
-        }
-        break;
-    }
-
-    case WM_MOUSEMOVE:
-    {
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        TVHITTESTINFO ht = { 0 };
-        ht.pt = pt;
-        HTREEITEM hHit = TreeView_HitTest(hWnd, &ht);
-        HTREEITEM hOldHover = (HTREEITEM)GetPropW(hWnd, L"TreeHoverItem");
-
-        if (hHit != hOldHover)
-        {
-            SetPropW(hWnd, L"TreeHoverItem", (HANDLE)hHit);
-            RECT rcClient;
-            GetClientRect(hWnd, &rcClient);
-
-            if (hOldHover)
-            {
-                RECT rcOld;
-                if (TreeView_GetItemRect(hWnd, hOldHover, &rcOld, FALSE))
-                {
-                    rcOld.left = 0;
-                    rcOld.right = rcClient.right;
-                    InvalidateRect(hWnd, &rcOld, FALSE);
-                }
-            }
-            if (hHit)
-            {
-                RECT rcNew;
-                if (TreeView_GetItemRect(hWnd, hHit, &rcNew, FALSE))
-                {
-                    rcNew.left = 0;
-                    rcNew.right = rcClient.right;
-                    InvalidateRect(hWnd, &rcNew, FALSE);
-                }
-            }
-
-            TRACKMOUSEEVENT tme = { 0 };
-            tme.cbSize = sizeof(TRACKMOUSEEVENT);
-            tme.dwFlags = TME_LEAVE;
-            tme.hwndTrack = hWnd;
-            TrackMouseEvent(&tme);
-        }
-        break;
-    }
-
-    case WM_MOUSELEAVE:
-    {
-        HTREEITEM hOldHover = (HTREEITEM)GetPropW(hWnd, L"TreeHoverItem");
-        if (hOldHover)
-        {
-            SetPropW(hWnd, L"TreeHoverItem", (HANDLE)NULL);
-            RECT rcClient;
-            GetClientRect(hWnd, &rcClient);
-            RECT rcOld;
-            if (TreeView_GetItemRect(hWnd, hOldHover, &rcOld, FALSE))
-            {
-                rcOld.left = 0;
-                rcOld.right = rcClient.right;
-                InvalidateRect(hWnd, &rcOld, FALSE);
-            }
-        }
-        break;
-    }
-
-    case WM_LBUTTONDBLCLK:
-    {
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        TVHITTESTINFO ht = { 0 };
-        ht.pt = pt;
-        HTREEITEM hHit = TreeView_HitTest(hWnd, &ht);
-        if (hHit)
-        {
-            // Toggle expansion: Expand if collapsed, Collapse if expanded
-            TreeView_Expand(hWnd, hHit, TVE_TOGGLE);
-            return 0;
-        }
-        break;
-    }
-
-    case WM_NCDESTROY:
-        RemovePropW(hWnd, L"TreeHoverItem");
-        RemoveWindowSubclass(hWnd, ModernTreeSubclassProc, uIdSubclass);
-        break;
-    }
-    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
 
 #define WM_ADD_CONSIST_ITEM (WM_USER + 301)
@@ -1547,6 +1332,7 @@ static void ResetConsistEditorWorkspace(HWND hWnd)
 
     // Clear active loaded consist state
     g_LoadedConsistUnits.clear();
+    g_CurrentActivityConsistIndex = -1;
     g_szCurrentConsistFile.clear();
     g_UndoStack.clear();
     g_RedoStack.clear();
@@ -2067,10 +1853,15 @@ static void SortAssetGrid()
     LeaveCriticalSection(&g_StockCacheCS);
 }
 
-void PopulateAssetGrid(HTREEITEM hSelected)
+void PopulateAssetGrid(CustomTreeNode* hSelected = nullptr)
 {
     if (!g_hAssetList) return;
     
+    if (!hSelected && g_hCategoryTree)
+    {
+        hSelected = g_CategoryTreeView.GetSelectedNode();
+    }
+
     g_FilteredStockIndices.clear();
     if (!hSelected)
     {
@@ -2084,39 +1875,39 @@ void PopulateAssetGrid(HTREEITEM hSelected)
         const auto& item = g_StockCache[i];
         // 1. Category Matching
         BOOL isMatch = FALSE;
-        if (hSelected == g_hNodeEnginesAll && item.szExtension == L".eng")
+        if (hSelected == g_pNodeEnginesAll && item.szExtension == L".eng")
         {
             isMatch = TRUE;
         }
-        else if (hSelected == g_hNodeWagonsAll && item.szExtension == L".wag")
+        else if (hSelected == g_pNodeWagonsAll && item.szExtension == L".wag")
         {
             isMatch = TRUE;
         }
-        else if (hSelected == g_hNodeDiesel && item.szCategory == L"Diesel")
+        else if (hSelected == g_pNodeDiesel && item.szCategory == L"Diesel")
         {
             isMatch = TRUE;
         }
-        else if (hSelected == g_hNodeElectric && item.szCategory == L"Electric")
+        else if (hSelected == g_pNodeElectric && item.szCategory == L"Electric")
         {
             isMatch = TRUE;
         }
-        else if (hSelected == g_hNodeSteam && item.szCategory == L"Steam")
+        else if (hSelected == g_pNodeSteam && item.szCategory == L"Steam")
         {
             isMatch = TRUE;
         }
-        else if (hSelected == g_hNodeControl && item.szCategory == L"Control")
+        else if (hSelected == g_pNodeControl && item.szCategory == L"Control")
         {
             isMatch = TRUE;
         }
-        else if (hSelected == g_hNodePassenger && item.szCategory == L"Passenger")
+        else if (hSelected == g_pNodePassenger && item.szCategory == L"Passenger")
         {
             isMatch = TRUE;
         }
-        else if (hSelected == g_hNodeFreight && item.szCategory == L"Freight")
+        else if (hSelected == g_pNodeFreight && item.szCategory == L"Freight")
         {
             isMatch = TRUE;
         }
-        else if (hSelected == g_hNodeTender && item.szCategory == L"Tender")
+        else if (hSelected == g_pNodeTender && item.szCategory == L"Tender")
         {
             isMatch = TRUE;
         }
@@ -2217,7 +2008,7 @@ void OnFilterPopupCallback(int colIndex, const std::vector<std::wstring>& checke
     else if (hWndList == g_hAssetList)
     {
         g_AssetList.SetActiveFilters(colIndex, checkedOptions);
-        HTREEITEM hSelected = TreeView_GetSelection(g_hCategoryTree);
+        CustomTreeNode* hSelected = g_CategoryTreeView.GetSelectedNode();
         PopulateAssetGrid(hSelected);
     }
     else if (hWndList == g_hEditorUnitList)
@@ -2253,22 +2044,22 @@ void ShowFilterPopup(HWND hWndList, int colIndex)
         {
             if (g_hCategoryTree)
             {
-                HTREEITEM hSelected = TreeView_GetSelection(g_hCategoryTree);
-                if (hSelected == g_hNodeEnginesAll || hSelected == g_hNodeEngines)
+                CustomTreeNode* hSelected = g_CategoryTreeView.GetSelectedNode();
+                if (hSelected == g_pNodeEnginesAll || hSelected == g_pNodeEngines)
                 {
                     allOptions = { L"Control", L"Diesel", L"Electric", L"Steam" };
                 }
-                else if (hSelected == g_hNodeWagonsAll || hSelected == g_hNodeWagons)
+                else if (hSelected == g_pNodeWagonsAll || hSelected == g_pNodeWagons)
                 {
                     allOptions = { L"Freight", L"Passenger", L"Tender" };
                 }
-                else if (hSelected == g_hNodeDiesel) allOptions = { L"Diesel" };
-                else if (hSelected == g_hNodeElectric) allOptions = { L"Electric" };
-                else if (hSelected == g_hNodeSteam) allOptions = { L"Steam" };
-                else if (hSelected == g_hNodeControl) allOptions = { L"Control" };
-                else if (hSelected == g_hNodePassenger) allOptions = { L"Passenger" };
-                else if (hSelected == g_hNodeFreight) allOptions = { L"Freight" };
-                else if (hSelected == g_hNodeTender) allOptions = { L"Tender" };
+                else if (hSelected == g_pNodeDiesel) allOptions = { L"Diesel" };
+                else if (hSelected == g_pNodeElectric) allOptions = { L"Electric" };
+                else if (hSelected == g_pNodeSteam) allOptions = { L"Steam" };
+                else if (hSelected == g_pNodeControl) allOptions = { L"Control" };
+                else if (hSelected == g_pNodePassenger) allOptions = { L"Passenger" };
+                else if (hSelected == g_pNodeFreight) allOptions = { L"Freight" };
+                else if (hSelected == g_pNodeTender) allOptions = { L"Tender" };
                 else
                 {
                     allOptions = { L"Control", L"Diesel", L"Electric", L"Steam", L"Freight", L"Passenger", L"Tender" };
@@ -2812,9 +2603,9 @@ static void UpdateConsistManagerRow(const std::wstring& filename)
 {
     if (filename.empty()) return;
 
-    for (size_t i = 0; i < g_ConsistList.GetItemCount(); ++i)
+    for (int i = 0; i < g_ConsistList.GetItemCount(); ++i)
     {
-        std::wstring fName = g_ConsistList.GetCellText((int)i, 4);
+        std::wstring fName = g_ConsistList.GetCellText(i, 4);
         if (_wcsicmp(fName.c_str(), filename.c_str()) == 0)
         {
             auto it = g_ConsistSessions.find(filename);
@@ -2912,9 +2703,9 @@ static bool SaveConsistSessionToDisk(HWND hWnd, const std::wstring& filename)
         it->second.isDirty = false;
         UpdateConsistManagerRow(filename);
 
-        for (size_t i = 0; i < g_ConsistList.GetItemCount(); ++i)
+        for (int i = 0; i < g_ConsistList.GetItemCount(); ++i)
         {
-            std::wstring fName = g_ConsistList.GetCellText((int)i, 4);
+            std::wstring fName = g_ConsistList.GetCellText(i, 4);
             if (_wcsicmp(fName.c_str(), filename.c_str()) == 0)
             {
                 SYSTEMTIME stLocal;
@@ -3069,9 +2860,9 @@ bool ApplyPoolMutationToSessions(
                 }
 
                 // Update row in g_ConsistList
-                for (size_t r = 0; r < g_ConsistList.GetItemCount(); ++r)
+                for (int r = 0; r < g_ConsistList.GetItemCount(); ++r)
                 {
-                    std::wstring rIdxStr = g_ConsistList.GetCellText((int)r, 3);
+                    std::wstring rIdxStr = g_ConsistList.GetCellText(r, 3);
                     if (_wtoi(rIdxStr.c_str()) == cIdx)
                     {
                         std::wstring curName = g_ConsistList.GetCellText((int)r, 0);
@@ -3998,12 +3789,12 @@ static bool SaveActivityConsistByIndex(HWND hWnd, int consistIndex, int listRowI
         }
         if (targetRow == -1)
         {
-            for (size_t r = 0; r < g_ConsistList.GetItemCount(); ++r)
+            for (int r = 0; r < g_ConsistList.GetItemCount(); ++r)
             {
-                std::wstring rIdxStr = g_ConsistList.GetCellText((int)r, 3);
+                std::wstring rIdxStr = g_ConsistList.GetCellText(r, 3);
                 if (_wtoi(rIdxStr.c_str()) == consistIndex)
                 {
-                    targetRow = (int)r;
+                    targetRow = r;
                     break;
                 }
             }
@@ -4371,11 +4162,11 @@ static void ActionCreateNewConsist(HWND hWnd)
     g_ConsistList.AddItem({ L"● " + dispName, L"0", L"Healthy", friendlyTime, candidateFile });
 
     // Select and load the new consist
-    for (size_t i = 0; i < g_ConsistList.GetItemCount(); ++i)
+    for (int i = 0; i < g_ConsistList.GetItemCount(); ++i)
     {
-        if (_wcsicmp(g_ConsistList.GetCellText((int)i, 4).c_str(), candidateFile.c_str()) == 0)
+        if (_wcsicmp(g_ConsistList.GetCellText(i, 4).c_str(), candidateFile.c_str()) == 0)
         {
-            g_ConsistList.SetSelectedIndex((int)i);
+            g_ConsistList.SetSelectedIndex(i);
             break;
         }
     }
@@ -4491,11 +4282,11 @@ static void ActionCloneConsist(HWND hWnd)
     g_ConsistList.AddItem({ cloneDispName, std::to_wstring(srcUnits.size()), L"Healthy", friendlyTime, cloneFile });
 
     // Select and load
-    for (size_t i = 0; i < g_ConsistList.GetItemCount(); ++i)
+    for (int i = 0; i < g_ConsistList.GetItemCount(); ++i)
     {
-        if (_wcsicmp(g_ConsistList.GetCellText((int)i, 4).c_str(), cloneFile.c_str()) == 0)
+        if (_wcsicmp(g_ConsistList.GetCellText(i, 4).c_str(), cloneFile.c_str()) == 0)
         {
-            g_ConsistList.SetSelectedIndex((int)i);
+            g_ConsistList.SetSelectedIndex(i);
             break;
         }
     }
@@ -4752,6 +4543,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_CREATE:
     {
         InitializeCriticalSection(&g_StockCacheCS);
+        Updater::CleanupOldUpdateFiles();
+        Updater::CheckForUpdates(hWnd, true);
         BOOL bLoaded = FALSE;
         hUIFont = GetAdaptiveSystemFont();
         // 1. Create Universal Custom Title Bar (0 to 40px)
@@ -4832,29 +4625,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
 
         // 5b. Create Top Deck: Route/Activities TreeView (for Activity Consists Tab)
-        g_hRouteTree = CreateWindowEx(
-            0, WC_TREEVIEW, L"",
-            WS_CHILD | TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | TVS_TRACKSELECT | TVS_INFOTIP,
-            0, 148, g_wCategorySplit, 200,
-            hWnd, (HMENU)IDC_ROUTETREE, hInst, NULL
-        );
+        g_hRouteTree = g_RouteTreeView.Create(hWnd, 0, 148, g_wCategorySplit, 200, IDC_ROUTETREE);
         if (g_hRouteTree)
         {
-            DWORD dwTreeEx = TVS_EX_DOUBLEBUFFER | TVS_EX_FADEINOUTEXPANDOS | TVS_EX_AUTOHSCROLL;
-            TreeView_SetExtendedStyle(g_hRouteTree, dwTreeEx, dwTreeEx);
-            SetWindowTheme(g_hRouteTree, L"DarkMode_Explorer", NULL);
-            SetWindowSubclass(g_hRouteTree, ModernTreeSubclassProc, 101, 0);
-            HWND hRouteTip = TreeView_GetToolTips(g_hRouteTree);
-            if (hRouteTip)
-            {
-                SetWindowTheme(hRouteTip, L"", L"");
-                SendMessage(hRouteTip, TTM_SETDELAYTIME, TTDT_INITIAL, (LPARAM)1200);
-                SendMessage(hRouteTip, TTM_SETDELAYTIME, TTDT_RESHOW, (LPARAM)600);
-                SendMessage(hRouteTip, TTM_SETDELAYTIME, TTDT_AUTOPOP, (LPARAM)10000);
-                RECT rcMargin = { 10, 4, 10, 4 };
-                SendMessage(hRouteTip, TTM_SETMARGIN, 0, (LPARAM)&rcMargin);
-                SetWindowSubclass(hRouteTip, ModernToolTipSubclassProc, 103, 0);
-            }
+            g_RouteTreeView.SetDarkMode(g_bDarkMode);
+            g_RouteTreeView.SetSelectionCallback([hWnd](CustomTreeNode* pNode) {
+                OnRouteActivitySelected(hWnd, pNode);
+            });
         }
 
         // 6. Create Bottom Deck: Stock Header (static control)
@@ -4870,29 +4647,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
 
         // 7. Create Bottom Deck: Stock Category TreeView
-        g_hCategoryTree = CreateWindowEx(
-            0, WC_TREEVIEW, L"",
-            WS_CHILD | WS_VISIBLE | TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | TVS_TRACKSELECT | TVS_INFOTIP,
-            0, 388, g_wCategorySplit, 300,
-            hWnd, (HMENU)IDC_STOCKTREE, hInst, NULL
-        );
+        g_hCategoryTree = g_CategoryTreeView.Create(hWnd, 0, 388, g_wCategorySplit, 300, IDC_STOCKTREE);
         if (g_hCategoryTree)
         {
-            DWORD dwTreeEx = TVS_EX_DOUBLEBUFFER | TVS_EX_FADEINOUTEXPANDOS | TVS_EX_AUTOHSCROLL;
-            TreeView_SetExtendedStyle(g_hCategoryTree, dwTreeEx, dwTreeEx);
-            SetWindowTheme(g_hCategoryTree, L"DarkMode_Explorer", NULL);
-            SetWindowSubclass(g_hCategoryTree, ModernTreeSubclassProc, 102, 0);
-            HWND hStockTip = TreeView_GetToolTips(g_hCategoryTree);
-            if (hStockTip)
-            {
-                SetWindowTheme(hStockTip, L"", L"");
-                SendMessage(hStockTip, TTM_SETDELAYTIME, TTDT_INITIAL, (LPARAM)1200);
-                SendMessage(hStockTip, TTM_SETDELAYTIME, TTDT_RESHOW, (LPARAM)600);
-                SendMessage(hStockTip, TTM_SETDELAYTIME, TTDT_AUTOPOP, (LPARAM)10000);
-                RECT rcMargin = { 10, 4, 10, 4 };
-                SendMessage(hStockTip, TTM_SETMARGIN, 0, (LPARAM)&rcMargin);
-                SetWindowSubclass(hStockTip, ModernToolTipSubclassProc, 104, 0);
-            }
+            g_CategoryTreeView.SetDarkMode(g_bDarkMode);
+            g_CategoryTreeView.SetSelectionCallback([](CustomTreeNode* pNode) {
+                PopulateAssetGrid(pNode);
+            });
         }
 
         // 8. Create Bottom Deck: Asset ListView (Custom Control)
@@ -5076,13 +4837,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             if (g_hConsistHeader)    SendMessage(g_hConsistHeader,   WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
             if (g_hConsistList)      SendMessage(g_hConsistList,     WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
-            if (g_hRouteTree)        SendMessage(g_hRouteTree,       WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
+            if (g_hRouteTree)        g_RouteTreeView.SetFont(hUIFont);
             if (g_hStockHeader)      SendMessage(g_hStockHeader,     WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
-            if (g_hCategoryTree)     SendMessage(g_hCategoryTree,    WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
-            HWND hRouteTip = g_hRouteTree ? TreeView_GetToolTips(g_hRouteTree) : NULL;
-            if (hRouteTip) SendMessage(hRouteTip, WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
-            HWND hStockTip = g_hCategoryTree ? TreeView_GetToolTips(g_hCategoryTree) : NULL;
-            if (hStockTip) SendMessage(hStockTip, WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
+            if (g_hCategoryTree)     g_CategoryTreeView.SetFont(hUIFont);
             if (g_hAssetList)        SendMessage(g_hAssetList,       WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
             if (g_hEditorPane)       SendMessage(g_hEditorPane,      WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
             if (g_hLabelTrainCfgId)  SendMessage(g_hLabelTrainCfgId, WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
@@ -5254,7 +5011,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             if (g_hCategoryTree)
             {
-                HTREEITEM hSelected = TreeView_GetSelection(g_hCategoryTree);
+                CustomTreeNode* hSelected = g_CategoryTreeView.GetSelectedNode();
                 PopulateAssetGrid(hSelected);
             }
             return 0;
@@ -5548,7 +5305,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (g_hCategoryTree)
         {
             g_AssetList.SetSortState(0, true);
-            HTREEITEM hSelected = TreeView_GetSelection(g_hCategoryTree);
+            CustomTreeNode* hSelected = g_CategoryTreeView.GetSelectedNode();
             PopulateAssetGrid(hSelected);
         }
 
@@ -5568,7 +5325,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         if (g_hCategoryTree)
         {
-            HTREEITEM hSelected = TreeView_GetSelection(g_hCategoryTree);
+            CustomTreeNode* hSelected = g_CategoryTreeView.GetSelectedNode();
             PopulateAssetGrid(hSelected);
         }
         return 0;
@@ -5590,7 +5347,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_szStockSearchQuery = szSearch;
             if (g_hCategoryTree)
             {
-                HTREEITEM hSelected = TreeView_GetSelection(g_hCategoryTree);
+                CustomTreeNode* hSelected = g_CategoryTreeView.GetSelectedNode();
                 PopulateAssetGrid(hSelected);
             }
         }
@@ -5782,6 +5539,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 CancelStockScan(g_hStockScanThread);
                 g_hStockScanThread = StartStockScan(hWnd, g_szBasePath);
             }
+            break;
+        case CMD_ACTION_ABOUT:
+            Updater::ShowAboutDialog(hWnd);
             break;
         }
     }
@@ -6003,8 +5763,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             if (g_hRouteTree != NULL)
             {
-                SetWindowPos(g_hRouteTree, NULL, 0, paneY + 29, g_wCategorySplit, g_hConsistSplit - 29, SWP_NOZORDER | SWP_NOCOPYBITS);
-                ShowWindow(g_hRouteTree, SW_SHOW);
+                g_RouteTreeView.SetBounds(0, paneY + 29, g_wCategorySplit, g_hConsistSplit - 29);
+                g_RouteTreeView.Show(true);
             }
             if (g_hConsistList != NULL)
             {
@@ -6019,7 +5779,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             if (g_hRouteTree != NULL)
             {
-                ShowWindow(g_hRouteTree, SW_HIDE);
+                g_RouteTreeView.Show(false);
             }
             if (g_hConsistList != NULL)
             {
@@ -6039,7 +5799,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         if (g_hCategoryTree != NULL)
         {
-            SetWindowPos(g_hCategoryTree, NULL, 0, bottomY + 29, g_wCategorySplit, bottomHeight - 29, SWP_NOZORDER | SWP_NOCOPYBITS);
+            g_CategoryTreeView.SetBounds(0, bottomY + 29, g_wCategorySplit, bottomHeight - 29);
         }
         if (g_hAssetList != NULL)
         {
@@ -6891,190 +6651,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 InvalidateRect(hWnd, NULL, TRUE);
             }
             return 0;
-        }
-        else if ((pnmhdr->hwndFrom == g_hCategoryTree || pnmhdr->hwndFrom == g_hRouteTree) && pnmhdr->code == NM_CUSTOMDRAW)
-        {
-            LPNMTVCUSTOMDRAW pTVCD = (LPNMTVCUSTOMDRAW)lParam;
-            switch (pTVCD->nmcd.dwDrawStage)
-            {
-            case CDDS_PREPAINT:
-                return CDRF_NOTIFYITEMDRAW;
-
-            case CDDS_ITEMPREPAINT:
-            {
-                HTREEITEM hItem = (HTREEITEM)pTVCD->nmcd.dwItemSpec;
-                HTREEITEM hSel = TreeView_GetSelection(pnmhdr->hwndFrom);
-                HTREEITEM hHover = (HTREEITEM)GetPropW(pnmhdr->hwndFrom, L"TreeHoverItem");
-
-                bool isSelected = (hItem == hSel) || (pTVCD->nmcd.uItemState & CDIS_SELECTED);
-                bool isHovered = (hItem == hHover);
-
-                HDC hdc = pTVCD->nmcd.hdc;
-                RECT rcClient;
-                GetClientRect(pnmhdr->hwndFrom, &rcClient);
-
-                RECT rcRow;
-                if (TreeView_GetItemRect(pnmhdr->hwndFrom, hItem, &rcRow, FALSE))
-                {
-                    rcRow.left = 0;
-                    rcRow.right = rcClient.right;
-
-                    COLORREF bgFill = CLR_INVALID;
-                    if (isSelected)
-                    {
-                        bgFill = RGB(38, 79, 120);
-                    }
-                    else if (isHovered)
-                    {
-                        bgFill = RGB(28, 55, 85);
-                    }
-                    else
-                    {
-                        bgFill = UITheme::DarkBackground;
-                    }
-
-                    HBRUSH hbr = CreateSolidBrush(bgFill);
-                    FillRect(hdc, &rcRow, hbr);
-                    DeleteObject(hbr);
-
-                    // Fetch item text & state
-                    wchar_t szText[256] = { 0 };
-                    TVITEMW tvi = { 0 };
-                    tvi.mask = TVIF_TEXT | TVIF_CHILDREN | TVIF_STATE;
-                    tvi.stateMask = TVIS_EXPANDED;
-                    tvi.hItem = hItem;
-                    tvi.pszText = szText;
-                    tvi.cchTextMax = 256;
-                    TreeView_GetItem(pnmhdr->hwndFrom, &tvi);
-
-                    RECT rcText;
-                    if (TreeView_GetItemRect(pnmhdr->hwndFrom, hItem, &rcText, TRUE))
-                    {
-                        // Draw chevron if item has children
-                        if (tvi.cChildren > 0)
-                        {
-                            int indent = TreeView_GetIndent(pnmhdr->hwndFrom);
-                            if (indent <= 0) indent = 16;
-                            int glyphW = 10;
-                            int glyphH = 10;
-                            int glyphX = rcText.left - indent + (indent - glyphW) / 2;
-                            int glyphY = rcText.top + (rcText.bottom - rcText.top - glyphH) / 2;
-                            RECT rcGlyph = { glyphX, glyphY, glyphX + glyphW, glyphY + glyphH };
-
-                            HTHEME hTheme = OpenThemeData(pnmhdr->hwndFrom, L"TREEVIEW");
-                            if (hTheme)
-                            {
-                                int stateId = (tvi.state & TVIS_EXPANDED) ? 2 /* GLPS_OPENED */ : 1 /* GLPS_CLOSED */;
-                                DrawThemeBackground(hTheme, hdc, 2 /* TVP_GLYPH */, stateId, &rcGlyph, NULL);
-                                CloseThemeData(hTheme);
-                            }
-                        }
-
-                        // Draw item text once (100% sharp ClearType, no double drawing)
-                        SetBkMode(hdc, TRANSPARENT);
-                        HFONT hOldFont = NULL;
-                        if (hUIFont) hOldFont = (HFONT)SelectObject(hdc, hUIFont);
-
-                        COLORREF textColor = RGB(255, 255, 255);
-                        if (!isSelected && !isHovered)
-                        {
-                            textColor = UITheme::TextPrimary;
-                        }
-                        SetTextColor(hdc, textColor);
-
-                        DrawTextW(hdc, szText, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                        if (hOldFont) SelectObject(hdc, hOldFont);
-                    }
-                }
-                return CDRF_SKIPDEFAULT;
-            }
-            }
-            return CDRF_DODEFAULT;
-        }
-        else if ((pnmhdr->hwndFrom == g_hCategoryTree || pnmhdr->hwndFrom == g_hRouteTree) && pnmhdr->code == TVN_GETINFOTIPW)
-        {
-            LPNMTVGETINFOTIPW pgit = (LPNMTVGETINFOTIPW)lParam;
-            if (pgit && pgit->hItem && pgit->pszText && pgit->cchTextMax > 0)
-            {
-                TVITEMW tvi = { 0 };
-                tvi.hItem = pgit->hItem;
-                tvi.mask = TVIF_TEXT;
-                tvi.pszText = pgit->pszText;
-                tvi.cchTextMax = pgit->cchTextMax;
-                TreeView_GetItem(pnmhdr->hwndFrom, &tvi);
-            }
-            return 0;
-        }
-        else if (pnmhdr->hwndFrom == g_hCategoryTree && pnmhdr->code == TVN_SELCHANGEDW)
-        {
-            LPNMTREEVIEWW pnmtv = (LPNMTREEVIEWW)lParam;
-            PopulateAssetGrid(pnmtv->itemNew.hItem);
-        }
-        else if (pnmhdr->hwndFrom == g_hRouteTree && pnmhdr->code == TVN_SELCHANGEDW)
-        {
-            LPNMTREEVIEWW pnmtv = (LPNMTREEVIEWW)lParam;
-            HTREEITEM hItem = pnmtv->itemNew.hItem;
-            if (hItem)
-            {
-                HTREEITEM hParent = TreeView_GetParent(g_hRouteTree, hItem);
-                if (hParent != NULL) // Selected an .act file child node!
-                {
-                    wchar_t szRouteFolder[MAX_PATH] = { 0 };
-                    wchar_t szActFile[MAX_PATH] = { 0 };
-
-                    TVITEMW tviParent = { 0 };
-                    tviParent.hItem = hParent;
-                    tviParent.mask = TVIF_TEXT;
-                    tviParent.pszText = szRouteFolder;
-                    tviParent.cchTextMax = MAX_PATH;
-                    TreeView_GetItem(g_hRouteTree, &tviParent);
-
-                    TVITEMW tviChild = { 0 };
-                    tviChild.hItem = hItem;
-                    tviChild.mask = TVIF_TEXT;
-                    tviChild.pszText = szActFile;
-                    tviChild.cchTextMax = MAX_PATH;
-                    TreeView_GetItem(g_hRouteTree, &tviChild);
-
-                    std::wstring fullActPath = g_szBasePath;
-                    if (!fullActPath.empty() && fullActPath.back() != L'\\') fullActPath += L'\\';
-                    fullActPath += L"ROUTES\\" + std::wstring(szRouteFolder) + L"\\ACTIVITIES\\" + std::wstring(szActFile);
-
-                    g_CurrentActivityFilePath = fullActPath;
-                    g_CurrentActivityData = ActivityConsistReader::LoadActivityConsists(fullActPath, g_szBasePath);
-
-                    for (const auto& con : g_CurrentActivityData.consists)
-                    {
-                        if (con.isBroken)
-                        {
-                            g_InitiallyBrokenConsists.insert(g_CurrentActivityFilePath + L"#" + con.id);
-                        }
-                    }
-
-                    PopulateActivityConsistList();
-
-                    // Automatically select and load first consist into workspace if available
-                    if (!g_CurrentActivityData.consists.empty())
-                    {
-                        g_ConsistList.SetSelectedIndex(0);
-                        LoadAndDisplayActivityConsist(hWnd, 0);
-                    }
-                    else
-                    {
-                        ResetConsistEditorWorkspace(hWnd);
-                    }
-                }
-                else
-                {
-                    // Root route node selected: clear activity consist list and reset workspace
-                    g_CurrentActivityData = ActivityConsistReader::ActivityData();
-                    g_CurrentActivityFilePath = L"";
-                    g_ConsistList.Clear();
-                    SetWindowTextW(g_hConsistHeader, L"  Activity Consists");
-                    ResetConsistEditorWorkspace(hWnd);
-                }
-            }
         }
         else if (pnmhdr->code == NM_SETFOCUS)
         {

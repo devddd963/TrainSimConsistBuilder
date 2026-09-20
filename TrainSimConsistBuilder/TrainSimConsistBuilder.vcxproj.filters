@@ -84,7 +84,13 @@
     <ClInclude Include="ui\CustomScrollBar.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ui\CustomTreeView.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ui\FluentDragGhost.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Updater.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
@@ -147,6 +153,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ui\CustomScrollBar.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ui\CustomTreeView.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Updater.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

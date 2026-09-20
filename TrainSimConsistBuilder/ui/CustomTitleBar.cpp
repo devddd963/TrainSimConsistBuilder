@@ -278,7 +278,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         SetTextColor(memDC, RGB(225, 225, 225));
 
         RECT rcTitleText = { iconX + 22, 0, w - 150, row1H };
-        DrawTextW(memDC, L"Train Sim Consist Builder", -1, &rcTitleText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(memDC, L"Train Sim Consist Builder for Open Rails", -1, &rcTitleText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         // Caption Buttons (Flush to top-right corner, 46px x 30px)
         int btnW = 46;

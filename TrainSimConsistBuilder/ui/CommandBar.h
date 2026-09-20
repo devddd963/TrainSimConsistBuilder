@@ -20,6 +20,7 @@
 #define CMD_ACTION_POOL_MUTATOR       13
 #define CMD_ACTION_MORE               11
 #define CMD_ACTION_DETAILS            12
+#define CMD_ACTION_ABOUT              14
 
 BOOL RegisterCommandBarClass(HINSTANCE hInstance);
 HWND CreateCommandBar(HWND hParent, HINSTANCE hInstance, int x, int y, int width, int height, UINT_PTR controlId);

@@ -192,6 +192,8 @@
     <ClInclude Include="ui\PoolMutatorDlg.h" />
     <ClInclude Include="ui\CustomTitleBar.h" />
     <ClInclude Include="ui\CustomScrollBar.h" />
+    <ClInclude Include="ui\CustomTreeView.h" />
+    <ClInclude Include="src\Updater.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\TrainSimConsistBuilder.cpp" />
@@ -226,6 +228,8 @@
     <ClCompile Include="ui\PoolMutatorDlg.cpp" />
     <ClCompile Include="ui\CustomTitleBar.cpp" />
     <ClCompile Include="ui\CustomScrollBar.cpp" />
+    <ClCompile Include="ui\CustomTreeView.cpp" />
+    <ClCompile Include="src\Updater.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="TrainSimConsistBuilder.rc" />
