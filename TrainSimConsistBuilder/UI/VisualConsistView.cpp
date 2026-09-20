@@ -4,7 +4,7 @@
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
 #include "VisualConsistView.h"
-#include "../src/Resource.h"
+#include "../SRC/Resource.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <uxtheme.h>

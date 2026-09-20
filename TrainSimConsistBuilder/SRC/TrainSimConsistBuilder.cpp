@@ -7,9 +7,9 @@ ActivePane g_ActivePane = PANE_CONSIST;
 
 #include "framework.h"
 #include "TrainSimConsistBuilder.h"
-#include "../ui/AddressBar.h"
-#include "../ui/UITheme.h"
-#include "../ui/CustomTreeView.h"
+#include "../UI/AddressBar.h"
+#include "../UI/UITheme.h"
+#include "../UI/CustomTreeView.h"
 #include <vector>
 #include <string>
 #include <sstream>
@@ -48,20 +48,20 @@ CustomTreeNode* g_pNodeFreight = nullptr;
 CustomTreeNode* g_pNodeTender = nullptr;
 
 #include "AssetsParser.h"
-#include "../ui/FilterPopup.h"
-#include "../ui/ModernMessageBox.h"
-#include "../ui/VisualConsistView.h"
-#include "../ui/FluentDragGhost.h"
-#include "../ui/ModernContextMenu.h"
-#include "../ui/BatchConsistGenerationWizardDlg.h"
-#include "../ui/PoolManagerDlg.h"
-#include "../ui/BatchConsistGeneratorDlg.h"
-#include "../ui/PoolMutatorDlg.h"
+#include "../UI/FilterPopup.h"
+#include "../UI/ModernMessageBox.h"
+#include "../UI/VisualConsistView.h"
+#include "../UI/FluentDragGhost.h"
+#include "../UI/ModernContextMenu.h"
+#include "../UI/BatchConsistGenerationWizardDlg.h"
+#include "../UI/PoolManagerDlg.h"
+#include "../UI/BatchConsistGeneratorDlg.h"
+#include "../UI/PoolMutatorDlg.h"
 #include "PoolMutator.h"
-#include "../ui/CustomTitleBar.h"
+#include "../UI/CustomTitleBar.h"
 
 LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
-#include "../ui/CustomListControl.h"
+#include "../UI/CustomListControl.h"
 #include "ConsistReader.h"
 #include "ConsistWriter.h"
 #include "ActivityConsistReader.h"

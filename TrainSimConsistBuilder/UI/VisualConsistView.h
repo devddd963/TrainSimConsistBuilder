@@ -2,7 +2,7 @@
 #include <windows.h>
 #include <vector>
 #include <string>
-#include "../src/ConsistReader.h"
+#include "../SRC/ConsistReader.h"
 
 #define WM_VISUAL_UNIT_SELECTED (WM_USER + 401)
 #define WM_VISUAL_UNIT_FLIPPED  (WM_USER + 402)

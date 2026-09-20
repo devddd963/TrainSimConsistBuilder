@@ -15,150 +15,150 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\framework.h">
+    <ClInclude Include="SRC\framework.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\Resource.h">
+    <ClInclude Include="SRC\Resource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\targetver.h">
+    <ClInclude Include="SRC\targetver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\TrainSimConsistBuilder.h">
+    <ClInclude Include="SRC\TrainSimConsistBuilder.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="ui\AddressBar.h">
+    <ClInclude Include="UI\AddressBar.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="ui\NavToolbar.h">
+    <ClInclude Include="UI\NavToolbar.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="ui\CommandBar.h">
+    <ClInclude Include="UI\CommandBar.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\ConsistReader.h">
+    <ClInclude Include="SRC\ConsistReader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="ui\CustomListControl.h">
+    <ClInclude Include="UI\CustomListControl.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\AssetsParser.h">
+    <ClInclude Include="SRC\AssetsParser.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\ControlParser.h">
+    <ClInclude Include="SRC\ControlParser.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\DieselParser.h">
+    <ClInclude Include="SRC\DieselParser.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\ElectricParser.h">
+    <ClInclude Include="SRC\ElectricParser.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\SteamParser.h">
+    <ClInclude Include="SRC\SteamParser.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\PassengerParser.h">
+    <ClInclude Include="SRC\PassengerParser.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\FreightParser.h">
+    <ClInclude Include="SRC\FreightParser.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\TenderParser.h">
+    <ClInclude Include="SRC\TenderParser.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="ui\UITheme.h">
+    <ClInclude Include="UI\UITheme.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\ActivityConsistReader.h">
+    <ClInclude Include="SRC\ActivityConsistReader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\ActivityConsistWriter.h">
+    <ClInclude Include="SRC\ActivityConsistWriter.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\BatchConsistGenerationWizard.h">
+    <ClInclude Include="SRC\BatchConsistGenerationWizard.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="ui\BatchConsistGenerationWizardDlg.h">
+    <ClInclude Include="UI\BatchConsistGenerationWizardDlg.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="ui\CustomScrollBar.h">
+    <ClInclude Include="UI\CustomScrollBar.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="ui\CustomTreeView.h">
+    <ClInclude Include="UI\CustomTreeView.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="ui\FluentDragGhost.h">
+    <ClInclude Include="UI\FluentDragGhost.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\Updater.h">
+    <ClInclude Include="SRC\Updater.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\TrainSimConsistBuilder.cpp">
+    <ClCompile Include="SRC\TrainSimConsistBuilder.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ui\AddressBar.cpp">
+    <ClCompile Include="UI\AddressBar.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ui\NavToolbar.cpp">
+    <ClCompile Include="UI\NavToolbar.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ui\CommandBar.cpp">
+    <ClCompile Include="UI\CommandBar.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\ConsistReader.cpp">
+    <ClCompile Include="SRC\ConsistReader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ui\CustomListControl.cpp">
+    <ClCompile Include="UI\CustomListControl.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ui\FluentDragGhost.cpp">
+    <ClCompile Include="UI\FluentDragGhost.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\AssetsParser.cpp">
+    <ClCompile Include="SRC\AssetsParser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\ControlParser.cpp">
+    <ClCompile Include="SRC\ControlParser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\DieselParser.cpp">
+    <ClCompile Include="SRC\DieselParser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\ElectricParser.cpp">
+    <ClCompile Include="SRC\ElectricParser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\SteamParser.cpp">
+    <ClCompile Include="SRC\SteamParser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\PassengerParser.cpp">
+    <ClCompile Include="SRC\PassengerParser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\FreightParser.cpp">
+    <ClCompile Include="SRC\FreightParser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\TenderParser.cpp">
+    <ClCompile Include="SRC\TenderParser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\ActivityConsistReader.cpp">
+    <ClCompile Include="SRC\ActivityConsistReader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\ActivityConsistWriter.cpp">
+    <ClCompile Include="SRC\ActivityConsistWriter.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\BatchConsistGenerationWizard.cpp">
+    <ClCompile Include="SRC\BatchConsistGenerationWizard.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ui\BatchConsistGenerationWizardDlg.cpp">
+    <ClCompile Include="UI\BatchConsistGenerationWizardDlg.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ui\CustomScrollBar.cpp">
+    <ClCompile Include="UI\CustomScrollBar.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ui\CustomTreeView.cpp">
+    <ClCompile Include="UI\CustomTreeView.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\Updater.cpp">
+    <ClCompile Include="SRC\Updater.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

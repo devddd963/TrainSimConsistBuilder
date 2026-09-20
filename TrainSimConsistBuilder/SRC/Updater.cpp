@@ -7,15 +7,15 @@
 #include <sstream>
 #include <algorithm>
 #include <thread>
-#include "../ui/ModernMessageBox.h"
-#include "../ui/UITheme.h"
+#include "../UI/ModernMessageBox.h"
+#include "../UI/UITheme.h"
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "shell32.lib")
 
 namespace Updater
 {
-    static const wchar_t GITHUB_API_URL[] = L"https://api.github.com/repos/devddd963/TrainSimConsistBuilder/releases/latest";
+    static const wchar_t VERSION_JSON_URL[] = L"https://raw.githubusercontent.com/devddd963/TrainSimConsistBuilder/main/Version.json";
 
     static std::wstring ToWide(const std::string& str)
     {
@@ -38,9 +38,9 @@ namespace Updater
         InternetSetOptionW(hInternet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
         InternetSetOptionW(hInternet, INTERNET_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-        DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_SECURE;
+        DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_PRAGMA_NOCACHE | INTERNET_FLAG_SECURE;
         HINTERNET hUrl = InternetOpenUrlW(hInternet, url.c_str(),
-            L"Accept: application/vnd.github.v3+json\r\nUser-Agent: TrainSimConsistBuilder-Updater\r\n",
+            L"Accept: application/json\r\nUser-Agent: TrainSimConsistBuilder-Updater\r\n",
             -1, flags, 0);
 
         if (hUrl)
@@ -82,122 +82,55 @@ namespace Updater
         return json.substr(start, pos - start);
     }
 
-    static int ExtractBuildNumber(const std::string& text)
+    static int ExtractJsonInt(const std::string& json, const std::string& key)
     {
-        // Search for build pattern like "build36904", "build 36904", "build: 36904", "-36904", or any 5 digit number >= 30000
-        std::string lower = text;
-        for (char& c : lower) c = (char)tolower((unsigned char)c);
+        std::string searchKey = "\"" + key + "\":";
+        size_t pos = json.find(searchKey);
+        if (pos == std::string::npos) return 0;
 
-        size_t pos = lower.find("build");
-        if (pos != std::string::npos)
+        pos += searchKey.length();
+        while (pos < json.length() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\r' || json[pos] == '\n' || json[pos] == '"')) pos++;
+        if (pos >= json.length()) return 0;
+
+        int num = 0;
+        while (pos < json.length() && isdigit((unsigned char)json[pos]))
         {
-            size_t idx = pos + 5;
-            while (idx < lower.length() && !isdigit((unsigned char)lower[idx])) idx++;
-            if (idx < lower.length())
-            {
-                int num = 0;
-                while (idx < lower.length() && isdigit((unsigned char)lower[idx]))
-                {
-                    num = num * 10 + (lower[idx] - '0');
-                    idx++;
-                }
-                if (num > 0) return num;
-            }
+            num = num * 10 + (json[pos] - '0');
+            pos++;
         }
-
-        // Search for 5-digit number starting with 3
-        for (size_t i = 0; i + 4 < text.length(); ++i)
-        {
-            if (text[i] == '3' && isdigit((unsigned char)text[i + 1]) && isdigit((unsigned char)text[i + 2]) &&
-                isdigit((unsigned char)text[i + 3]) && isdigit((unsigned char)text[i + 4]))
-            {
-                if (i == 0 || !isdigit((unsigned char)text[i - 1]))
-                {
-                    if (i + 5 >= text.length() || !isdigit((unsigned char)text[i + 5]))
-                    {
-                        return std::stoi(text.substr(i, 5));
-                    }
-                }
-            }
-        }
-
-        return 0;
+        return num;
     }
 
-    static bool ParseReleaseJson(const std::string& json, UpdateInfo& outInfo)
+    static bool ParseVersionJson(const std::string& json, UpdateInfo& outInfo)
     {
         if (json.empty()) return false;
 
-        std::string tagName = ExtractJsonString(json, "tag_name");
-        std::string releaseName = ExtractJsonString(json, "name");
-        std::string body = ExtractJsonString(json, "body");
+        std::string version = ExtractJsonString(json, "version");
+        int build = ExtractJsonInt(json, "build");
+        std::string changelog = ExtractJsonString(json, "changelog");
 
-        outInfo.remoteVersion = ToWide(tagName);
-        outInfo.releaseTitle = ToWide(releaseName);
-        outInfo.releaseNotes = ToWide(body);
-
-        // Find build number from tag, title or body
-        int buildNum = ExtractBuildNumber(tagName);
-        if (buildNum == 0) buildNum = ExtractBuildNumber(releaseName);
-        if (buildNum == 0) buildNum = ExtractBuildNumber(body);
-
-        outInfo.remoteBuild = buildNum;
-
-        // Search in assets for architecture matching binary
-        std::string targetPattern;
 #if defined(_WIN64)
-        targetPattern = "_x64.exe";
+        std::string downloadUrl = ExtractJsonString(json, "download_x64");
 #else
-        targetPattern = "_x32.exe";
+        std::string downloadUrl = ExtractJsonString(json, "download_x32");
 #endif
 
-        size_t posAssets = json.find("\"assets\":");
-        if (posAssets != std::string::npos)
-        {
-            std::string assetsBlock = json.substr(posAssets);
-            size_t posAsset = 0;
-            while ((posAsset = assetsBlock.find("\"name\":", posAsset)) != std::string::npos)
-            {
-                size_t startName = assetsBlock.find('"', posAsset + 7);
-                if (startName != std::string::npos)
-                {
-                    size_t endName = assetsBlock.find('"', startName + 1);
-                    if (endName != std::string::npos)
-                    {
-                        std::string assetFileName = assetsBlock.substr(startName + 1, endName - startName - 1);
-                        std::string assetLower = assetFileName;
-                        for (char& c : assetLower) c = (char)tolower((unsigned char)c);
+        if (version.empty() && build == 0) return false;
 
-                        if (assetLower.find(targetPattern) != std::string::npos ||
-                            (targetPattern == "_x64.exe" && assetLower.find("x64") != std::string::npos) ||
-                            (targetPattern == "_x32.exe" && assetLower.find("x32") != std::string::npos))
-                        {
-                            // Find corresponding browser_download_url
-                            size_t posUrl = assetsBlock.find("\"browser_download_url\":", posAsset);
-                            if (posUrl != std::string::npos)
-                            {
-                                size_t startUrl = assetsBlock.find('"', posUrl + 23);
-                                if (startUrl != std::string::npos)
-                                {
-                                    size_t endUrl = assetsBlock.find('"', startUrl + 1);
-                                    if (endUrl != std::string::npos)
-                                    {
-                                        outInfo.downloadUrl = ToWide(assetsBlock.substr(startUrl + 1, endUrl - startUrl - 1));
-                                    }
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-                posAsset += 8;
-            }
+        outInfo.remoteVersion = ToWide(version);
+        outInfo.remoteBuild = build;
+        outInfo.releaseNotes = ToWide(changelog);
+        outInfo.releaseTitle = L"Train Sim Consist Builder v" + outInfo.remoteVersion;
+
+        if (!downloadUrl.empty())
+        {
+            outInfo.downloadUrl = ToWide(downloadUrl);
         }
-
-        // If no direct asset match, fallback to releases latest html url
-        if (outInfo.downloadUrl.empty())
+        else
         {
-            outInfo.downloadUrl = ToWide(ExtractJsonString(json, "html_url"));
+            // Default fallback
+            outInfo.downloadUrl = L"https://github.com/devddd963/TrainSimConsistBuilder/releases/download/v" +
+                outInfo.remoteVersion + L"/" + APP_TARGET_EXE_NAME;
         }
 
         if (outInfo.remoteBuild > APP_BUILD_NUMBER)
@@ -323,9 +256,9 @@ namespace Updater
     {
         std::thread([hWndParent, silent]()
         {
-            std::string json = FetchUrlContent(GITHUB_API_URL);
+            std::string json = FetchUrlContent(VERSION_JSON_URL);
             UpdateInfo info;
-            bool success = ParseReleaseJson(json, info);
+            bool success = ParseVersionJson(json, info);
 
             if (!success || json.empty())
             {
@@ -346,9 +279,9 @@ namespace Updater
                     L" (Build " + std::to_wstring(info.remoteBuild) + L")\n"
                     L"Architecture: " + std::wstring(APP_ARCH) + L"\n\n";
 
-                if (!info.releaseTitle.empty())
+                if (!info.releaseNotes.empty())
                 {
-                    msg += L"Release: " + info.releaseTitle + L"\n\n";
+                    msg += L"Changelog: " + info.releaseNotes + L"\n\n";
                 }
 
                 msg += L"Would you like to download and install this update now?";

@@ -3,10 +3,10 @@
 #include "ModernContextMenu.h"
 #include "UITheme.h"
 #include "ModernMessageBox.h"
-#include "../src/BatchConsistGenerator.h"
-#include "../src/PoolManager.h"
-#include "../src/TrainSimConsistBuilder.h"
-#include "../src/AssetsParser.h"
+#include "../SRC/BatchConsistGenerator.h"
+#include "../SRC/PoolManager.h"
+#include "../SRC/TrainSimConsistBuilder.h"
+#include "../SRC/AssetsParser.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <string>

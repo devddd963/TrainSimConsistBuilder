@@ -3,7 +3,7 @@
 #include <windows.h>
 #include <vector>
 #include <string>
-#include "../src/PoolMutator.h"
+#include "../SRC/PoolMutator.h"
 
 // Displays the Consist Pool Mutator & Injector Dialog
 void ShowPoolMutatorDialog(

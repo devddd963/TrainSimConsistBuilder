@@ -7,9 +7,9 @@
 #include "UITheme.h"
 #include "ModernMessageBox.h"
 #include "ModernContextMenu.h"
-#include "../src/PoolMutator.h"
-#include "../src/PoolManager.h"
-#include "../src/TrainSimConsistBuilder.h"
+#include "../SRC/PoolMutator.h"
+#include "../SRC/PoolManager.h"
+#include "../SRC/TrainSimConsistBuilder.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <string>

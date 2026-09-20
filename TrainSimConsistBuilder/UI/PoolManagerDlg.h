@@ -2,7 +2,7 @@
 
 #include <windows.h>
 #include <vector>
-#include "../src/ConsistReader.h"
+#include "../SRC/ConsistReader.h"
 
 // Displays the Consist Pool Manager Dialog
 void ShowPoolManagerDialog(HWND hWndParent);

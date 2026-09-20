@@ -28,8 +28,8 @@
 #define DWMSBT_MAINWINDOW 2
 #define DWMSBT_TABBEDWINDOW 4
 
-#include "../ui/NavToolbar.h"
-#include "../ui/CommandBar.h"
+#include "../UI/NavToolbar.h"
+#include "../UI/CommandBar.h"
 
 #define IDC_MAIN_TABCONTROL 1001
 #define IDC_NAVTOOLBAR      1002

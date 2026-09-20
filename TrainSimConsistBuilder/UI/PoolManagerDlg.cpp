@@ -2,9 +2,9 @@
 #include "BatchConsistGeneratorDlg.h"
 #include "UITheme.h"
 #include "ModernMessageBox.h"
-#include "../src/PoolManager.h"
-#include "../src/TrainSimConsistBuilder.h"
-#include "../src/AssetsParser.h"
+#include "../SRC/PoolManager.h"
+#include "../SRC/TrainSimConsistBuilder.h"
+#include "../SRC/AssetsParser.h"
 #include "FluentDragGhost.h"
 #include "CustomScrollBar.h"
 #include <windowsx.h>
