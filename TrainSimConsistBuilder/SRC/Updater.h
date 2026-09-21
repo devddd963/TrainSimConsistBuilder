@@ -6,7 +6,7 @@ namespace Updater
 {
     const wchar_t APP_TITLE[] = L"Train Sim Consist Builder for Open Rails";
     const wchar_t APP_VERSION[] = L"6.0.0";
-    const int APP_BUILD_NUMBER = 36903;
+    const int APP_BUILD_NUMBER = 36906;
 
 #if defined(_WIN64)
     const wchar_t APP_ARCH[] = L"64-bit (x64)";
@@ -26,6 +26,12 @@ namespace Updater
         std::wstring downloadUrl;
         size_t assetSize = 0;
     };
+
+    // Returns current running build number (reflects latest installed update)
+    int GetCurrentBuildNumber();
+
+    // Returns current version string
+    std::wstring GetCurrentVersion();
 
     // Clean up any leftover .old / .tmp files from previous updates
     void CleanupOldUpdateFiles();

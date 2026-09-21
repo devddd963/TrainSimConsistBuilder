@@ -17,6 +17,44 @@ namespace Updater
 {
     static const wchar_t VERSION_JSON_URL[] = L"https://raw.githubusercontent.com/devddd963/TrainSimConsistBuilder/main/Version.json";
 
+    int GetCurrentBuildNumber()
+    {
+        int buildNum = APP_BUILD_NUMBER;
+        HKEY hKey = NULL;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder\\Settings", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+        {
+            DWORD dwType = 0;
+            DWORD dwVal = 0;
+            DWORD dwSize = sizeof(dwVal);
+            if (RegQueryValueExW(hKey, L"InstalledBuild", NULL, &dwType, (LPBYTE)&dwVal, &dwSize) == ERROR_SUCCESS)
+            {
+                if (dwVal > (DWORD)buildNum)
+                    buildNum = (int)dwVal;
+            }
+            RegCloseKey(hKey);
+        }
+        return buildNum;
+    }
+
+    std::wstring GetCurrentVersion()
+    {
+        std::wstring ver = APP_VERSION;
+        HKEY hKey = NULL;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder\\Settings", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+        {
+            wchar_t szBuf[64] = { 0 };
+            DWORD dwSize = sizeof(szBuf);
+            DWORD dwType = 0;
+            if (RegQueryValueExW(hKey, L"InstalledVersion", NULL, &dwType, (LPBYTE)szBuf, &dwSize) == ERROR_SUCCESS)
+            {
+                if (szBuf[0] != L'\0')
+                    ver = szBuf;
+            }
+            RegCloseKey(hKey);
+        }
+        return ver;
+    }
+
     static std::wstring ToWide(const std::string& str)
     {
         if (str.empty()) return L"";
@@ -133,7 +171,7 @@ namespace Updater
                 outInfo.remoteVersion + L"/" + APP_TARGET_EXE_NAME;
         }
 
-        if (outInfo.remoteBuild > APP_BUILD_NUMBER)
+        if (outInfo.remoteBuild > GetCurrentBuildNumber())
         {
             outInfo.isUpdateAvailable = true;
         }
@@ -229,6 +267,20 @@ namespace Updater
             }
         }
 
+        // Save installed build and version to registry before restart
+        HKEY hKey = NULL;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder\\Settings", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS)
+        {
+            DWORD dwBuild = (DWORD)info.remoteBuild;
+            RegSetValueExW(hKey, L"InstalledBuild", 0, REG_DWORD, (const BYTE*)&dwBuild, sizeof(dwBuild));
+            if (!info.remoteVersion.empty())
+            {
+                DWORD dwBytes = (DWORD)((info.remoteVersion.length() + 1) * sizeof(wchar_t));
+                RegSetValueExW(hKey, L"InstalledVersion", 0, REG_SZ, (const BYTE*)info.remoteVersion.c_str(), dwBytes);
+            }
+            RegCloseKey(hKey);
+        }
+
         // Atomic replacement and restart
         DeleteFileW(szOldExe.c_str());
         if (!MoveFileExW(szCurrentExe, szOldExe.c_str(), MOVEFILE_REPLACE_EXISTING))
@@ -271,11 +323,14 @@ namespace Updater
                 return;
             }
 
+            int currentBuild = GetCurrentBuildNumber();
+            std::wstring currentVer = GetCurrentVersion();
+
             if (info.isUpdateAvailable)
             {
                 std::wstring msg = L"A new update is available!\n\n"
-                    L"Current Version: " + std::wstring(APP_VERSION) + L" (Build " + std::to_wstring(APP_BUILD_NUMBER) + L")\n"
-                    L"Latest Version: " + (info.remoteVersion.empty() ? std::wstring(APP_VERSION) : info.remoteVersion) +
+                    L"Current Version: " + currentVer + L" (Build " + std::to_wstring(currentBuild) + L")\n"
+                    L"Latest Version: " + (info.remoteVersion.empty() ? currentVer : info.remoteVersion) +
                     L" (Build " + std::to_wstring(info.remoteBuild) + L")\n"
                     L"Architecture: " + std::wstring(APP_ARCH) + L"\n\n";
 
@@ -297,8 +352,8 @@ namespace Updater
                 if (!silent)
                 {
                     std::wstring msg = L"You are using the latest version of " + std::wstring(APP_TITLE) + L".\n\n"
-                        L"Version: " + std::wstring(APP_VERSION) + L"\n"
-                        L"Build: " + std::to_wstring(APP_BUILD_NUMBER) + L"\n"
+                        L"Version: " + currentVer + L"\n"
+                        L"Build: " + std::to_wstring(currentBuild) + L"\n"
                         L"Architecture: " + std::wstring(APP_ARCH);
 
                     ShowModernMessageBox(hWndParent, msg.c_str(), L"Check for Updates", MB_OK | MB_ICONINFORMATION);
@@ -309,8 +364,11 @@ namespace Updater
 
     void ShowAboutDialog(HWND hWndParent)
     {
+        int currentBuild = GetCurrentBuildNumber();
+        std::wstring currentVer = GetCurrentVersion();
+
         std::wstring msg = std::wstring(APP_TITLE) + L"\n\n" +
-            L"Version: " + std::wstring(APP_VERSION) + L" (Build " + std::to_wstring(APP_BUILD_NUMBER) + L")\n" +
+            L"Version: " + currentVer + L" (Build " + std::to_wstring(currentBuild) + L")\n" +
             L"Architecture: " + std::wstring(APP_ARCH) + L"\n\n" +
             L"A modern, high-performance visual consist editor and management suite for Open Rails.\n\n" +
             L"Would you like to check for online updates now?";
