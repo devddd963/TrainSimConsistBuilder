@@ -12,6 +12,7 @@
 
 struct TitleBarTab
 {
+    std::wstring icon;
     std::wstring text;
     RECT rc;
 };
@@ -60,17 +61,17 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
     {
         g_TitleBarState.hFontTitle = CreateCustomFont(9.0f, FW_NORMAL, L"Segoe UI");
         g_TitleBarState.hFontTabs  = CreateCustomFont(9.0f, FW_SEMIBOLD, L"Segoe UI");
-        g_TitleBarState.hFontIcons = CreateCustomFont(8.5f, FW_NORMAL, L"Segoe Fluent Icons");
+        g_TitleBarState.hFontIcons = CreateCustomFont(9.5f, FW_NORMAL, L"Segoe Fluent Icons");
         if (!g_TitleBarState.hFontIcons)
-            g_TitleBarState.hFontIcons = CreateCustomFont(8.5f, FW_NORMAL, L"Segoe MDL2 Assets");
+            g_TitleBarState.hFontIcons = CreateCustomFont(9.5f, FW_NORMAL, L"Segoe MDL2 Assets");
 
         g_TitleBarState.hAppIcon = (HICON)GetClassLongPtrW(hMainWnd, GCLP_HICONSM);
         if (!g_TitleBarState.hAppIcon)
             g_TitleBarState.hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
 
         g_TitleBarState.tabs.clear();
-        g_TitleBarState.tabs.push_back({ L"MAIN CONSISTS", { 0 } });
-        g_TitleBarState.tabs.push_back({ L"ACTIVITY CONSISTS", { 0 } });
+        g_TitleBarState.tabs.push_back({ L"\xE7C0", L"MAIN CONSISTS", { 0 } });
+        g_TitleBarState.tabs.push_back({ L"\xE707", L"ACTIVITY CONSISTS", { 0 } });
         return 0;
     }
 
@@ -334,7 +335,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         DeleteObject(hbrRibbon);
 
         int tabStartX = 10;
-        int tabW = 160;
+        int tabW = 235;
         int tabTop = row1H + 3;
         int baselineY = h;
         const int r_b = 6;
@@ -395,11 +396,18 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
                 SelectObject(memDC, hOldOutlinePen);
                 DeleteObject(hOutlinePen);
 
+                // Draw Tab Icon and Text (Left Aligned like Explorer)
+                int contentLeft = tabLeft + 12;
+                RECT rcIcon = { contentLeft, row1H + 2, contentLeft + 20, h };
+                RECT rcText = { contentLeft + 24, row1H + 2, tabRight - 10, h };
+
+                SelectObject(memDC, g_TitleBarState.hFontIcons);
+                SetTextColor(memDC, RGB(255, 255, 255));
+                DrawTextW(memDC, g_TitleBarState.tabs[i].icon.c_str(), -1, &rcIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
                 SelectObject(memDC, g_TitleBarState.hFontTabs);
                 SetTextColor(memDC, RGB(255, 255, 255));
-                RECT rcTabText = rcTab;
-                rcTabText.top = row1H + 2;
-                DrawTextW(memDC, g_TitleBarState.tabs[i].text.c_str(), -1, &rcTabText, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, g_TitleBarState.tabs[i].text.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
             else
             {
@@ -427,11 +435,20 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
                     DeleteObject(hNullPen);
                 }
 
+                // Draw Tab Icon and Text (Left Aligned like Explorer)
+                int contentLeft = tabLeft + 12;
+                RECT rcIcon = { contentLeft, row1H + 2, contentLeft + 20, h };
+                RECT rcText = { contentLeft + 24, row1H + 2, tabRight - 10, h };
+
+                COLORREF clrTabContent = isHover ? RGB(230, 225, 225) : RGB(180, 175, 175);
+
+                SelectObject(memDC, g_TitleBarState.hFontIcons);
+                SetTextColor(memDC, clrTabContent);
+                DrawTextW(memDC, g_TitleBarState.tabs[i].icon.c_str(), -1, &rcIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
                 SelectObject(memDC, g_TitleBarState.hFontTabs);
-                SetTextColor(memDC, RGB(180, 175, 175));
-                RECT rcTabText = rcTab;
-                rcTabText.top = row1H + 2;
-                DrawTextW(memDC, g_TitleBarState.tabs[i].text.c_str(), -1, &rcTabText, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                SetTextColor(memDC, clrTabContent);
+                DrawTextW(memDC, g_TitleBarState.tabs[i].text.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
         }
 
