@@ -27,9 +27,6 @@
     <ClInclude Include="SRC\TrainSimConsistBuilder.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="UI\AddressBar.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="UI\NavToolbar.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -93,12 +90,21 @@
     <ClInclude Include="SRC\Updater.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="SRC\StockSpecReader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\StockInfoDlg.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SRC\ShapeDecoder.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\3D-VisualStudio.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SRC\TrainSimConsistBuilder.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="UI\AddressBar.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UI\NavToolbar.cpp">
@@ -114,6 +120,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UI\FluentDragGhost.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\FilterPopup.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SRC\AssetsParser.cpp">
@@ -140,10 +149,43 @@
     <ClCompile Include="SRC\TenderParser.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="SRC\ConsistWriter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\ModernMessageBox.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\VisualConsistView.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\ModernContextMenu.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="SRC\ActivityConsistReader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SRC\ActivityConsistWriter.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SRC\BatchConsistGenerator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SRC\PoolManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SRC\PoolMutator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\BatchConsistGeneratorDlg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\PoolManagerDlg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\PoolMutatorDlg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\CustomTitleBar.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SRC\BatchConsistGenerationWizard.cpp">
@@ -159,6 +201,18 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SRC\Updater.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SRC\StockSpecReader.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\StockInfoDlg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SRC\ShapeDecoder.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\3D-VisualStudio.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

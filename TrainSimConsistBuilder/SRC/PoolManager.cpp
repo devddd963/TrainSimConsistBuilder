@@ -655,4 +655,289 @@ namespace PoolManager
         PersistPoolPresets();
         return true;
     }
+
+    // -----------------------------------------------------------------------
+    // Replacement Group / Palette Management
+    // -----------------------------------------------------------------------
+    std::vector<ReplacementGroup> g_ReplacementGroupsCache;
+
+    std::wstring GetReplacementGroupsCacheFilePath()
+    {
+        wchar_t szExePath[MAX_PATH] = { 0 };
+        GetModuleFileNameW(NULL, szExePath, MAX_PATH);
+        std::wstring exePath = szExePath;
+        size_t lastSlash = exePath.find_last_of(L"\\/");
+        std::wstring dir = (lastSlash != std::wstring::npos) ? exePath.substr(0, lastSlash + 1) : L"";
+
+        std::wstring appDataDir = dir + L"AppData";
+        CreateDirectoryW(appDataDir.c_str(), NULL);
+
+        return appDataDir + L"\\ReplacementGroups.dat";
+    }
+
+    bool SaveReplacementGroupsToDisk(const std::vector<ReplacementGroup>& groups)
+    {
+        std::wstring cachePath = GetReplacementGroupsCacheFilePath();
+        HANDLE hFile = CreateFileW(cachePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE)
+            return false;
+
+        DWORD written = 0;
+        uint32_t magic = 0x52475250; // "RGRP"
+        uint32_t version = 1;
+        WriteFile(hFile, &magic, sizeof(magic), &written, NULL);
+        WriteFile(hFile, &version, sizeof(version), &written, NULL);
+
+        uint32_t groupCount = (uint32_t)groups.size();
+        WriteFile(hFile, &groupCount, sizeof(groupCount), &written, NULL);
+
+        for (const auto& grp : groups)
+        {
+            WriteWString(hFile, grp.name);
+            uint32_t collapsed = grp.isCollapsed ? 1 : 0;
+            WriteFile(hFile, &collapsed, sizeof(collapsed), &written, NULL);
+
+            uint32_t unitCount = (uint32_t)grp.units.size();
+            WriteFile(hFile, &unitCount, sizeof(unitCount), &written, NULL);
+
+            for (const auto& u : grp.units)
+            {
+                WriteWString(hFile, u.szFileName);
+                WriteWString(hFile, u.szFolder);
+                uint32_t isEng = u.isEngine ? 1 : 0;
+                WriteFile(hFile, &isEng, sizeof(isEng), &written, NULL);
+                uint32_t fMode = (uint32_t)u.flipMode;
+                WriteFile(hFile, &fMode, sizeof(fMode), &written, NULL);
+            }
+        }
+
+        CloseHandle(hFile);
+        return true;
+    }
+
+    bool LoadReplacementGroupsFromDisk(std::vector<ReplacementGroup>& outGroups)
+    {
+        std::wstring cachePath = GetReplacementGroupsCacheFilePath();
+        HANDLE hFile = CreateFileW(cachePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE)
+            return false;
+
+        DWORD read = 0;
+        uint32_t magic = 0;
+        uint32_t version = 0;
+        if (!ReadFile(hFile, &magic, sizeof(magic), &read, NULL) || magic != 0x52475250)
+        {
+            CloseHandle(hFile);
+            return false;
+        }
+
+        ReadFile(hFile, &version, sizeof(version), &read, NULL);
+
+        uint32_t groupCount = 0;
+        if (!ReadFile(hFile, &groupCount, sizeof(groupCount), &read, NULL))
+        {
+            CloseHandle(hFile);
+            return false;
+        }
+
+        outGroups.clear();
+        outGroups.reserve(groupCount);
+
+        for (uint32_t g = 0; g < groupCount; ++g)
+        {
+            ReplacementGroup grp;
+            if (!ReadWString(hFile, grp.name)) break;
+
+            uint32_t collapsed = 0;
+            ReadFile(hFile, &collapsed, sizeof(collapsed), &read, NULL);
+            grp.isCollapsed = (collapsed != 0);
+
+            uint32_t unitCount = 0;
+            ReadFile(hFile, &unitCount, sizeof(unitCount), &read, NULL);
+
+            grp.units.reserve(unitCount);
+            for (uint32_t u = 0; u < unitCount; ++u)
+            {
+                PoolUnit unit;
+                if (!ReadWString(hFile, unit.szFileName)) break;
+                if (!ReadWString(hFile, unit.szFolder)) break;
+
+                uint32_t isEng = 0;
+                ReadFile(hFile, &isEng, sizeof(isEng), &read, NULL);
+                unit.isEngine = (isEng != 0);
+
+                uint32_t fMode = 0;
+                ReadFile(hFile, &fMode, sizeof(fMode), &read, NULL);
+                unit.flipMode = (UnitFlipMode)fMode;
+
+                grp.units.push_back(unit);
+            }
+
+            outGroups.push_back(grp);
+        }
+
+        CloseHandle(hFile);
+        return true;
+    }
+
+    void InitializeReplacementGroups()
+    {
+        if (!LoadReplacementGroupsFromDisk(g_ReplacementGroupsCache))
+        {
+            g_ReplacementGroupsCache.clear();
+        }
+    }
+
+    void PersistReplacementGroups()
+    {
+        SaveReplacementGroupsToDisk(g_ReplacementGroupsCache);
+    }
+
+    int AddReplacementGroup(const std::wstring& name)
+    {
+        ReplacementGroup grp;
+        if (name.empty())
+        {
+            grp.name = L"Group #" + std::to_wstring(g_ReplacementGroupsCache.size() + 1);
+        }
+        else
+        {
+            grp.name = name;
+        }
+        g_ReplacementGroupsCache.push_back(grp);
+        PersistReplacementGroups();
+        return (int)g_ReplacementGroupsCache.size() - 1;
+    }
+
+    bool RemoveReplacementGroup(int groupIndex)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        g_ReplacementGroupsCache.erase(g_ReplacementGroupsCache.begin() + groupIndex);
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool RenameReplacementGroup(int groupIndex, const std::wstring& newName)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size() || newName.empty())
+            return false;
+
+        g_ReplacementGroupsCache[groupIndex].name = newName;
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool AddUnitToReplacementGroup(int groupIndex, const PoolUnit& unit)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        g_ReplacementGroupsCache[groupIndex].units.push_back(unit);
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool RemoveUnitFromReplacementGroup(int groupIndex, int unitIndex)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        auto& grp = g_ReplacementGroupsCache[groupIndex];
+        if (unitIndex < 0 || unitIndex >= (int)grp.units.size())
+            return false;
+
+        grp.units.erase(grp.units.begin() + unitIndex);
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool ClearReplacementGroupUnits(int groupIndex)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        g_ReplacementGroupsCache[groupIndex].units.clear();
+        PersistReplacementGroups();
+        return true;
+    }
+
+    int PasteUnitsToReplacementGroup(int groupIndex, const std::vector<ConsistReader::UnitInfo>& clipboardUnits)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return 0;
+
+        auto& grp = g_ReplacementGroupsCache[groupIndex];
+        int added = 0;
+        for (const auto& u : clipboardUnits)
+        {
+            PoolUnit pu;
+            pu.szFileName = u.uid;
+            pu.szFolder = u.parentDir;
+            pu.isEngine = u.isEngine;
+            pu.flipMode = u.isFlipped ? UnitFlipMode::Flipped : UnitFlipMode::Forward;
+            grp.units.push_back(pu);
+            added++;
+        }
+
+        if (added > 0)
+        {
+            PersistReplacementGroups();
+        }
+        return added;
+    }
+
+    bool RemoveMultipleUnitsFromReplacementGroup(int groupIndex, const std::vector<int>& unitIndices)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size() || unitIndices.empty())
+            return false;
+
+        auto& grp = g_ReplacementGroupsCache[groupIndex];
+        std::vector<int> sortedIndices = unitIndices;
+        std::sort(sortedIndices.begin(), sortedIndices.end(), std::greater<int>());
+
+        for (int idx : sortedIndices)
+        {
+            if (idx >= 0 && idx < (int)grp.units.size())
+            {
+                grp.units.erase(grp.units.begin() + idx);
+            }
+        }
+
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool SetMultipleUnitsFlipModeInReplacementGroup(int groupIndex, const std::vector<int>& unitIndices, UnitFlipMode mode)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        auto& grp = g_ReplacementGroupsCache[groupIndex];
+        for (int idx : unitIndices)
+        {
+            if (idx >= 0 && idx < (int)grp.units.size())
+            {
+                grp.units[idx].flipMode = mode;
+            }
+        }
+
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool PickUnitFromGroup(int groupIndex, PoolUnit& outUnit)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        const auto& grp = g_ReplacementGroupsCache[groupIndex];
+        if (grp.units.empty())
+            return false;
+
+        int pick = rand() % (int)grp.units.size();
+        outUnit = grp.units[pick];
+        return true;
+    }
 }

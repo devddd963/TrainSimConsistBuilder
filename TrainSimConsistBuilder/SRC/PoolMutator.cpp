@@ -10,6 +10,180 @@
 
 namespace PoolMutator
 {
+    std::wstring GetPoolMutationCacheFilePath()
+    {
+        wchar_t szExePath[MAX_PATH] = { 0 };
+        GetModuleFileNameW(NULL, szExePath, MAX_PATH);
+        std::wstring exePath = szExePath;
+        size_t lastSlash = exePath.find_last_of(L"\\/");
+        std::wstring dir = (lastSlash != std::wstring::npos) ? exePath.substr(0, lastSlash + 1) : L"";
+
+        std::wstring appDataDir = dir + L"AppData";
+        CreateDirectoryW(appDataDir.c_str(), NULL);
+
+        return appDataDir + L"\\PoolMutation.dat";
+    }
+
+    static void WriteWString(HANDLE hFile, const std::wstring& str)
+    {
+        uint32_t len = (uint32_t)str.length();
+        DWORD written = 0;
+        WriteFile(hFile, &len, sizeof(len), &written, NULL);
+        if (len > 0)
+        {
+            WriteFile(hFile, str.data(), (DWORD)(len * sizeof(wchar_t)), &written, NULL);
+        }
+    }
+
+    static bool ReadWString(HANDLE hFile, std::wstring& outStr)
+    {
+        uint32_t len = 0;
+        DWORD read = 0;
+        if (!ReadFile(hFile, &len, sizeof(len), &read, NULL) || read != sizeof(len))
+            return false;
+
+        if (len == 0)
+        {
+            outStr.clear();
+            return true;
+        }
+
+        outStr.resize(len);
+        if (!ReadFile(hFile, &outStr[0], (DWORD)(len * sizeof(wchar_t)), &read, NULL) || read != len * sizeof(wchar_t))
+            return false;
+
+        return true;
+    }
+
+    bool SaveMutationSettings(const MutatorSavedSettings& settings)
+    {
+        std::wstring cachePath = GetPoolMutationCacheFilePath();
+        HANDLE hFile = CreateFileW(cachePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE)
+            return false;
+
+        DWORD written = 0;
+        uint32_t magic = 0x504D5554; // 'PMUT'
+        uint32_t version = 1;
+        WriteFile(hFile, &magic, sizeof(magic), &written, NULL);
+        WriteFile(hFile, &version, sizeof(version), &written, NULL);
+
+        WriteFile(hFile, &settings.activeTab, sizeof(settings.activeTab), &written, NULL);
+        WriteFile(hFile, &settings.selectedPresetIdx, sizeof(settings.selectedPresetIdx), &written, NULL);
+
+        uint32_t poolIdxCount = (uint32_t)settings.selectedPoolIndices.size();
+        WriteFile(hFile, &poolIdxCount, sizeof(poolIdxCount), &written, NULL);
+        for (int idx : settings.selectedPoolIndices)
+            WriteFile(hFile, &idx, sizeof(idx), &written, NULL);
+
+        uint32_t presIdxCount = (uint32_t)settings.selectedPresetIndices.size();
+        WriteFile(hFile, &presIdxCount, sizeof(presIdxCount), &written, NULL);
+        for (int idx : settings.selectedPresetIndices)
+            WriteFile(hFile, &idx, sizeof(idx), &written, NULL);
+
+        WriteFile(hFile, &settings.countMode, sizeof(settings.countMode), &written, NULL);
+        WriteFile(hFile, &settings.customCount, sizeof(settings.customCount), &written, NULL);
+
+        uint32_t clones = settings.createClones ? 1 : 0;
+        WriteFile(hFile, &clones, sizeof(clones), &written, NULL);
+        WriteWString(hFile, settings.cloneSuffix);
+
+        WriteFile(hFile, &settings.insertSource, sizeof(settings.insertSource), &written, NULL);
+        WriteFile(hFile, &settings.selectedGroupIdx, sizeof(settings.selectedGroupIdx), &written, NULL);
+
+        uint32_t grpIdxCount = (uint32_t)settings.selectedGroupIndices.size();
+        WriteFile(hFile, &grpIdxCount, sizeof(grpIdxCount), &written, NULL);
+        for (int idx : settings.selectedGroupIndices)
+            WriteFile(hFile, &idx, sizeof(idx), &written, NULL);
+
+        WriteFile(hFile, &settings.insertCount, sizeof(settings.insertCount), &written, NULL);
+        WriteFile(hFile, &settings.posMode, sizeof(settings.posMode), &written, NULL);
+        WriteWString(hFile, settings.positionIndexText);
+
+        CloseHandle(hFile);
+        return true;
+    }
+
+    bool LoadMutationSettings(MutatorSavedSettings& settings)
+    {
+        std::wstring cachePath = GetPoolMutationCacheFilePath();
+        HANDLE hFile = CreateFileW(cachePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile == INVALID_HANDLE_VALUE)
+            return false;
+
+        DWORD read = 0;
+        uint32_t magic = 0;
+        uint32_t version = 0;
+        if (!ReadFile(hFile, &magic, sizeof(magic), &read, NULL) || magic != 0x504D5554)
+        {
+            CloseHandle(hFile);
+            return false;
+        }
+
+        if (!ReadFile(hFile, &version, sizeof(version), &read, NULL) || version != 1)
+        {
+            CloseHandle(hFile);
+            return false;
+        }
+
+        ReadFile(hFile, &settings.activeTab, sizeof(settings.activeTab), &read, NULL);
+        ReadFile(hFile, &settings.selectedPresetIdx, sizeof(settings.selectedPresetIdx), &read, NULL);
+
+        uint32_t poolIdxCount = 0;
+        if (ReadFile(hFile, &poolIdxCount, sizeof(poolIdxCount), &read, NULL))
+        {
+            settings.selectedPoolIndices.clear();
+            for (uint32_t i = 0; i < poolIdxCount; ++i)
+            {
+                int idx = 0;
+                ReadFile(hFile, &idx, sizeof(idx), &read, NULL);
+                settings.selectedPoolIndices.push_back(idx);
+            }
+        }
+
+        uint32_t presIdxCount = 0;
+        if (ReadFile(hFile, &presIdxCount, sizeof(presIdxCount), &read, NULL))
+        {
+            settings.selectedPresetIndices.clear();
+            for (uint32_t i = 0; i < presIdxCount; ++i)
+            {
+                int idx = 0;
+                ReadFile(hFile, &idx, sizeof(idx), &read, NULL);
+                settings.selectedPresetIndices.push_back(idx);
+            }
+        }
+
+        ReadFile(hFile, &settings.countMode, sizeof(settings.countMode), &read, NULL);
+        ReadFile(hFile, &settings.customCount, sizeof(settings.customCount), &read, NULL);
+
+        uint32_t clones = 0;
+        ReadFile(hFile, &clones, sizeof(clones), &read, NULL);
+        settings.createClones = (clones != 0);
+        ReadWString(hFile, settings.cloneSuffix);
+
+        ReadFile(hFile, &settings.insertSource, sizeof(settings.insertSource), &read, NULL);
+        ReadFile(hFile, &settings.selectedGroupIdx, sizeof(settings.selectedGroupIdx), &read, NULL);
+
+        uint32_t grpIdxCount = 0;
+        if (ReadFile(hFile, &grpIdxCount, sizeof(grpIdxCount), &read, NULL))
+        {
+            settings.selectedGroupIndices.clear();
+            for (uint32_t i = 0; i < grpIdxCount; ++i)
+            {
+                int idx = 0;
+                ReadFile(hFile, &idx, sizeof(idx), &read, NULL);
+                settings.selectedGroupIndices.push_back(idx);
+            }
+        }
+
+        ReadFile(hFile, &settings.insertCount, sizeof(settings.insertCount), &read, NULL);
+        ReadFile(hFile, &settings.posMode, sizeof(settings.posMode), &read, NULL);
+        ReadWString(hFile, settings.positionIndexText);
+
+        CloseHandle(hFile);
+        return true;
+    }
+
     static std::wstring GetMutatedOutputPath(const std::wstring& originalPath, bool createClone, const std::wstring& cloneSuffix)
     {
         if (!createClone) return originalPath;
@@ -370,58 +544,190 @@ namespace PoolMutator
         const MutatorOptions& options,
         std::wstring& outError)
     {
-        PoolManager::PoolPreset* pPreset = PoolManager::GetPresetByIndex(options.presetIndex);
-        if (!pPreset)
-        {
-            outError = L"Invalid Pool Preset selected.";
-            return false;
-        }
+        std::random_device rd;
+        std::mt19937 rng(rd());
 
-        std::vector<PoolManager::ConsistPool> activePools = GetActivePoolsFromPreset(*pPreset, options);
-        if (activePools.empty())
-        {
-            outError = L"No valid source pools selected in preset.";
-            return false;
-        }
-
-        int countToInsert = (options.insertCount > 0) ? options.insertCount : 1;
-        std::vector<ConsistReader::UnitInfo> unitsToInsert = GenerateUnitsFromPools(activePools, countToInsert, true);
-
-        if (unitsToInsert.empty())
-        {
-            outError = L"No units to insert generated from selected pool/preset.";
-            return false;
-        }
-
-        int insertPos = (int)units.size();
-        switch (options.posMode)
-        {
-        case PositionMode::HeadPosition:
-            insertPos = 0;
-            break;
-        case PositionMode::BehindEngines:
-        {
-            insertPos = (int)units.size();
-            for (size_t i = 0; i < units.size(); ++i)
+        auto generateBatch = [&]() -> std::vector<ConsistReader::UnitInfo> {
+            std::vector<ConsistReader::UnitInfo> batch;
+            if (options.insertSource == InsertSource::FavouriteGroup)
             {
-                if (!units[i].isEngine)
+                PoolManager::InitializeReplacementGroups();
+                std::vector<PoolManager::PoolUnit> availableUnits;
+
+                std::vector<int> groupIndices = options.selectedReplacementGroupIndices;
+                if (groupIndices.empty())
                 {
-                    insertPos = (int)i;
-                    break;
+                    if (options.replacementGroupIndex >= 0 && options.replacementGroupIndex < (int)PoolManager::g_ReplacementGroupsCache.size())
+                    {
+                        groupIndices.push_back(options.replacementGroupIndex);
+                    }
+                    else
+                    {
+                        for (size_t i = 0; i < PoolManager::g_ReplacementGroupsCache.size(); ++i)
+                        {
+                            groupIndices.push_back((int)i);
+                        }
+                    }
+                }
+
+                for (int gIdx : groupIndices)
+                {
+                    if (gIdx >= 0 && gIdx < (int)PoolManager::g_ReplacementGroupsCache.size())
+                    {
+                        const auto& grp = PoolManager::g_ReplacementGroupsCache[gIdx];
+                        availableUnits.insert(availableUnits.end(), grp.units.begin(), grp.units.end());
+                    }
+                }
+
+                if (availableUnits.empty())
+                {
+                    outError = L"Selected Favourite Unit Group(s) contain no units.";
+                    return batch;
+                }
+
+                int countToInsert = (options.insertCount > 0) ? options.insertCount : 1;
+                std::uniform_int_distribution<size_t> udist(0, availableUnits.size() - 1);
+                std::uniform_int_distribution<int> fdist(0, 1);
+
+                for (int k = 0; k < countToInsert; ++k)
+                {
+                    const auto& u = availableUnits[udist(rng)];
+                    ConsistReader::UnitInfo ui;
+                    ui.uid = u.szFileName;
+                    ui.parentDir = u.szFolder;
+                    ui.isEngine = u.isEngine;
+                    if (u.flipMode == PoolManager::UnitFlipMode::Forward) ui.isFlipped = false;
+                    else if (u.flipMode == PoolManager::UnitFlipMode::Flipped) ui.isFlipped = true;
+                    else if (u.flipMode == PoolManager::UnitFlipMode::Random) ui.isFlipped = (fdist(rng) == 1);
+                    else ui.isFlipped = false;
+                    batch.push_back(ui);
                 }
             }
-            break;
+            else
+            {
+                PoolManager::InitializePoolPresets();
+                std::vector<int> presetIndices = options.selectedPresetIndices;
+                if (presetIndices.empty())
+                {
+                    if (options.presetIndex >= 0 && options.presetIndex < (int)PoolManager::g_PoolPresetsCache.size())
+                    {
+                        presetIndices.push_back(options.presetIndex);
+                    }
+                    else
+                    {
+                        for (size_t i = 0; i < PoolManager::g_PoolPresetsCache.size(); ++i)
+                        {
+                            presetIndices.push_back((int)i);
+                        }
+                    }
+                }
+
+                std::vector<PoolManager::ConsistPool> activePools;
+                for (int pIdx : presetIndices)
+                {
+                    PoolManager::PoolPreset* pPreset = PoolManager::GetPresetByIndex(pIdx);
+                    if (pPreset)
+                    {
+                        for (const auto& pool : pPreset->pools)
+                        {
+                            if (!pool.units.empty())
+                            {
+                                activePools.push_back(pool);
+                            }
+                        }
+                    }
+                }
+
+                if (activePools.empty())
+                {
+                    outError = L"No valid source pools found in selected preset(s).";
+                    return batch;
+                }
+
+                if (options.insertCount > 0)
+                {
+                    batch = GenerateUnitsFromPools(activePools, options.insertCount, true);
+                }
+                else
+                {
+                    batch = GenerateUnitsFromPools(activePools, -1, false);
+                }
+
+                if (batch.empty())
+                {
+                    outError = L"No units generated from selected pool preset rules.";
+                    return batch;
+                }
+            }
+            return batch;
+        };
+
+        // Determine target insertion positions
+        if (options.posMode == PositionMode::SpecificIndex)
+        {
+            std::vector<int> targetPositions;
+            if (!options.specificIndices.empty())
+            {
+                std::vector<int> sorted = options.specificIndices;
+                std::sort(sorted.begin(), sorted.end(), std::less<int>());
+                sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+                for (int idx : sorted)
+                {
+                    targetPositions.push_back(idx);
+                }
+            }
+            else
+            {
+                targetPositions.push_back(options.positionIndex);
+            }
+
+            // Perform insertions in ascending slot order so target indices 2;4;6 sit at table rows 2, 4, 6
+            for (int pos : targetPositions)
+            {
+                std::vector<ConsistReader::UnitInfo> batch = generateBatch();
+                if (batch.empty())
+                {
+                    if (outError.empty()) outError = L"Failed to generate units to insert.";
+                    return false;
+                }
+                int insertPos = (std::max)(0, (std::min)((int)units.size(), pos));
+                units.insert(units.begin() + insertPos, batch.begin(), batch.end());
+            }
         }
-        case PositionMode::SpecificIndex:
-            insertPos = (std::max)(0, (std::min)((int)units.size(), options.positionIndex));
-            break;
-        case PositionMode::TailPosition:
-        default:
-            insertPos = (int)units.size();
-            break;
+        else
+        {
+            int insertPos = (int)units.size();
+            if (options.posMode == PositionMode::HeadPosition)
+            {
+                insertPos = 0;
+            }
+            else if (options.posMode == PositionMode::BehindEngines)
+            {
+                insertPos = (int)units.size();
+                for (size_t i = 0; i < units.size(); ++i)
+                {
+                    if (!units[i].isEngine)
+                    {
+                        insertPos = (int)i;
+                        break;
+                    }
+                }
+            }
+            else // TailPosition
+            {
+                insertPos = (int)units.size();
+            }
+
+            std::vector<ConsistReader::UnitInfo> batch = generateBatch();
+            if (batch.empty())
+            {
+                if (outError.empty()) outError = L"Failed to generate units to insert.";
+                return false;
+            }
+            insertPos = (std::max)(0, (std::min)((int)units.size(), insertPos));
+            units.insert(units.begin() + insertPos, batch.begin(), batch.end());
         }
 
-        units.insert(units.begin() + insertPos, unitsToInsert.begin(), unitsToInsert.end());
         return true;
     }
 

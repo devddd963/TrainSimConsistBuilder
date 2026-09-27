@@ -76,6 +76,10 @@
   <PropertyGroup Condition="'$(Platform)'=='x64'">
     <TargetName>TrainSimConsistBuilder_v6.0.0_x64</TargetName>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(ProjectDir)..\BUILDS\DEBUG\</OutDir>
+    <IntDir>$(ProjectDir)..\BUILDS\DEBUG\Intermediate\</IntDir>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -134,9 +138,6 @@
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
     </Manifest>
-    <PostBuildEvent>
-      <Command>xcopy /y /d "$(OutDir)$(TargetName).*" "$(ProjectDir)..\x64\$(Configuration)\"</Command>
-    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -164,9 +165,7 @@
   <ItemGroup>
     <ClInclude Include="SRC\framework.h" />
     <ClInclude Include="SRC\Resource.h" />
-    <ClInclude Include="SRC\targetver.h" />
     <ClInclude Include="SRC\TrainSimConsistBuilder.h" />
-    <ClInclude Include="UI\AddressBar.h" />
     <ClInclude Include="UI\NavToolbar.h" />
     <ClInclude Include="UI\CommandBar.h" />
     <ClInclude Include="SRC\ConsistReader.h" />
@@ -200,10 +199,14 @@
     <ClInclude Include="UI\CustomScrollBar.h" />
     <ClInclude Include="UI\CustomTreeView.h" />
     <ClInclude Include="SRC\Updater.h" />
+    <ClInclude Include="SRC\StockSpecReader.h" />
+    <ClInclude Include="SRC\AppLogging.h" />
+    <ClInclude Include="UI\StockInfoDlg.h" />
+    <ClInclude Include="UI\3D-VisualStudio.h" />
+    <ClInclude Include="UI\CustomDropDownMenu.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SRC\TrainSimConsistBuilder.cpp" />
-    <ClCompile Include="UI\AddressBar.cpp" />
     <ClCompile Include="UI\NavToolbar.cpp" />
     <ClCompile Include="UI\CommandBar.cpp" />
     <ClCompile Include="SRC\ConsistReader.cpp" />
@@ -236,6 +239,9 @@
     <ClCompile Include="UI\CustomScrollBar.cpp" />
     <ClCompile Include="UI\CustomTreeView.cpp" />
     <ClCompile Include="SRC\Updater.cpp" />
+    <ClCompile Include="SRC\StockSpecReader.cpp" />
+    <ClCompile Include="UI\StockInfoDlg.cpp" />
+    <ClCompile Include="UI\CustomDropDownMenu.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="TrainSimConsistBuilder.rc" />

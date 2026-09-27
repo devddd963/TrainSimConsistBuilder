@@ -1,4 +1,6 @@
 #include "NavToolbar.h"
+#include "CustomScrollBar.h"
+#include "CustomDropDownMenu.h"
 #include <uxtheme.h>
 #include <vsstyle.h>
 #include <dwmapi.h>
@@ -21,6 +23,7 @@ enum NavIconIndex
     ICON_REFRESH = 3,
     ICON_ADDR_PILL = 5,
     ICON_ADDR_CLEAR = 6,
+    ICON_SEARCH_CLEAR = 7,
     ICON_BC_BASE = 100 // Indices 100+ reserved for breadcrumb elements
 };
 
@@ -72,346 +75,10 @@ struct NavToolbarState
     BOOL bInternalChange = FALSE;
 
     wchar_t szCurrentPath[MAX_PATH] = L"C:\\TrainSim\\TRAINS\\CONSISTS";
+    wchar_t szAddressPlaceholder[256] = L"Enter MSTS / Open Rails Installation Directory...";
+    wchar_t szSearchPlaceholder[256] = L"Search Consist Files (*.con)...";
     std::vector<BreadcrumbElement> breadcrumbElements;
     std::vector<std::pair<std::wstring, std::wstring>> collapsedFolders;
-};
-
-static NavToolbarState g_State;
-
-typedef enum _ACCENT_STATE
-{
-    ACCENT_DISABLED = 0,
-    ACCENT_ENABLE_GRADIENT = 1,
-    ACCENT_ENABLE_TRANSPARENTGRADIENT = 2,
-    ACCENT_ENABLE_BLURBEHIND = 3,
-    ACCENT_ENABLE_ACRYLICBLURBEHIND = 4,
-    ACCENT_ENABLE_HOSTBACKDROP = 5,
-    ACCENT_INVALID_STATE = 6
-} ACCENT_STATE;
-
-typedef struct _ACCENT_POLICY
-{
-    ACCENT_STATE AccentState;
-    DWORD AccentFlags;
-    DWORD GradientColor;
-    DWORD AnimationId;
-} ACCENT_POLICY;
-
-typedef enum _WINDOWCOMPOSITIONATTRIB
-{
-    WCA_ACCENT_POLICY = 19
-} WINDOWCOMPOSITIONATTRIB;
-
-typedef struct _WINDOWCOMPOSITIONATTRIBDATA
-{
-    WINDOWCOMPOSITIONATTRIB Attrib;
-    PVOID pvData;
-    SIZE_T cbData;
-} WINDOWCOMPOSITIONATTRIBDATA;
-
-typedef BOOL (WINAPI *pfnSetWindowCompositionAttribute)(HWND, WINDOWCOMPOSITIONATTRIBDATA*);
-
-static void EnableWindowAcrylicBlur(HWND hWnd, DWORD gradientColor = 0xD9202020)
-{
-    HMODULE hUser = GetModuleHandleW(L"user32.dll");
-    if (hUser)
-    {
-        pfnSetWindowCompositionAttribute setWindowCompositionAttribute =
-            (pfnSetWindowCompositionAttribute)GetProcAddress(hUser, "SetWindowCompositionAttribute");
-        if (setWindowCompositionAttribute)
-        {
-            ACCENT_POLICY accent = { ACCENT_ENABLE_ACRYLICBLURBEHIND, 2, gradientColor, 0 };
-            WINDOWCOMPOSITIONATTRIBDATA data = { WCA_ACCENT_POLICY, &accent, sizeof(accent) };
-            setWindowCompositionAttribute(hWnd, &data);
-        }
-    }
-}
-
-class NavBreadcrumbMenu
-{
-public:
-    static bool Register(HINSTANCE hInstance)
-    {
-        WNDCLASSEXW wcx = { 0 };
-        wcx.cbSize        = sizeof(wcx);
-        wcx.style         = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
-        wcx.lpfnWndProc   = NavBreadcrumbMenu::WndProc;
-        wcx.cbWndExtra    = sizeof(NavBreadcrumbMenu*);
-        wcx.hInstance     = hInstance;
-        wcx.hCursor       = LoadCursor(NULL, IDC_ARROW);
-        wcx.hbrBackground = NULL;
-        wcx.lpszClassName = L"NavBreadcrumbMenuClass";
-
-        return (RegisterClassExW(&wcx) != 0);
-    }
-
-    static void Show(HWND hParent, int x, int y, const std::vector<NavMenuItem>& items)
-    {
-        static NavBreadcrumbMenu s_instance;
-        s_instance.ShowInternal(hParent, x, y, items);
-    }
-
-private:
-    HWND m_hWnd = NULL;
-    HWND m_hParent = NULL;
-    std::vector<NavMenuItem> m_items;
-    int m_hoverIndex = -1;
-    bool m_bTrackingMouse = false;
-    int m_itemHeight = 32;
-
-    void ShowInternal(HWND hParent, int x, int y, const std::vector<NavMenuItem>& items)
-    {
-        if (m_hWnd && IsWindow(m_hWnd))
-        {
-            DestroyWindow(m_hWnd);
-            m_hWnd = NULL;
-        }
-
-        m_hParent = hParent;
-        m_items = items;
-        m_hoverIndex = -1;
-        m_bTrackingMouse = false;
-        m_itemHeight = 32;
-
-        if (m_items.empty()) return;
-
-        // Measure longest label to set optimal menu width
-        HDC hdcScreen = GetDC(NULL);
-        HFONT hOldFont = (HFONT)SelectObject(hdcScreen, g_State.hFontMain ? g_State.hFontMain : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
-        int maxTextW = 120;
-        for (const auto& it : m_items)
-        {
-            SIZE sz;
-            GetTextExtentPoint32W(hdcScreen, it.label.c_str(), (int)it.label.length(), &sz);
-            if (sz.cx > maxTextW) maxTextW = sz.cx;
-        }
-        SelectObject(hdcScreen, hOldFont);
-        ReleaseDC(NULL, hdcScreen);
-
-        int clientW = maxTextW + 36; // 18px padding on each side
-        if (clientW < 180) clientW = 180;
-        if (clientW > 480) clientW = 480;
-
-        int clientH = 8 + (int)m_items.size() * m_itemHeight;
-        if (clientH > 520) clientH = 520;
-
-        int width = clientW;
-        int height = clientH;
-
-        // Keep within work area
-        HMONITOR hMon = MonitorFromPoint({ x, y }, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO mi = { sizeof(mi) };
-        GetMonitorInfoW(hMon, &mi);
-
-        if (x + width > mi.rcWork.right) x = mi.rcWork.right - width - 4;
-        if (x < mi.rcWork.left) x = mi.rcWork.left + 4;
-        if (y + height > mi.rcWork.bottom) y = y - height - 36;
-
-        HINSTANCE hInst = (HINSTANCE)GetWindowLongPtr(hParent, GWLP_HINSTANCE);
-        Register(hInst);
-
-        m_hWnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            L"NavBreadcrumbMenuClass",
-            L"",
-            WS_POPUP,
-            x, y, width, height,
-            hParent, NULL, hInst, this
-        );
-
-        if (m_hWnd)
-        {
-            // Windows 11 DWM Rounded Corners & Dark Mode
-            DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
-            DwmSetWindowAttribute(m_hWnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-            BOOL useDark = TRUE;
-            DwmSetWindowAttribute(m_hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDark, sizeof(useDark));
-
-            // Set rounded clipping region (8px radius)
-            HRGN hRgn = CreateRoundRectRgn(0, 0, width + 1, height + 1, 16, 16);
-            SetWindowRgn(m_hWnd, hRgn, TRUE);
-
-            ShowWindow(m_hWnd, SW_SHOW);
-            UpdateWindow(m_hWnd);
-            SetCapture(m_hWnd);
-        }
-    }
-
-    static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
-    {
-        NavBreadcrumbMenu* pThis = (NavBreadcrumbMenu*)GetWindowLongPtr(hWnd, 0);
-
-        switch (msg)
-        {
-        case WM_NCCREATE:
-        {
-            CREATESTRUCTW* cs = (CREATESTRUCTW*)lParam;
-            pThis = (NavBreadcrumbMenu*)cs->lpCreateParams;
-            SetWindowLongPtr(hWnd, 0, (LONG_PTR)pThis);
-            return DefWindowProc(hWnd, msg, wParam, lParam);
-        }
-
-        case WM_ERASEBKGND:
-            return TRUE;
-
-        case WM_MOUSEMOVE:
-        {
-            if (!pThis) break;
-            int y = GET_Y_LPARAM(lParam) - 4;
-            int newHover = y >= 0 ? (y / pThis->m_itemHeight) : -1;
-            if (newHover >= (int)pThis->m_items.size()) newHover = -1;
-
-            if (!pThis->m_bTrackingMouse)
-            {
-                TRACKMOUSEEVENT tme = { sizeof(TRACKMOUSEEVENT), TME_LEAVE, hWnd, 0 };
-                TrackMouseEvent(&tme);
-                pThis->m_bTrackingMouse = true;
-            }
-
-            if (newHover != pThis->m_hoverIndex)
-            {
-                pThis->m_hoverIndex = newHover;
-                InvalidateRect(hWnd, NULL, FALSE);
-            }
-            return 0;
-        }
-
-        case WM_MOUSELEAVE:
-        {
-            if (pThis)
-            {
-                pThis->m_bTrackingMouse = false;
-                pThis->m_hoverIndex = -1;
-                InvalidateRect(hWnd, NULL, FALSE);
-            }
-            return 0;
-        }
-
-        case WM_LBUTTONDOWN:
-        {
-            if (!pThis) break;
-            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-
-            if (!PtInRect(&rc, pt))
-            {
-                ReleaseCapture();
-                DestroyWindow(hWnd);
-                return 0;
-            }
-
-            int idx = (pt.y - 4) / pThis->m_itemHeight;
-            if (idx >= 0 && idx < (int)pThis->m_items.size())
-            {
-                if (pThis->m_items[idx].isEnabled && !pThis->m_items[idx].targetPath.empty())
-                {
-                    std::wstring target = pThis->m_items[idx].targetPath;
-                    HWND hParent = pThis->m_hParent;
-                    ReleaseCapture();
-                    DestroyWindow(hWnd);
-
-                    NavToolbar_SetPath(hParent, target.c_str());
-                    SendMessage(GetParent(hParent), WM_NAVTOOLBAR_NAVIGATE, 0, (LPARAM)hParent);
-                    return 0;
-                }
-            }
-            return 0;
-        }
-
-        case WM_KEYDOWN:
-            if (wParam == VK_ESCAPE)
-            {
-                ReleaseCapture();
-                DestroyWindow(hWnd);
-                return 0;
-            }
-            break;
-
-        case WM_KILLFOCUS:
-            ReleaseCapture();
-            DestroyWindow(hWnd);
-            return 0;
-
-        case WM_PAINT:
-        {
-            if (!pThis) break;
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hWnd, &ps);
-
-            RECT rcClient;
-            GetClientRect(hWnd, &rcClient);
-
-            HDC memDC = CreateCompatibleDC(hdc);
-            HBITMAP memBM = CreateCompatibleBitmap(hdc, rcClient.right, rcClient.bottom);
-            HBITMAP oldBM = (HBITMAP)SelectObject(memDC, memBM);
-
-            // 1. Fill Deep Dark Explorer Surface background (RGB 28, 28, 28)
-            COLORREF bgCol = RGB(28, 28, 28);
-            COLORREF borderCol = RGB(55, 55, 55);
-
-            HBRUSH hbrBg = CreateSolidBrush(bgCol);
-            HPEN hPenBorder = CreatePen(PS_SOLID, 1, borderCol);
-
-            HBRUSH hOldBr = (HBRUSH)SelectObject(memDC, hbrBg);
-            HPEN hOldPen = (HPEN)SelectObject(memDC, hPenBorder);
-
-            RoundRect(memDC, 0, 0, rcClient.right, rcClient.bottom, 16, 16);
-
-            SelectObject(memDC, hOldBr);
-            SelectObject(memDC, hOldPen);
-            DeleteObject(hbrBg);
-            DeleteObject(hPenBorder);
-
-            // 2. Draw Menu Items & Hover Capsules
-            HFONT hFont = g_State.hFontMain ? g_State.hFontMain : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-            HFONT hOldF = (HFONT)SelectObject(memDC, hFont);
-            SetBkMode(memDC, TRANSPARENT);
-
-            HPEN hNullP = CreatePen(PS_NULL, 0, 0);
-            HPEN hPrevP = (HPEN)SelectObject(memDC, hNullP);
-
-            for (size_t i = 0; i < pThis->m_items.size(); ++i)
-            {
-                int y = 4 + (int)i * pThis->m_itemHeight;
-                RECT rcItem = { 4, y, rcClient.right - 4, y + pThis->m_itemHeight };
-
-                if ((int)i == pThis->m_hoverIndex && pThis->m_items[i].isEnabled)
-                {
-                    // Fluent rounded hover capsule (radius 4px, RGB 50, 50, 50)
-                    HBRUSH hbrHover = CreateSolidBrush(RGB(50, 50, 50));
-                    HBRUSH hOldB = (HBRUSH)SelectObject(memDC, hbrHover);
-                    RoundRect(memDC, rcItem.left, rcItem.top, rcItem.right, rcItem.bottom, 8, 8);
-                    SelectObject(memDC, hOldB);
-                    DeleteObject(hbrHover);
-                }
-
-                COLORREF textCol = pThis->m_items[i].isEnabled ? RGB(255, 255, 255) : RGB(130, 130, 130);
-                SetTextColor(memDC, textCol);
-
-                RECT rcText = { rcItem.left + 12, rcItem.top, rcItem.right - 12, rcItem.bottom };
-                DrawTextW(memDC, pThis->m_items[i].label.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            }
-
-            SelectObject(memDC, hPrevP);
-            DeleteObject(hNullP);
-            SelectObject(memDC, hOldF);
-
-            BitBlt(hdc, 0, 0, rcClient.right, rcClient.bottom, memDC, 0, 0, SRCCOPY);
-            SelectObject(memDC, oldBM);
-            DeleteObject(memBM);
-            DeleteDC(memDC);
-
-            EndPaint(hWnd, &ps);
-            return 0;
-        }
-
-        case WM_DESTROY:
-            if (pThis) pThis->m_hWnd = NULL;
-            break;
-        }
-        return DefWindowProc(hWnd, msg, wParam, lParam);
-    }
 };
 
 static HFONT CreateMdl2IconFont(float pointSize, int weight = FW_NORMAL)
@@ -480,27 +147,19 @@ static void CalculatePillLayout(int clientWidth, int& addrPillLeft, int& addrPil
     }
 }
 
-static RECT GetIconRect(NavIconIndex idx)
-{
-    RECT rc = { 0 };
-    switch (idx)
-    {
-    case ICON_BACK:    rc = { 8, 6, 40, 38 }; break;
-    case ICON_FORWARD: rc = { 40, 6, 72, 38 }; break;
-    case ICON_UP:      rc = { 72, 6, 104, 38 }; break;
-    case ICON_REFRESH: rc = { 104, 6, 136, 38 }; break;
-    default: break;
-    }
-    return rc;
-}
+
+
+
 
 // Build breadcrumb layout with smart ellipsis truncation and proper padding
-static void RebuildBreadcrumbs(HDC hdc, int addrPillLeft, int addrPillRight)
+static void RebuildBreadcrumbs(NavToolbarState* pState, HDC hdc, int addrPillLeft, int addrPillRight)
 {
-    g_State.breadcrumbElements.clear();
-    g_State.collapsedFolders.clear();
+    if (!pState) return;
 
-    std::wstring pathStr(g_State.szCurrentPath);
+    pState->breadcrumbElements.clear();
+    pState->collapsedFolders.clear();
+
+    std::wstring pathStr(pState->szCurrentPath);
     std::vector<std::wstring> rawSegments;
     std::vector<std::wstring> rawFullPaths;
 
@@ -554,7 +213,7 @@ static void RebuildBreadcrumbs(HDC hdc, int addrPillLeft, int addrPillRight)
     elemRoot.label = L"This PC";
     elemRoot.fullPath = L"";
     elemRoot.segmentIndex = -1;
-    g_State.breadcrumbElements.push_back(elemRoot);
+    pState->breadcrumbElements.push_back(elemRoot);
     curX += 28;
 
     // 2. Chevron after "This PC"
@@ -564,13 +223,13 @@ static void RebuildBreadcrumbs(HDC hdc, int addrPillLeft, int addrPillRight)
     elemChevRoot.label = L"";
     elemChevRoot.fullPath = L"";
     elemChevRoot.segmentIndex = -1;
-    g_State.breadcrumbElements.push_back(elemChevRoot);
+    pState->breadcrumbElements.push_back(elemChevRoot);
     curX += 22;
 
     if (rawSegments.empty()) return;
 
     // Measure all segments with 10.5pt font + 16px wide capsule padding (8px left, 8px right)
-    HFONT hOldFont = (HFONT)SelectObject(hdc, g_State.hFontMain);
+    HFONT hOldFont = (HFONT)SelectObject(hdc, pState->hFontMain ? pState->hFontMain : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
     std::vector<int> segWidths;
     int totalNeeded = curX;
     for (size_t i = 0; i < rawSegments.size(); ++i)
@@ -597,7 +256,7 @@ static void RebuildBreadcrumbs(HDC hdc, int addrPillLeft, int addrPillRight)
             segElem.label = rawSegments[i];
             segElem.fullPath = rawFullPaths[i];
             segElem.segmentIndex = (int)i;
-            g_State.breadcrumbElements.push_back(segElem);
+            pState->breadcrumbElements.push_back(segElem);
             curX += segWidths[i];
 
             BreadcrumbElement chevElem;
@@ -606,7 +265,7 @@ static void RebuildBreadcrumbs(HDC hdc, int addrPillLeft, int addrPillRight)
             chevElem.label = L"";
             chevElem.fullPath = rawFullPaths[i];
             chevElem.segmentIndex = (int)i;
-            g_State.breadcrumbElements.push_back(chevElem);
+            pState->breadcrumbElements.push_back(chevElem);
             curX += 22;
         }
     }
@@ -645,7 +304,7 @@ static void RebuildBreadcrumbs(HDC hdc, int addrPillLeft, int addrPillRight)
         // Store collapsed ancestors
         for (int i = 0; i < visibleStart; ++i)
         {
-            g_State.collapsedFolders.push_back({ rawSegments[i], rawFullPaths[i] });
+            pState->collapsedFolders.push_back({ rawSegments[i], rawFullPaths[i] });
         }
 
         // 1. Add "..." button
@@ -655,7 +314,7 @@ static void RebuildBreadcrumbs(HDC hdc, int addrPillLeft, int addrPillRight)
         ellipElem.label = L"...";
         ellipElem.fullPath = L"";
         ellipElem.segmentIndex = -1;
-        g_State.breadcrumbElements.push_back(ellipElem);
+        pState->breadcrumbElements.push_back(ellipElem);
         curX += ellipsisWidth;
 
         // 2. Add Chevron after "..."
@@ -663,9 +322,9 @@ static void RebuildBreadcrumbs(HDC hdc, int addrPillLeft, int addrPillRight)
         ellipChev.type = BC_CHEVRON_ELLIP;
         ellipChev.rc = { curX, topY, curX + ellipsisChevronWidth, botY };
         ellipChev.label = L"";
-        ellipChev.fullPath = g_State.collapsedFolders.empty() ? L"" : g_State.collapsedFolders.back().second;
+        ellipChev.fullPath = pState->collapsedFolders.empty() ? L"" : pState->collapsedFolders.back().second;
         ellipChev.segmentIndex = -1;
-        g_State.breadcrumbElements.push_back(ellipChev);
+        pState->breadcrumbElements.push_back(ellipChev);
         curX += ellipsisChevronWidth;
 
         // 3. Add visible trailing segments
@@ -684,7 +343,7 @@ static void RebuildBreadcrumbs(HDC hdc, int addrPillLeft, int addrPillRight)
             segElem.label = rawSegments[i];
             segElem.fullPath = rawFullPaths[i];
             segElem.segmentIndex = (int)i;
-            g_State.breadcrumbElements.push_back(segElem);
+            pState->breadcrumbElements.push_back(segElem);
             curX += segW;
 
             BreadcrumbElement chevElem;
@@ -693,17 +352,18 @@ static void RebuildBreadcrumbs(HDC hdc, int addrPillLeft, int addrPillRight)
             chevElem.label = L"";
             chevElem.fullPath = rawFullPaths[i];
             chevElem.segmentIndex = (int)i;
-            g_State.breadcrumbElements.push_back(chevElem);
+            pState->breadcrumbElements.push_back(chevElem);
             curX += 22;
         }
     }
 }
 
-static NavIconIndex HitTestIcon(int x, int y, int addrPillLeft, int addrPillRight)
+static NavIconIndex HitTestIcon(NavToolbarState* pState, int x, int y, int addrPillLeft, int addrPillRight, int searchPillLeft, int searchPillRight)
 {
+    if (!pState) return ICON_NONE;
     POINT pt = { x, y };
 
-    if (g_State.bEditingAddress)
+    if (pState->bEditingAddress)
     {
         RECT rcClear = { addrPillRight - 28, 5, addrPillRight - 6, 39 };
         if (PtInRect(&rcClear, pt))
@@ -712,12 +372,21 @@ static NavIconIndex HitTestIcon(int x, int y, int addrPillLeft, int addrPillRigh
         }
     }
 
-    // Hit test individual breadcrumb elements inside the address bar
-    for (size_t i = 0; i < g_State.breadcrumbElements.size(); ++i)
+    if (pState->hEditSearch && GetWindowTextLengthW(pState->hEditSearch) > 0)
     {
-        if (PtInRect(&g_State.breadcrumbElements[i].rc, pt))
+        RECT rcSearchClear = { searchPillRight - 28, 5, searchPillRight - 6, 39 };
+        if (PtInRect(&rcSearchClear, pt))
         {
-            g_State.hoverBreadcrumb = (int)i;
+            return ICON_SEARCH_CLEAR;
+        }
+    }
+
+    // Hit test individual breadcrumb elements inside the address bar
+    for (size_t i = 0; i < pState->breadcrumbElements.size(); ++i)
+    {
+        if (PtInRect(&pState->breadcrumbElements[i].rc, pt))
+        {
+            pState->hoverBreadcrumb = (int)i;
             return (NavIconIndex)(ICON_BC_BASE + i);
         }
     }
@@ -741,7 +410,8 @@ static void ShowDriveDropdown(HWND hWnd, RECT rcAnchor)
     DWORD dwLen = GetLogicalDriveStringsW(511, szDrives);
     if (dwLen == 0) return;
 
-    std::vector<NavMenuItem> items;
+    std::vector<std::wstring> drivePaths;
+    std::vector<DropDownItem> items;
     const wchar_t* pDrive = szDrives;
 
     while (*pDrive)
@@ -781,14 +451,18 @@ static void ShowDriveDropdown(HWND hWnd, RECT rcAnchor)
             }
         }
 
-        items.push_back({ displayLabel, pDrive, true });
+        drivePaths.push_back(pDrive);
+        items.push_back(DropDownItem::Action((int)drivePaths.size(), L"\xE7F1", displayLabel, L"", false, true));
         pDrive += wcslen(pDrive) + 1;
     }
 
-    POINT pt = { rcAnchor.left, rcAnchor.bottom + 2 };
-    ClientToScreen(hWnd, &pt);
-
-    NavBreadcrumbMenu::Show(hWnd, pt.x, pt.y, items);
+    int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, rcAnchor, items);
+    if (chosen > 0 && chosen <= (int)drivePaths.size())
+    {
+        std::wstring target = drivePaths[chosen - 1];
+        NavToolbar_SetPath(hWnd, target.c_str());
+        SendMessage(GetParent(hWnd), WM_NAVTOOLBAR_NAVIGATE, 0, (LPARAM)hWnd);
+    }
 }
 
 static void ShowFolderDropdown(HWND hWnd, const std::wstring& folderPath, RECT rcAnchor)
@@ -826,10 +500,11 @@ static void ShowFolderDropdown(HWND hWnd, const std::wstring& folderPath, RECT r
 
     std::sort(subfolders.begin(), subfolders.end());
 
-    std::vector<NavMenuItem> items;
+    std::vector<std::wstring> folderPaths;
+    std::vector<DropDownItem> items;
     if (subfolders.empty())
     {
-        items.push_back({ L"(Empty folder)", L"", false });
+        items.push_back(DropDownItem::Action(0, L"", L"(Empty folder)", L"", false, false));
     }
     else
     {
@@ -838,52 +513,66 @@ static void ShowFolderDropdown(HWND hWnd, const std::wstring& folderPath, RECT r
             std::wstring target = folderPath;
             if (target.back() != L'\\') target += L"\\";
             target += sf;
-            items.push_back({ sf, target, true });
+            folderPaths.push_back(target);
+            items.push_back(DropDownItem::Action((int)folderPaths.size(), L"\xE8B7", sf, L"", false, true));
         }
     }
 
-    POINT pt = { rcAnchor.left, rcAnchor.bottom + 2 };
-    ClientToScreen(hWnd, &pt);
-
-    NavBreadcrumbMenu::Show(hWnd, pt.x, pt.y, items);
+    int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, rcAnchor, items);
+    if (chosen > 0 && chosen <= (int)folderPaths.size())
+    {
+        std::wstring target = folderPaths[chosen - 1];
+        NavToolbar_SetPath(hWnd, target.c_str());
+        SendMessage(GetParent(hWnd), WM_NAVTOOLBAR_NAVIGATE, 0, (LPARAM)hWnd);
+    }
 }
 
-static void ShowEllipsisDropdown(HWND hWnd, RECT rcAnchor)
+static void ShowEllipsisDropdown(HWND hWnd, NavToolbarState* pState, RECT rcAnchor)
 {
-    if (g_State.collapsedFolders.empty()) return;
+    if (!pState || pState->collapsedFolders.empty()) return;
 
-    std::vector<NavMenuItem> items;
-    for (const auto& cf : g_State.collapsedFolders)
+    std::vector<std::wstring> targets;
+    std::vector<DropDownItem> items;
+    for (const auto& cf : pState->collapsedFolders)
     {
-        items.push_back({ cf.first, cf.second, true });
+        targets.push_back(cf.second);
+        items.push_back(DropDownItem::Action((int)targets.size(), L"\xE8B7", cf.first, L"", false, true));
     }
 
-    POINT pt = { rcAnchor.left, rcAnchor.bottom + 2 };
-    ClientToScreen(hWnd, &pt);
-
-    NavBreadcrumbMenu::Show(hWnd, pt.x, pt.y, items);
+    int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, rcAnchor, items);
+    if (chosen > 0 && chosen <= (int)targets.size())
+    {
+        std::wstring target = targets[chosen - 1];
+        NavToolbar_SetPath(hWnd, target.c_str());
+        SendMessage(GetParent(hWnd), WM_NAVTOOLBAR_NAVIGATE, 0, (LPARAM)hWnd);
+    }
 }
 
 // Subclass for Edit controls to capture Enter Key, Escape, and Focus events
 static LRESULT CALLBACK NavEditSubclass(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
+    HWND hToolbar = GetParent(hWnd);
+    NavToolbarState* pState = (NavToolbarState*)GetWindowLongPtrW(hToolbar, GWLP_USERDATA);
+
     switch (uMsg)
     {
     case WM_KEYDOWN:
         if (wParam == VK_RETURN)
         {
-            HWND hToolbar = GetParent(hWnd);
             HWND hMainWnd = GetParent(hToolbar);
 
             if (uIdSubclass == IDC_NAV_EDIT_ADDR)
             {
-                wchar_t szNewPath[MAX_PATH] = { 0 };
-                GetWindowTextW(hWnd, szNewPath, MAX_PATH);
-                if (wcslen(szNewPath) > 0)
+                if (pState)
                 {
-                    wcscpy_s(g_State.szCurrentPath, szNewPath);
+                    wchar_t szNewPath[MAX_PATH] = { 0 };
+                    GetWindowTextW(hWnd, szNewPath, MAX_PATH);
+                    if (wcslen(szNewPath) > 0)
+                    {
+                        wcscpy_s(pState->szCurrentPath, szNewPath);
+                    }
+                    pState->bEditingAddress = FALSE;
                 }
-                g_State.bEditingAddress = FALSE;
                 ShowWindow(hWnd, SW_HIDE);
                 InvalidateRect(hToolbar, NULL, TRUE);
 
@@ -895,40 +584,56 @@ static LRESULT CALLBACK NavEditSubclass(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
             }
             return 0;
         }
-        else if (wParam == VK_ESCAPE && uIdSubclass == IDC_NAV_EDIT_ADDR)
+        else if (wParam == VK_ESCAPE)
         {
-            g_State.bEditingAddress = FALSE;
-            ShowWindow(hWnd, SW_HIDE);
-            InvalidateRect(GetParent(hWnd), NULL, TRUE);
-            return 0;
+            if (uIdSubclass == IDC_NAV_EDIT_ADDR)
+            {
+                if (pState) pState->bEditingAddress = FALSE;
+                ShowWindow(hWnd, SW_HIDE);
+                InvalidateRect(hToolbar, NULL, TRUE);
+                return 0;
+            }
+            else if (uIdSubclass == IDC_NAV_EDIT_SEARCH)
+            {
+                if (pState && pState->hEditSearch)
+                {
+                    SetWindowTextW(pState->hEditSearch, L"");
+                    SendMessage(GetParent(hToolbar), WM_NAVTOOLBAR_SEARCH, 0, (LPARAM)pState->hEditSearch);
+                    InvalidateRect(hToolbar, NULL, FALSE);
+                }
+                return 0;
+            }
         }
         break;
 
     case WM_SETFOCUS:
         if (uIdSubclass == IDC_NAV_EDIT_SEARCH)
         {
-            g_State.bSearchFocused = TRUE;
-            InvalidateRect(GetParent(hWnd), NULL, FALSE);
+            if (pState) pState->bSearchFocused = TRUE;
+            InvalidateRect(hToolbar, NULL, FALSE);
         }
         break;
 
     case WM_KILLFOCUS:
         if (uIdSubclass == IDC_NAV_EDIT_ADDR)
         {
-            wchar_t szNewPath[MAX_PATH] = { 0 };
-            GetWindowTextW(hWnd, szNewPath, MAX_PATH);
-            if (wcslen(szNewPath) > 0)
+            if (pState)
             {
-                wcscpy_s(g_State.szCurrentPath, szNewPath);
+                wchar_t szNewPath[MAX_PATH] = { 0 };
+                GetWindowTextW(hWnd, szNewPath, MAX_PATH);
+                if (wcslen(szNewPath) > 0)
+                {
+                    wcscpy_s(pState->szCurrentPath, szNewPath);
+                }
+                pState->bEditingAddress = FALSE;
             }
-            g_State.bEditingAddress = FALSE;
             ShowWindow(hWnd, SW_HIDE);
-            InvalidateRect(GetParent(hWnd), NULL, TRUE);
+            InvalidateRect(hToolbar, NULL, TRUE);
         }
         else if (uIdSubclass == IDC_NAV_EDIT_SEARCH)
         {
-            g_State.bSearchFocused = FALSE;
-            InvalidateRect(GetParent(hWnd), NULL, FALSE);
+            if (pState) pState->bSearchFocused = FALSE;
+            InvalidateRect(hToolbar, NULL, FALSE);
         }
         break;
 
@@ -941,61 +646,76 @@ static LRESULT CALLBACK NavEditSubclass(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 
 static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+    NavToolbarState* pState = (NavToolbarState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+
     switch (uMsg)
     {
+    case WM_NCCREATE:
+    {
+        pState = new NavToolbarState();
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)pState);
+        return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+    }
+
     case WM_CREATE:
     {
-        g_State.hFontMain = CreateSystemUiFont(10.5f, FW_NORMAL);
-        g_State.hFontIcons = CreateMdl2IconFont(11.0f, FW_NORMAL);
-        g_State.hFontChevron = CreateMdl2IconFont(9.5f, FW_SEMIBOLD);
+        if (!pState)
+        {
+            pState = new NavToolbarState();
+            SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)pState);
+        }
 
-        g_State.hbrPillDark = CreateSolidBrush(RGB(62, 26, 31));
-        g_State.hbrPillEditDark = CreateSolidBrush(RGB(42, 18, 22));
-        g_State.hbrPillLight = CreateSolidBrush(RGB(240, 240, 240));
+        pState->hFontMain = CreateSystemUiFont(10.5f, FW_NORMAL);
+        pState->hFontIcons = CreateMdl2IconFont(11.0f, FW_NORMAL);
+        pState->hFontChevron = CreateMdl2IconFont(9.5f, FW_SEMIBOLD);
+
+        pState->hbrPillDark = CreateSolidBrush(RGB(62, 26, 31));
+        pState->hbrPillEditDark = CreateSolidBrush(RGB(42, 18, 22));
+        pState->hbrPillLight = CreateSolidBrush(RGB(240, 240, 240));
 
         HINSTANCE hInst = ((LPCREATESTRUCT)lParam)->hInstance;
 
         // 1. Address Edit Control (Hidden initially; shown when user clicks Address Pill)
-        g_State.hEditAddr = CreateWindowExW(0, L"EDIT", g_State.szCurrentPath,
+        pState->hEditAddr = CreateWindowExW(0, L"EDIT", pState->szCurrentPath,
             WS_CHILD | ES_AUTOHSCROLL,
             156, 11, 400, 22, hWnd, (HMENU)IDC_NAV_EDIT_ADDR, hInst, NULL);
 
-        SetWindowSubclass(g_State.hEditAddr, NavEditSubclass, IDC_NAV_EDIT_ADDR, 0);
-        if (g_State.hFontMain) SendMessage(g_State.hEditAddr, WM_SETFONT, (WPARAM)g_State.hFontMain, MAKELPARAM(FALSE, 0));
-        SendMessage(g_State.hEditAddr, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(4, 4));
-        SendMessageW(g_State.hEditAddr, EM_SETCUEBANNER, TRUE, (LPARAM)L"Enter MSTS / Open Rails Installation Directory Path...");
+        SetWindowSubclass(pState->hEditAddr, NavEditSubclass, IDC_NAV_EDIT_ADDR, 0);
+        if (pState->hFontMain) SendMessage(pState->hEditAddr, WM_SETFONT, (WPARAM)pState->hFontMain, MAKELPARAM(FALSE, 0));
+        SendMessage(pState->hEditAddr, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(4, 4));
+        SendMessageW(pState->hEditAddr, EM_SETCUEBANNER, TRUE, (LPARAM)pState->szAddressPlaceholder);
 
         // 2. Search Edit Control (Inside Search Pill)
-        g_State.hEditSearch = CreateWindowExW(0, L"EDIT", L"",
+        pState->hEditSearch = CreateWindowExW(0, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             600, 11, 190, 22, hWnd, (HMENU)IDC_NAV_EDIT_SEARCH, hInst, NULL);
 
-        SetWindowSubclass(g_State.hEditSearch, NavEditSubclass, IDC_NAV_EDIT_SEARCH, 0);
-        if (g_State.hFontMain) SendMessage(g_State.hEditSearch, WM_SETFONT, (WPARAM)g_State.hFontMain, MAKELPARAM(FALSE, 0));
-        SendMessage(g_State.hEditSearch, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(4, 4));
-
-        SendMessageW(g_State.hEditSearch, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search Consists & Assets");
+        SetWindowSubclass(pState->hEditSearch, NavEditSubclass, IDC_NAV_EDIT_SEARCH, 0);
+        if (pState->hFontMain) SendMessage(pState->hEditSearch, WM_SETFONT, (WPARAM)pState->hFontMain, MAKELPARAM(FALSE, 0));
+        SendMessage(pState->hEditSearch, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(4, 4));
+        SendMessageW(pState->hEditSearch, EM_SETCUEBANNER, TRUE, (LPARAM)pState->szSearchPlaceholder);
     }
     break;
 
     case WM_COMMAND:
     {
-        WORD id = LOWORD(wParam);
         WORD code = HIWORD(wParam);
         HWND hMainWnd = GetParent(hWnd);
 
-        if (code == EN_CHANGE && (HWND)lParam == g_State.hEditSearch)
+        if (pState && code == EN_CHANGE && (HWND)lParam == pState->hEditSearch)
         {
-            if (!g_State.bInternalChange)
+            if (!pState->bInternalChange)
             {
-                SendMessage(hMainWnd, WM_NAVTOOLBAR_SEARCH, 0, (LPARAM)g_State.hEditSearch);
+                SendMessage(hMainWnd, WM_NAVTOOLBAR_SEARCH, 0, (LPARAM)pState->hEditSearch);
             }
+            InvalidateRect(hWnd, NULL, FALSE);
         }
     }
     break;
 
     case WM_MOUSEMOVE:
     {
+        if (!pState) break;
         int x = LOWORD(lParam);
         int y = HIWORD(lParam);
 
@@ -1004,20 +724,20 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         int addrPillLeft, addrPillRight, searchPillLeft, searchPillRight;
         CalculatePillLayout(rcClient.right, addrPillLeft, addrPillRight, searchPillLeft, searchPillRight);
 
-        if (!g_State.bTrackingMouse)
+        if (!pState->bTrackingMouse)
         {
             TRACKMOUSEEVENT tme = { 0 };
             tme.cbSize = sizeof(TRACKMOUSEEVENT);
             tme.dwFlags = TME_LEAVE;
             tme.hwndTrack = hWnd;
             TrackMouseEvent(&tme);
-            g_State.bTrackingMouse = TRUE;
+            pState->bTrackingMouse = TRUE;
         }
 
-        NavIconIndex hit = HitTestIcon(x, y, addrPillLeft, addrPillRight);
-        if (hit != g_State.hoverIndex)
+        NavIconIndex hit = HitTestIcon(pState, x, y, addrPillLeft, addrPillRight, searchPillLeft, searchPillRight);
+        if (hit != pState->hoverIndex)
         {
-            g_State.hoverIndex = hit;
+            pState->hoverIndex = hit;
             InvalidateRect(hWnd, NULL, FALSE);
         }
     }
@@ -1025,19 +745,23 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 
     case WM_MOUSELEAVE:
     {
-        g_State.bTrackingMouse = FALSE;
-        if (g_State.hoverIndex != ICON_NONE || g_State.pressedIndex != ICON_NONE)
+        if (pState)
         {
-            g_State.hoverIndex = ICON_NONE;
-            g_State.pressedIndex = ICON_NONE;
-            g_State.hoverBreadcrumb = -1;
-            InvalidateRect(hWnd, NULL, FALSE);
+            pState->bTrackingMouse = FALSE;
+            if (pState->hoverIndex != ICON_NONE || pState->pressedIndex != ICON_NONE)
+            {
+                pState->hoverIndex = ICON_NONE;
+                pState->pressedIndex = ICON_NONE;
+                pState->hoverBreadcrumb = -1;
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
         }
     }
     break;
 
     case WM_LBUTTONDOWN:
     {
+        if (!pState) break;
         int x = LOWORD(lParam);
         int y = HIWORD(lParam);
 
@@ -1046,10 +770,10 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         int addrPillLeft, addrPillRight, searchPillLeft, searchPillRight;
         CalculatePillLayout(rcClient.right, addrPillLeft, addrPillRight, searchPillLeft, searchPillRight);
 
-        NavIconIndex hit = HitTestIcon(x, y, addrPillLeft, addrPillRight);
+        NavIconIndex hit = HitTestIcon(pState, x, y, addrPillLeft, addrPillRight, searchPillLeft, searchPillRight);
         if (hit != ICON_NONE)
         {
-            g_State.pressedIndex = hit;
+            pState->pressedIndex = hit;
             SetCapture(hWnd);
             InvalidateRect(hWnd, NULL, FALSE);
         }
@@ -1058,6 +782,7 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 
     case WM_LBUTTONUP:
     {
+        if (!pState) break;
         if (GetCapture() == hWnd)
         {
             ReleaseCapture();
@@ -1071,13 +796,13 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         int addrPillLeft, addrPillRight, searchPillLeft, searchPillRight;
         CalculatePillLayout(rcClient.right, addrPillLeft, addrPillRight, searchPillLeft, searchPillRight);
 
-        NavIconIndex hit = HitTestIcon(x, y, addrPillLeft, addrPillRight);
-        NavIconIndex clicked = (NavIconIndex)g_State.pressedIndex;
-        g_State.pressedIndex = ICON_NONE;
+        NavIconIndex hit = HitTestIcon(pState, x, y, addrPillLeft, addrPillRight, searchPillLeft, searchPillRight);
+        NavIconIndex clicked = (NavIconIndex)pState->pressedIndex;
+        pState->pressedIndex = ICON_NONE;
 
         InvalidateRect(hWnd, NULL, FALSE);
 
-        if (clicked != ICON_NONE && (clicked == hit || clicked == ICON_ADDR_PILL || clicked == ICON_ADDR_CLEAR || clicked >= ICON_BC_BASE))
+        if (clicked != ICON_NONE && (clicked == hit || clicked == ICON_ADDR_PILL || clicked == ICON_ADDR_CLEAR || clicked == ICON_SEARCH_CLEAR || clicked >= ICON_BC_BASE))
         {
             HWND hMainWnd = GetParent(hWnd);
             switch (clicked)
@@ -1095,21 +820,30 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
                 SendMessage(hMainWnd, WM_NAVTOOLBAR_ACTION, NAV_ACTION_REFRESH, 0);
                 break;
             case ICON_ADDR_CLEAR:
-                if (g_State.hEditAddr)
+                if (pState->hEditAddr)
                 {
-                    SetWindowTextW(g_State.hEditAddr, L"");
-                    SetFocus(g_State.hEditAddr);
+                    SetWindowTextW(pState->hEditAddr, L"");
+                    SetFocus(pState->hEditAddr);
+                }
+                break;
+            case ICON_SEARCH_CLEAR:
+                if (pState->hEditSearch)
+                {
+                    SetWindowTextW(pState->hEditSearch, L"");
+                    SetFocus(pState->hEditSearch);
+                    SendMessage(hMainWnd, WM_NAVTOOLBAR_SEARCH, 0, (LPARAM)pState->hEditSearch);
+                    InvalidateRect(hWnd, NULL, FALSE);
                 }
                 break;
             case ICON_ADDR_PILL:
             {
-                if (!g_State.bEditingAddress)
+                if (!pState->bEditingAddress)
                 {
-                    g_State.bEditingAddress = TRUE;
-                    SetWindowTextW(g_State.hEditAddr, g_State.szCurrentPath);
-                    ShowWindow(g_State.hEditAddr, SW_SHOW);
-                    SetFocus(g_State.hEditAddr);
-                    SendMessage(g_State.hEditAddr, EM_SETSEL, 0, -1);
+                    pState->bEditingAddress = TRUE;
+                    SetWindowTextW(pState->hEditAddr, pState->szCurrentPath);
+                    ShowWindow(pState->hEditAddr, SW_SHOW);
+                    SetFocus(pState->hEditAddr);
+                    SendMessage(pState->hEditAddr, EM_SETSEL, 0, -1);
                     InvalidateRect(hWnd, NULL, FALSE);
                 }
             }
@@ -1119,16 +853,16 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
                 if (clicked >= ICON_BC_BASE)
                 {
                     int bcIdx = clicked - ICON_BC_BASE;
-                    if (bcIdx >= 0 && bcIdx < (int)g_State.breadcrumbElements.size())
+                    if (bcIdx >= 0 && bcIdx < (int)pState->breadcrumbElements.size())
                     {
-                        const BreadcrumbElement& elem = g_State.breadcrumbElements[bcIdx];
+                        const BreadcrumbElement& elem = pState->breadcrumbElements[bcIdx];
                         if (elem.type == BC_ROOT_PC || elem.type == BC_CHEVRON_ROOT)
                         {
                             ShowDriveDropdown(hWnd, elem.rc);
                         }
                         else if (elem.type == BC_ELLIPSIS)
                         {
-                            ShowEllipsisDropdown(hWnd, elem.rc);
+                            ShowEllipsisDropdown(hWnd, pState, elem.rc);
                         }
                         else if (elem.type == BC_CHEVRON_ELLIP || elem.type == BC_CHEVRON)
                         {
@@ -1136,7 +870,7 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
                         }
                         else if (elem.type == BC_SEGMENT)
                         {
-                            if (elem.segmentIndex == (int)g_State.breadcrumbElements.size() - 1 || elem.fullPath == g_State.szCurrentPath)
+                            if (elem.segmentIndex == (int)pState->breadcrumbElements.size() - 1 || elem.fullPath == pState->szCurrentPath)
                             {
                                 ShowFolderDropdown(hWnd, elem.fullPath, elem.rc);
                             }
@@ -1160,14 +894,15 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
     {
         HDC hdc = (HDC)wParam;
         HWND hEdit = (HWND)lParam;
+        if (!pState) break;
 
-        COLORREF bgCol = g_State.bEditingAddress && (hEdit == g_State.hEditAddr) ?
+        COLORREF bgCol = (pState->bEditingAddress && (hEdit == pState->hEditAddr)) ?
             RGB(42, 18, 22) : RGB(62, 26, 31);
 
         SetBkMode(hdc, OPAQUE);
         SetBkColor(hdc, bgCol);
         SetTextColor(hdc, RGB(245, 245, 245));
-        return (LRESULT)(hEdit == g_State.hEditAddr && g_State.bEditingAddress ? g_State.hbrPillEditDark : g_State.hbrPillDark);
+        return (LRESULT)(hEdit == pState->hEditAddr && pState->bEditingAddress ? pState->hbrPillEditDark : pState->hbrPillDark);
     }
     break;
 
@@ -1175,6 +910,7 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
     {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
+        if (!pState) { EndPaint(hWnd, &ps); return 0; }
 
         RECT rcClient;
         GetClientRect(hWnd, &rcClient);
@@ -1199,9 +935,8 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         CalculatePillLayout(rcClient.right, addrPillLeft, addrPillRight, searchPillLeft, searchPillRight);
 
         // 2. Draw Pill Shape for Address Bar
-        COLORREF curAddrPillBg = g_State.bEditingAddress ? RGB(42, 18, 22) : pillBg;
-
-        COLORREF curAddrBorder = g_State.bEditingAddress ? accentBlue : pillBorder;
+        COLORREF curAddrPillBg = pState->bEditingAddress ? RGB(42, 18, 22) : pillBg;
+        COLORREF curAddrBorder = pState->bEditingAddress ? accentBlue : pillBorder;
 
         HBRUSH hbrAddrPill = CreateSolidBrush(curAddrPillBg);
         HPEN hPenAddrBorder = CreatePen(PS_SOLID, 1, curAddrBorder);
@@ -1217,7 +952,7 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         DeleteObject(hPenAddrBorder);
 
         // Active Editing Underline Highlight Line for Address Bar
-        if (g_State.bEditingAddress)
+        if (pState->bEditingAddress)
         {
             HPEN hPenBlue = CreatePen(PS_SOLID, 2, accentBlue);
             HPEN hPrevPen = (HPEN)SelectObject(hmemDC, hPenBlue);
@@ -1231,13 +966,13 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             // Draw Clear 'X' (\xE711) button on right of Address Pill during editing
             RECT rcClearBtn = { addrPillRight - 26, 5, addrPillRight - 6, 39 };
             SetBkMode(hmemDC, TRANSPARENT);
-            SetTextColor(hmemDC, g_State.hoverIndex == ICON_ADDR_CLEAR ? RGB(255, 255, 255) : RGB(200, 200, 200));
-            SelectObject(hmemDC, g_State.hFontIcons);
+            SetTextColor(hmemDC, pState->hoverIndex == ICON_ADDR_CLEAR ? RGB(255, 255, 255) : RGB(200, 200, 200));
+            SelectObject(hmemDC, pState->hFontIcons ? pState->hFontIcons : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
             DrawTextW(hmemDC, L"\xE711", -1, &rcClearBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
 
         // 3. Draw Pill Shape for Search Bar
-        COLORREF curSearchBorder = g_State.bSearchFocused ? accentBlue : pillBorder;
+        COLORREF curSearchBorder = pState->bSearchFocused ? accentBlue : pillBorder;
         HBRUSH hbrSearchPill = CreateSolidBrush(pillBg);
         HPEN hPenSearchBorder = CreatePen(PS_SOLID, 1, curSearchBorder);
 
@@ -1251,7 +986,7 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         DeleteObject(hbrSearchPill);
         DeleteObject(hPenSearchBorder);
 
-        if (g_State.bSearchFocused)
+        if (pState->bSearchFocused)
         {
             HPEN hPenBlue = CreatePen(PS_SOLID, 2, accentBlue);
             HPEN hPrevPen = (HPEN)SelectObject(hmemDC, hPenBlue);
@@ -1263,174 +998,186 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             DeleteObject(hPenBlue);
         }
 
-        // Draw Search Icon (\xE721) inside Search Pill - bright & centered
-        RECT rcSearchIcon = { searchPillRight - 28, 5, searchPillRight - 8, 39 };
-        SetBkMode(hmemDC, TRANSPARENT);
-        SetTextColor(hmemDC, RGB(220, 220, 220));
-        SelectObject(hmemDC, g_State.hFontIcons ? g_State.hFontIcons : GetStockObject(DEFAULT_GUI_FONT));
-        DrawTextW(hmemDC, L"\xE721", -1, &rcSearchIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        // Draw Search Icon or Clear 'X' button inside Search Pill
+        bool hasSearchText = (pState->hEditSearch && GetWindowTextLengthW(pState->hEditSearch) > 0);
+        if (hasSearchText)
+        {
+            RECT rcSearchClear = { searchPillRight - 28, 5, searchPillRight - 6, 39 };
+            SetBkMode(hmemDC, TRANSPARENT);
+            SetTextColor(hmemDC, pState->hoverIndex == ICON_SEARCH_CLEAR ? RGB(255, 255, 255) : RGB(200, 200, 200));
+            SelectObject(hmemDC, pState->hFontIcons ? pState->hFontIcons : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+            DrawTextW(hmemDC, L"\xE711", -1, &rcSearchClear, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        else
+        {
+            RECT rcSearchIcon = { searchPillRight - 28, 5, searchPillRight - 8, 39 };
+            SetBkMode(hmemDC, TRANSPARENT);
+            SetTextColor(hmemDC, RGB(220, 220, 220));
+            SelectObject(hmemDC, pState->hFontIcons ? pState->hFontIcons : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+            DrawTextW(hmemDC, L"\xE721", -1, &rcSearchIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
 
         // 4. Render Breadcrumbs inside Address Pill when NOT editing
-        if (!g_State.bEditingAddress)
+        if (!pState->bEditingAddress)
         {
-            if (wcslen(g_State.szCurrentPath) == 0)
+            if (wcslen(pState->szCurrentPath) == 0)
             {
                 // Placeholder on first launch / empty path
                 RECT rcPlaceholder = { addrPillLeft + 14, 5, addrPillRight - 14, 39 };
                 SetBkMode(hmemDC, TRANSPARENT);
                 SetTextColor(hmemDC, RGB(180, 150, 160));
-                SelectObject(hmemDC, g_State.hFontMain ? g_State.hFontMain : GetStockObject(DEFAULT_GUI_FONT));
-                DrawTextW(hmemDC, L"Enter MSTS / Open Rails Installation Directory...", -1, &rcPlaceholder, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                SelectObject(hmemDC, pState->hFontMain ? pState->hFontMain : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+                DrawTextW(hmemDC, pState->szAddressPlaceholder, -1, &rcPlaceholder, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
             else
             {
-                RebuildBreadcrumbs(hmemDC, addrPillLeft, addrPillRight);
+                RebuildBreadcrumbs(pState, hmemDC, addrPillLeft, addrPillRight);
 
-            HRGN hClip = CreateRectRgn(addrPillLeft + 1, 5, addrPillRight - 1, 39);
-            SelectClipRgn(hmemDC, hClip);
+                HRGN hClip = CreateRectRgn(addrPillLeft + 1, 5, addrPillRight - 1, 39);
+                SelectClipRgn(hmemDC, hClip);
 
-            HPEN hNullPen = CreatePen(PS_NULL, 0, 0);
-            HPEN hPrevPen = (HPEN)SelectObject(hmemDC, hNullPen);
+                HPEN hNullPen = CreatePen(PS_NULL, 0, 0);
+                HPEN hPrevPen = (HPEN)SelectObject(hmemDC, hNullPen);
 
-            COLORREF hoverBg = RGB(78, 32, 38);
-            COLORREF pressedBg = RGB(90, 38, 45);
+                COLORREF hoverBg = RGB(78, 32, 38);
+                COLORREF pressedBg = RGB(90, 38, 45);
 
-            // 1. Draw unified hover / pressed capsules for breadcrumb pairs
-            int activeHoverIdx = (g_State.hoverIndex >= ICON_BC_BASE) ? (g_State.hoverIndex - ICON_BC_BASE) : -1;
-            int activePressIdx = (g_State.pressedIndex >= ICON_BC_BASE) ? (g_State.pressedIndex - ICON_BC_BASE) : -1;
+                // 1. Draw unified hover / pressed capsules for breadcrumb pairs
+                int activeHoverIdx = (pState->hoverIndex >= ICON_BC_BASE) ? (pState->hoverIndex - ICON_BC_BASE) : -1;
+                int activePressIdx = (pState->pressedIndex >= ICON_BC_BASE) ? (pState->pressedIndex - ICON_BC_BASE) : -1;
 
-            for (size_t i = 0; i < g_State.breadcrumbElements.size(); ++i)
-            {
-                const BreadcrumbElement& elem = g_State.breadcrumbElements[i];
-                if (elem.type == BC_ROOT_PC || elem.type == BC_ELLIPSIS || elem.type == BC_SEGMENT)
+                for (size_t i = 0; i < pState->breadcrumbElements.size(); ++i)
                 {
-                    RECT rcCapsule = elem.rc;
-                    bool bPairHover = ((int)i == activeHoverIdx);
-                    bool bPairPress = ((int)i == activePressIdx);
-                    bool bHasChevron = false;
-                    bool bChevHover = false;
-                    bool bChevPress = false;
-                    int sepX = elem.rc.right;
-
-                    // Include adjacent chevron in the unified capsule
-                    if (i + 1 < g_State.breadcrumbElements.size())
+                    const BreadcrumbElement& elem = pState->breadcrumbElements[i];
+                    if (elem.type == BC_ROOT_PC || elem.type == BC_ELLIPSIS || elem.type == BC_SEGMENT)
                     {
-                        const BreadcrumbElement& nextElem = g_State.breadcrumbElements[i + 1];
-                        if (nextElem.type == BC_CHEVRON_ROOT || nextElem.type == BC_CHEVRON_ELLIP || nextElem.type == BC_CHEVRON)
+                        RECT rcCapsule = elem.rc;
+                        bool bPairHover = ((int)i == activeHoverIdx);
+                        bool bPairPress = ((int)i == activePressIdx);
+                        bool bHasChevron = false;
+                        bool bChevHover = false;
+                        bool bChevPress = false;
+                        int sepX = elem.rc.right;
+
+                        // Include adjacent chevron in the unified capsule
+                        if (i + 1 < pState->breadcrumbElements.size())
                         {
-                            rcCapsule.right = nextElem.rc.right;
-                            bHasChevron = true;
-                            if ((int)(i + 1) == activeHoverIdx) { bPairHover = true; bChevHover = true; }
-                            if ((int)(i + 1) == activePressIdx) { bPairPress = true; bChevPress = true; }
-                        }
-                    }
-
-                    if (bPairHover || bPairPress)
-                    {
-                        // Outer unified capsule
-                        HBRUSH hbrHover = CreateSolidBrush(bPairPress ? pressedBg : hoverBg);
-                        HBRUSH hOldBrHover = (HBRUSH)SelectObject(hmemDC, hbrHover);
-                        RoundRect(hmemDC, rcCapsule.left, rcCapsule.top, rcCapsule.right, rcCapsule.bottom, 6, 6);
-                        SelectObject(hmemDC, hOldBrHover);
-                        DeleteObject(hbrHover);
-
-                        if (bHasChevron)
-                        {
-                            // 1. Subtle vertical separator line between text and chevron
-                            HPEN hPenSep = CreatePen(PS_SOLID, 1, RGB(78, 32, 38));
-                            HPEN hOldP = (HPEN)SelectObject(hmemDC, hPenSep);
-                            MoveToEx(hmemDC, sepX, elem.rc.top + 5, NULL);
-                            LineTo(hmemDC, sepX, elem.rc.bottom - 5);
-                            SelectObject(hmemDC, hOldP);
-                            DeleteObject(hPenSep);
-
-                            // 2. Active button highlight cleanly overlaps the separator
-                            COLORREF subHighlight = RGB(88, 36, 42);
-                            if (bChevHover || bChevPress)
+                            const BreadcrumbElement& nextElem = pState->breadcrumbElements[i + 1];
+                            if (nextElem.type == BC_CHEVRON_ROOT || nextElem.type == BC_CHEVRON_ELLIP || nextElem.type == BC_CHEVRON)
                             {
-                                HRGN hChevRgn = CreateRectRgn(sepX, elem.rc.top, rcCapsule.right, rcCapsule.bottom);
-                                HRGN hPrevClip = CreateRectRgn(0, 0, 0, 0);
-                                int hasClip = GetClipRgn(hmemDC, hPrevClip);
-                                ExtSelectClipRgn(hmemDC, hChevRgn, RGN_AND);
-
-                                HBRUSH hbrSub = CreateSolidBrush(subHighlight);
-                                HBRUSH hOldSub = (HBRUSH)SelectObject(hmemDC, hbrSub);
-                                RoundRect(hmemDC, rcCapsule.left, rcCapsule.top, rcCapsule.right, rcCapsule.bottom, 6, 6);
-                                SelectObject(hmemDC, hOldSub);
-                                DeleteObject(hbrSub);
-
-                                SelectClipRgn(hmemDC, hasClip == 1 ? hPrevClip : NULL);
-                                DeleteObject(hPrevClip);
-                                DeleteObject(hChevRgn);
-                            }
-                            else if ((int)i == activeHoverIdx || (int)i == activePressIdx)
-                            {
-                                HRGN hTextRgn = CreateRectRgn(rcCapsule.left, elem.rc.top, sepX + 1, rcCapsule.bottom);
-                                HRGN hPrevClip = CreateRectRgn(0, 0, 0, 0);
-                                int hasClip = GetClipRgn(hmemDC, hPrevClip);
-                                ExtSelectClipRgn(hmemDC, hTextRgn, RGN_AND);
-
-                                HBRUSH hbrSub = CreateSolidBrush(subHighlight);
-                                HBRUSH hOldSub = (HBRUSH)SelectObject(hmemDC, hbrSub);
-                                RoundRect(hmemDC, rcCapsule.left, rcCapsule.top, rcCapsule.right, rcCapsule.bottom, 6, 6);
-                                SelectObject(hmemDC, hOldSub);
-                                DeleteObject(hbrSub);
-
-                                SelectClipRgn(hmemDC, hasClip == 1 ? hPrevClip : NULL);
-                                DeleteObject(hPrevClip);
-                                DeleteObject(hTextRgn);
+                                rcCapsule.right = nextElem.rc.right;
+                                bHasChevron = true;
+                                if ((int)(i + 1) == activeHoverIdx) { bPairHover = true; bChevHover = true; }
+                                if ((int)(i + 1) == activePressIdx) { bPairPress = true; bChevPress = true; }
                             }
                         }
+
+                        if (bPairHover || bPairPress)
+                        {
+                            // Outer unified capsule
+                            HBRUSH hbrHover = CreateSolidBrush(bPairPress ? pressedBg : hoverBg);
+                            HBRUSH hOldBrHover = (HBRUSH)SelectObject(hmemDC, hbrHover);
+                            RoundRect(hmemDC, rcCapsule.left, rcCapsule.top, rcCapsule.right, rcCapsule.bottom, 6, 6);
+                            SelectObject(hmemDC, hOldBrHover);
+                            DeleteObject(hbrHover);
+
+                            if (bHasChevron)
+                            {
+                                // 1. Subtle vertical separator line between text and chevron
+                                HPEN hPenSep = CreatePen(PS_SOLID, 1, RGB(78, 32, 38));
+                                HPEN hOldP = (HPEN)SelectObject(hmemDC, hPenSep);
+                                MoveToEx(hmemDC, sepX, elem.rc.top + 5, NULL);
+                                LineTo(hmemDC, sepX, elem.rc.bottom - 5);
+                                SelectObject(hmemDC, hOldP);
+                                DeleteObject(hPenSep);
+
+                                // 2. Active button highlight cleanly overlaps the separator
+                                COLORREF subHighlight = RGB(88, 36, 42);
+                                if (bChevHover || bChevPress)
+                                {
+                                    HRGN hChevRgn = CreateRectRgn(sepX, elem.rc.top, rcCapsule.right, rcCapsule.bottom);
+                                    HRGN hPrevClip = CreateRectRgn(0, 0, 0, 0);
+                                    int hasClip = GetClipRgn(hmemDC, hPrevClip);
+                                    ExtSelectClipRgn(hmemDC, hChevRgn, RGN_AND);
+
+                                    HBRUSH hbrSub = CreateSolidBrush(subHighlight);
+                                    HBRUSH hOldSub = (HBRUSH)SelectObject(hmemDC, hbrSub);
+                                    RoundRect(hmemDC, rcCapsule.left, rcCapsule.top, rcCapsule.right, rcCapsule.bottom, 6, 6);
+                                    SelectObject(hmemDC, hOldSub);
+                                    DeleteObject(hbrSub);
+
+                                    SelectClipRgn(hmemDC, hasClip == 1 ? hPrevClip : NULL);
+                                    DeleteObject(hPrevClip);
+                                    DeleteObject(hChevRgn);
+                                }
+                                else if ((int)i == activeHoverIdx || (int)i == activePressIdx)
+                                {
+                                    HRGN hTextRgn = CreateRectRgn(rcCapsule.left, elem.rc.top, sepX + 1, rcCapsule.bottom);
+                                    HRGN hPrevClip = CreateRectRgn(0, 0, 0, 0);
+                                    int hasClip = GetClipRgn(hmemDC, hPrevClip);
+                                    ExtSelectClipRgn(hmemDC, hTextRgn, RGN_AND);
+
+                                    HBRUSH hbrSub = CreateSolidBrush(subHighlight);
+                                    HBRUSH hOldSub = (HBRUSH)SelectObject(hmemDC, hbrSub);
+                                    RoundRect(hmemDC, rcCapsule.left, rcCapsule.top, rcCapsule.right, rcCapsule.bottom, 6, 6);
+                                    SelectObject(hmemDC, hOldSub);
+                                    DeleteObject(hbrSub);
+
+                                    SelectClipRgn(hmemDC, hasClip == 1 ? hPrevClip : NULL);
+                                    DeleteObject(hPrevClip);
+                                    DeleteObject(hTextRgn);
+                                }
+                            }
+                        }
                     }
                 }
-            }
 
-            // 2. Draw glyphs and labels
-            for (size_t i = 0; i < g_State.breadcrumbElements.size(); ++i)
-            {
-                const BreadcrumbElement& elem = g_State.breadcrumbElements[i];
-                SetBkMode(hmemDC, TRANSPARENT);
+                // 2. Draw glyphs and labels
+                for (size_t i = 0; i < pState->breadcrumbElements.size(); ++i)
+                {
+                    const BreadcrumbElement& elem = pState->breadcrumbElements[i];
+                    SetBkMode(hmemDC, TRANSPARENT);
 
-                if (elem.type == BC_ROOT_PC)
-                {
-                    // Draw "This PC" Desktop Computer Monitor Icon (\xE7F4)
-                    SetTextColor(hmemDC, RGB(245, 245, 245));
-                    SelectObject(hmemDC, g_State.hFontIcons);
-                    DrawTextW(hmemDC, L"\xE7F4", -1, (LPRECT)&elem.rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    if (elem.type == BC_ROOT_PC)
+                    {
+                        // Draw "This PC" Desktop Computer Monitor Icon (\xE7F4)
+                        SetTextColor(hmemDC, RGB(245, 245, 245));
+                        SelectObject(hmemDC, pState->hFontIcons ? pState->hFontIcons : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+                        DrawTextW(hmemDC, L"\xE7F4", -1, (LPRECT)&elem.rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    }
+                    else if (elem.type == BC_CHEVRON_ROOT || elem.type == BC_CHEVRON_ELLIP || elem.type == BC_CHEVRON)
+                    {
+                        // Draw Chevron (\xE76C)
+                        bool bChevActive = ((int)i == activeHoverIdx || (int)i == activePressIdx ||
+                            (i > 0 && ((int)(i - 1) == activeHoverIdx || (int)(i - 1) == activePressIdx)));
+                        SetTextColor(hmemDC, bChevActive ? RGB(255, 255, 255) : RGB(190, 170, 175));
+                        SelectObject(hmemDC, pState->hFontChevron ? pState->hFontChevron : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+                        DrawTextW(hmemDC, L"\xE76C", -1, (LPRECT)&elem.rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    }
+                    else if (elem.type == BC_ELLIPSIS)
+                    {
+                        // Draw "..." Ellipsis Button
+                        SetTextColor(hmemDC, RGB(245, 245, 245));
+                        SelectObject(hmemDC, pState->hFontMain ? pState->hFontMain : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+                        DrawTextW(hmemDC, L"...", -1, (LPRECT)&elem.rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    }
+                    else if (elem.type == BC_SEGMENT)
+                    {
+                        // Draw Folder / Drive segment with 8px left/right padding
+                        SetTextColor(hmemDC, RGB(255, 255, 255));
+                        SelectObject(hmemDC, pState->hFontMain ? pState->hFontMain : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+                        RECT rcText = elem.rc;
+                        rcText.left += 8;
+                        rcText.right -= 8;
+                        DrawTextW(hmemDC, elem.label.c_str(), -1, &rcText, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+                    }
                 }
-                else if (elem.type == BC_CHEVRON_ROOT || elem.type == BC_CHEVRON_ELLIP || elem.type == BC_CHEVRON)
-                {
-                    // Draw Chevron (\xE76C)
-                    bool bChevActive = ((int)i == activeHoverIdx || (int)i == activePressIdx ||
-                        (i > 0 && ((int)(i - 1) == activeHoverIdx || (int)(i - 1) == activePressIdx)));
-                    SetTextColor(hmemDC, bChevActive ? RGB(255, 255, 255) : RGB(190, 170, 175));
-                    SelectObject(hmemDC, g_State.hFontChevron);
-                    DrawTextW(hmemDC, L"\xE76C", -1, (LPRECT)&elem.rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                }
-                else if (elem.type == BC_ELLIPSIS)
-                {
-                    // Draw "..." Ellipsis Button
-                    SetTextColor(hmemDC, RGB(245, 245, 245));
-                    SelectObject(hmemDC, g_State.hFontMain);
-                    DrawTextW(hmemDC, L"...", -1, (LPRECT)&elem.rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                }
-                else if (elem.type == BC_SEGMENT)
-                {
-                    // Draw Folder / Drive segment with 8px left/right padding
-                    SetTextColor(hmemDC, RGB(255, 255, 255));
-                    SelectObject(hmemDC, g_State.hFontMain);
-                    RECT rcText = elem.rc;
-                    rcText.left += 8;
-                    rcText.right -= 8;
-                    DrawTextW(hmemDC, elem.label.c_str(), -1, &rcText, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-                }
-            }
 
-            SelectObject(hmemDC, hPrevPen);
-            DeleteObject(hNullPen);
+                SelectObject(hmemDC, hPrevPen);
+                DeleteObject(hNullPen);
 
-            SelectClipRgn(hmemDC, NULL);
-            DeleteObject(hClip);
+                SelectClipRgn(hmemDC, NULL);
+                DeleteObject(hClip);
             }
         }
 
@@ -1472,6 +1219,7 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 
     case WM_SIZE:
     {
+        if (!pState) break;
         int width = LOWORD(lParam);
         int height = HIWORD(lParam);
 
@@ -1482,16 +1230,16 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         int addrEditWidth = addrPillRight - 34 - addrEditLeft;
         if (addrEditWidth < 40) addrEditWidth = 40;
 
-        if (g_State.hEditAddr)
+        if (pState->hEditAddr)
         {
-            SetWindowPos(g_State.hEditAddr, NULL, addrEditLeft, 11, addrEditWidth, 22, SWP_NOZORDER);
+            SetWindowPos(pState->hEditAddr, NULL, addrEditLeft, 11, addrEditWidth, 22, SWP_NOZORDER);
         }
 
-        if (g_State.hEditSearch)
+        if (pState->hEditSearch)
         {
             int searchEditW = (searchPillRight - searchPillLeft) - 40;
             if (searchEditW < 40) searchEditW = 40;
-            SetWindowPos(g_State.hEditSearch, NULL, searchPillLeft + 12, 11, searchEditW, 22, SWP_NOZORDER);
+            SetWindowPos(pState->hEditSearch, NULL, searchPillLeft + 12, 11, searchEditW, 22, SWP_NOZORDER);
         }
 
         InvalidateRect(hWnd, NULL, TRUE);
@@ -1499,13 +1247,21 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
     break;
 
     case WM_DESTROY:
-        if (g_State.hFontMain) DeleteObject(g_State.hFontMain);
-        if (g_State.hFontIcons) DeleteObject(g_State.hFontIcons);
-        if (g_State.hFontChevron) DeleteObject(g_State.hFontChevron);
-        if (g_State.hbrPillDark) DeleteObject(g_State.hbrPillDark);
-        if (g_State.hbrPillEditDark) DeleteObject(g_State.hbrPillEditDark);
-        if (g_State.hbrPillLight) DeleteObject(g_State.hbrPillLight);
+    {
+        if (pState)
+        {
+            if (pState->hFontMain) DeleteObject(pState->hFontMain);
+            if (pState->hFontIcons) DeleteObject(pState->hFontIcons);
+            if (pState->hFontChevron) DeleteObject(pState->hFontChevron);
+            if (pState->hbrPillDark) DeleteObject(pState->hbrPillDark);
+            if (pState->hbrPillEditDark) DeleteObject(pState->hbrPillEditDark);
+            if (pState->hbrPillLight) DeleteObject(pState->hbrPillLight);
+
+            delete pState;
+            SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0);
+        }
         break;
+    }
 
     default:
         return DefWindowProc(hWnd, uMsg, wParam, lParam);
@@ -1543,33 +1299,79 @@ HWND CreateNavToolbar(HWND hParent, HINSTANCE hInstance, int x, int y, int width
 
 void NavToolbar_SetPath(HWND hNavToolbar, const wchar_t* szPath)
 {
-    wcscpy_s(g_State.szCurrentPath, szPath);
-    if (g_State.hEditAddr) SetWindowTextW(g_State.hEditAddr, szPath);
-    InvalidateRect(hNavToolbar, NULL, TRUE);
+    NavToolbarState* pState = (NavToolbarState*)GetWindowLongPtrW(hNavToolbar, GWLP_USERDATA);
+    if (pState)
+    {
+        wcscpy_s(pState->szCurrentPath, szPath ? szPath : L"");
+        if (pState->hEditAddr) SetWindowTextW(pState->hEditAddr, szPath ? szPath : L"");
+        InvalidateRect(hNavToolbar, NULL, TRUE);
+    }
 }
 
 void NavToolbar_GetPath(HWND hNavToolbar, wchar_t* szBuffer, int maxLen)
 {
-    wcscpy_s(szBuffer, maxLen, g_State.szCurrentPath);
+    NavToolbarState* pState = (NavToolbarState*)GetWindowLongPtrW(hNavToolbar, GWLP_USERDATA);
+    if (pState && szBuffer && maxLen > 0)
+    {
+        wcscpy_s(szBuffer, maxLen, pState->szCurrentPath);
+    }
 }
 
 void NavToolbar_GetSearchQuery(HWND hNavToolbar, wchar_t* szBuffer, int maxLen)
 {
-    if (g_State.hEditSearch) GetWindowTextW(g_State.hEditSearch, szBuffer, maxLen);
+    NavToolbarState* pState = (NavToolbarState*)GetWindowLongPtrW(hNavToolbar, GWLP_USERDATA);
+    if (pState && pState->hEditSearch && szBuffer && maxLen > 0)
+    {
+        GetWindowTextW(pState->hEditSearch, szBuffer, maxLen);
+    }
 }
 
 void NavToolbar_SetSearchQuery(HWND hNavToolbar, const wchar_t* szQuery)
 {
-    if (g_State.hEditSearch)
+    NavToolbarState* pState = (NavToolbarState*)GetWindowLongPtrW(hNavToolbar, GWLP_USERDATA);
+    if (pState && pState->hEditSearch)
     {
-        g_State.bInternalChange = TRUE;
-        SetWindowTextW(g_State.hEditSearch, szQuery);
-        g_State.bInternalChange = FALSE;
+        pState->bInternalChange = TRUE;
+        SetWindowTextW(pState->hEditSearch, szQuery ? szQuery : L"");
+        pState->bInternalChange = FALSE;
+        InvalidateRect(hNavToolbar, NULL, FALSE);
     }
 }
 
 void NavToolbar_SetDarkMode(HWND hNavToolbar, BOOL bDarkMode)
 {
-    g_State.bDarkMode = bDarkMode;
-    InvalidateRect(hNavToolbar, NULL, TRUE);
+    NavToolbarState* pState = (NavToolbarState*)GetWindowLongPtrW(hNavToolbar, GWLP_USERDATA);
+    if (pState)
+    {
+        pState->bDarkMode = bDarkMode;
+        InvalidateRect(hNavToolbar, NULL, TRUE);
+    }
+}
+
+void NavToolbar_SetSearchPlaceholder(HWND hNavToolbar, const wchar_t* szPlaceholder)
+{
+    NavToolbarState* pState = (NavToolbarState*)GetWindowLongPtrW(hNavToolbar, GWLP_USERDATA);
+    if (pState && szPlaceholder)
+    {
+        wcsncpy_s(pState->szSearchPlaceholder, szPlaceholder, _TRUNCATE);
+        if (pState->hEditSearch)
+        {
+            SendMessageW(pState->hEditSearch, EM_SETCUEBANNER, TRUE, (LPARAM)szPlaceholder);
+        }
+        InvalidateRect(hNavToolbar, NULL, TRUE);
+    }
+}
+
+void NavToolbar_SetAddressPlaceholder(HWND hNavToolbar, const wchar_t* szPlaceholder)
+{
+    NavToolbarState* pState = (NavToolbarState*)GetWindowLongPtrW(hNavToolbar, GWLP_USERDATA);
+    if (pState && szPlaceholder)
+    {
+        wcsncpy_s(pState->szAddressPlaceholder, szPlaceholder, _TRUNCATE);
+        if (pState->hEditAddr)
+        {
+            SendMessageW(pState->hEditAddr, EM_SETCUEBANNER, TRUE, (LPARAM)szPlaceholder);
+        }
+        InvalidateRect(hNavToolbar, NULL, TRUE);
+    }
 }

@@ -45,29 +45,42 @@ CustomListControl::CustomListControl()
     m_marqueeStartScrollX(0),
     m_marqueeCurrentX(0),
     m_marqueeCurrentY(0),
-    m_isAutoScrolling(false)
+    m_isAutoScrolling(false),
+    m_bPotentialDrag(false),
+    m_bPotentialItemDrag(false),
+    m_bIsItemDragging(false),
+    m_dropTargetIndex(-1),
+    m_bAllowRearrange(false),
+    m_bAllowTransferSource(false),
+    m_bAllowMarquee(false),
+    m_bDrawCardBorder(false),
+    m_pendingClickedRow(-1),
+    m_bPendingCtrl(false),
+    m_bPendingShift(false),
+    m_bFaytActive(false),
+    m_faytMatchIndex(-1),
+    m_faytHoverBtn(0),
+    m_hFontFaytIcon(NULL),
+    m_hFontFaytText(NULL)
 {
+    m_ptDragStart = { 0, 0 };
+    m_ptMarqueeStart = { 0, 0 };
+    m_rcMarquee = { 0, 0, 0, 0 };
+    m_rcFaytPill = { 0 };
+    m_rcFaytPrevBtn = { 0 };
+    m_rcFaytNextBtn = { 0 };
+    m_rcFaytCloseBtn = { 0 };
+
     m_vScroll.SetOrientation(ScrollBarOrientation::Vertical);
     m_hScroll.SetOrientation(ScrollBarOrientation::Horizontal);
     m_vScroll.SetGutterColor(CustomUITheme::DarkBackground);
     m_hScroll.SetGutterColor(CustomUITheme::DarkBackground);
-
-    m_bPotentialDrag = false;
-    m_bPotentialItemDrag = false;
-    m_bIsItemDragging = false;
-    m_dropTargetIndex = -1;
-    m_bAllowRearrange = false;
-    m_bDrawCardBorder = false;
-    m_ptDragStart = { 0, 0 };
-    m_ptMarqueeStart = { 0, 0 };
-    m_rcMarquee = { 0, 0, 0, 0 };
-    m_pendingClickedRow = -1;
-    m_bPendingCtrl = false;
-    m_bPendingShift = false;
 }
 
 CustomListControl::~CustomListControl()
 {
+    if (m_hFontFaytIcon) { DeleteObject(m_hFontFaytIcon); m_hFontFaytIcon = NULL; }
+    if (m_hFontFaytText) { DeleteObject(m_hFontFaytText); m_hFontFaytText = NULL; }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +213,8 @@ void CustomListControl::Clear()
 {
     m_items.clear();
     m_selectedIndex = -1;
+    m_selectedIndices.clear();
+    m_anchorRow = -1;
     m_scrollY = 0;
     m_scrollX = 0;
     UpdateScrollbars();
@@ -381,8 +396,10 @@ RECT CustomListControl::GetListRect() const
         GetClientRect(m_hWnd, &rcClient);
         bool hasV = m_vScroll.IsVisible();
         bool hasH = m_hScroll.IsVisible();
+        int faytH = m_bFaytActive ? FAYT_BAR_HEIGHT : 0;
         rc.right  = rcClient.right  - (hasV ? V_SCROLLBAR_WIDTH : 0);
-        rc.bottom = rcClient.bottom - (hasH ? H_SCROLLBAR_HEIGHT : 0);
+        rc.bottom = rcClient.bottom - (hasH ? H_SCROLLBAR_HEIGHT : 0) - faytH;
+        if (rc.bottom < m_headerHeight) rc.bottom = m_headerHeight;
     }
     return rc;
 }
@@ -440,17 +457,20 @@ void CustomListControl::LayoutScrollbars()
     GetClientRect(m_hWnd, &rcClient);
     int cw = rcClient.right;
     int ch = rcClient.bottom;
+    int faytH = m_bFaytActive ? FAYT_BAR_HEIGHT : 0;
+    int clientAreaH = ch - faytH;
+    if (clientAreaH < m_headerHeight) clientAreaH = m_headerHeight;
 
     // Determine which scrollbars should be visible
     int totalColsWidth = 0;
     for (const auto& col : m_columns) totalColsWidth += col.width;
 
     int itemCount = GetItemCount();
-    int innerH    = ch - H_SCROLLBAR_HEIGHT;  // height when hscroll visible
-    int innerW    = cw - V_SCROLLBAR_WIDTH;  // width  when vscroll visible
+    int innerH    = clientAreaH - H_SCROLLBAR_HEIGHT;  // height when hscroll visible
+    int innerW    = cw - V_SCROLLBAR_WIDTH;            // width  when vscroll visible
 
     // Need vertical?
-    int visRows = (ch - m_headerHeight) / m_rowHeight;
+    int visRows = (clientAreaH - m_headerHeight) / m_rowHeight;
     bool needV  = (itemCount > visRows);
     // Need horizontal?
     bool needH  = (totalColsWidth > (needV ? innerW : cw));
@@ -463,13 +483,13 @@ void CustomListControl::LayoutScrollbars()
     m_hScroll.SetVisible(needH);
 
     int rightEdge  = cw - (needV ? V_SCROLLBAR_WIDTH : 0);
-    int bottomEdge = ch - (needH ? H_SCROLLBAR_HEIGHT : 0);
+    int bottomEdge = clientAreaH - (needH ? H_SCROLLBAR_HEIGHT : 0);
 
-    int vScrollBottom = needH ? bottomEdge : ch;
+    int vScrollBottom = needH ? bottomEdge : clientAreaH;
     RECT rcV = { rightEdge, m_headerHeight + 1, cw, vScrollBottom };
     m_vScroll.SetBounds(rcV);
 
-    RECT rcH = { 0, bottomEdge, cw, ch };
+    RECT rcH = { 0, bottomEdge, cw, clientAreaH };
     m_hScroll.SetBounds(rcH);
 }
 
@@ -551,84 +571,15 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         bool bAlt  = (GetKeyState(VK_MENU) & 0x8000) != 0;
         if (bCtrl || bAlt) break;
 
-        DWORD now = GetTickCount();
-        if (now - m_lastTypeAheadTime > 1000)
+        if (!m_bFaytActive)
         {
-            m_typeAheadBuffer.clear();
-        }
-        m_lastTypeAheadTime = now;
-        m_typeAheadBuffer += towlower(ch);
-
-        int itemCount = GetItemCount();
-        if (itemCount <= 0) return 0;
-
-        int nameCol = 0;
-        if (!m_columns.empty() && m_columns[0].title == L"No." && m_columns.size() > 1)
-        {
-            nameCol = 1;
-        }
-
-        bool isSingleCharRepeat = true;
-        for (wchar_t c : m_typeAheadBuffer)
-        {
-            if (c != m_typeAheadBuffer[0]) { isSingleCharRepeat = false; break; }
-        }
-
-        int foundIdx = -1;
-
-        if (isSingleCharRepeat)
-        {
-            wchar_t targetChar = m_typeAheadBuffer[0];
-            int startIdx = (m_selectedIndex >= 0) ? (m_selectedIndex + 1) : 0;
-            for (int step = 0; step < itemCount; ++step)
-            {
-                int i = (startIdx + step) % itemCount;
-                std::wstring cellText = GetCellText(i, nameCol);
-                if (!cellText.empty() && towlower(cellText[0]) == targetChar)
-                {
-                    foundIdx = i;
-                    break;
-                }
-            }
+            StartFayt(ch);
         }
         else
         {
-            int startIdx = (m_selectedIndex >= 0) ? m_selectedIndex : 0;
-            for (int step = 0; step < itemCount; ++step)
-            {
-                int i = (startIdx + step) % itemCount;
-                std::wstring cellText = GetCellText(i, nameCol);
-                std::wstring cellLower = cellText;
-                for (wchar_t& c : cellLower) c = towlower(c);
-                if (cellLower.rfind(m_typeAheadBuffer, 0) == 0)
-                {
-                    foundIdx = i;
-                    break;
-                }
-            }
-        }
-
-        if (foundIdx != -1)
-        {
-            if (m_isMultiSelect)
-            {
-                m_selectedIndices.clear();
-                m_selectedIndices.insert(foundIdx);
-                m_selectedIndex = foundIdx;
-                m_anchorRow = foundIdx;
-                EnsureVisible(foundIdx);
-                Invalidate();
-            }
-            else
-            {
-                SetSelectedIndex(foundIdx);
-            }
-
-            NMHDR nmhdr = { 0 };
-            nmhdr.hwndFrom = m_hWnd;
-            nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
-            nmhdr.code     = NM_CLICK;
-            SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+            m_faytQuery += ch;
+            UpdateFaytMatches();
+            ResetFaytTimer();
         }
         return 0;
     }
@@ -685,6 +636,24 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         int endRow     = startRow + visibleRows;
         if (endRow > itemCount) endRow = itemCount;
 
+        // --- Draw unified vertical column separators top-to-bottom within rcList ---
+        HPEN hPen    = CreatePen(PS_SOLID, 1, dividerCol);
+        HPEN hOldPen = (HPEN)SelectObject(hMemDC, hPen);
+
+        int xAccumDiv = -m_scrollX;
+        for (size_t c = 0; c < m_columns.size() - 1; ++c)
+        {
+            xAccumDiv += m_columns[c].width;
+            if (xAccumDiv > 0 && xAccumDiv < listW)
+            {
+                MoveToEx(hMemDC, xAccumDiv, m_headerHeight, NULL);
+                LineTo(hMemDC, xAccumDiv, rcList.bottom);
+            }
+        }
+
+        SelectObject(hMemDC, hOldPen);
+        DeleteObject(hPen);
+
         // --- Draw row cells with strict GDI clipping to rcList ---
         int savedDCRows = SaveDC(hMemDC);
         IntersectClipRect(hMemDC, 0, m_headerHeight, listW, rcList.bottom);
@@ -692,17 +661,38 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         for (int r = startRow; r < endRow; ++r)
         {
             int yTop = m_headerHeight + (r - m_scrollY) * m_rowHeight;
-            RECT rcRow = { 0, yTop, listW, yTop + m_rowHeight };
+            RECT rcRow = { 4, yTop + 1, listW - 4, yTop + m_rowHeight - 1 };
 
             bool isRowSel = IsRowSelected(r);
-            if (isRowSel)
+            bool isRowHover = (r == m_hoveredRow && !isRowSel);
+
+            // Draw Row Pill Highlight & Selection (Matches CustomTreeView Fluent style)
+            if (isRowSel || isRowHover)
             {
-                HBRUSH hbrSel = CreateSolidBrush(RGB(38, 79, 120));
-                FillRect(hMemDC, &rcRow, hbrSel);
-                DeleteObject(hbrSel);
+                COLORREF pillCol = isRowSel ? RGB(35, 65, 105) : RGB(38, 38, 44);
+                HBRUSH hPillBr = CreateSolidBrush(pillCol);
+                HPEN hPillPen = CreatePen(PS_SOLID, 1, pillCol);
+                HBRUSH hOldBr = (HBRUSH)SelectObject(hMemDC, hPillBr);
+                HPEN hOldP = (HPEN)SelectObject(hMemDC, hPillPen);
+
+                RoundRect(hMemDC, rcRow.left, rcRow.top, rcRow.right, rcRow.bottom, 6, 6);
+
+                // If selected, draw vibrant vertical indicator bar on left
+                if (isRowSel)
+                {
+                    HBRUSH hAccentBr = CreateSolidBrush(RGB(0, 150, 255));
+                    RECT rcBar = { rcRow.left, rcRow.top + 3, rcRow.left + 3, rcRow.bottom - 3 };
+                    FillRect(hMemDC, &rcBar, hAccentBr);
+                    DeleteObject(hAccentBr);
+                }
+
+                SelectObject(hMemDC, hOldBr);
+                SelectObject(hMemDC, hOldP);
+                DeleteObject(hPillBr);
+                DeleteObject(hPillPen);
             }
 
-            COLORREF rowTextCol = textCol;
+            COLORREF rowTextCol = isRowSel ? RGB(255, 255, 255) : textCol;
             for (size_t c_chk = 0; c_chk < m_columns.size(); ++c_chk)
             {
                 std::wstring chkText = GetCellText(r, (int)c_chk);
@@ -830,31 +820,14 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             }
         }
 
-        // --- Draw unified vertical column separators top-to-bottom within rcList ---
-        HPEN hPen    = CreatePen(PS_SOLID, 1, dividerCol);
-        HPEN hOldPen = (HPEN)SelectObject(hMemDC, hPen);
-
-        int xAccumDiv = -m_scrollX;
-        for (size_t c = 0; c < m_columns.size() - 1; ++c)
-        {
-            xAccumDiv += m_columns[c].width;
-            if (xAccumDiv > 0 && xAccumDiv < listW)
-            {
-                MoveToEx(hMemDC, xAccumDiv, m_headerHeight, NULL);
-                LineTo(hMemDC, xAccumDiv, rcList.bottom);
-            }
-        }
-
-        SelectObject(hMemDC, hOldPen);
-        DeleteObject(hPen);
-
         RestoreDC(hMemDC, savedDCRows);
 
         // Cleanly paint scrollbar gutter backgrounds after row cells
+        int trayBottom = m_bFaytActive ? height - FAYT_BAR_HEIGHT : height;
         if (hasV)
         {
-            // Vertical Gutter background (strictly terminates above horizontal tray)
-            RECT rcGutter = { listW, m_headerHeight, width, hasH ? rcList.bottom : height };
+            // Vertical Gutter background (strictly terminates above horizontal tray or FAYT bar)
+            RECT rcGutter = { listW, m_headerHeight, width, hasH ? rcList.bottom : trayBottom };
             HBRUSH hbrGutter = CreateSolidBrush(bgCol);
             FillRect(hMemDC, &rcGutter, hbrGutter);
             DeleteObject(hbrGutter);
@@ -864,7 +837,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         {
             // Dedicated horizontal scrollbar tray with differentiated background
             COLORREF hTrayBg = RGB(28, 28, 28);
-            RECT rcGutterH = { 0, rcList.bottom, width, height };
+            RECT rcGutterH = { 0, rcList.bottom, width, trayBottom };
             HBRUSH hbrGutterH = CreateSolidBrush(hTrayBg);
             FillRect(hMemDC, &rcGutterH, hbrGutterH);
             DeleteObject(hbrGutterH);
@@ -1148,6 +1121,148 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             DeleteObject(hPenBorder);
         }
 
+        // -------------------------------------------------------------
+        // Draw DOpus-style Find-As-You-Type (FAYT) Bottom Bar & Pill
+        // -------------------------------------------------------------
+        if (m_bFaytActive)
+        {
+            if (!m_hFontFaytIcon)
+            {
+                LOGFONTW lf = { 0 };
+                lf.lfHeight = -MulDiv(10 * 10, GetDpiForSystem(), 720);
+                lf.lfWeight = FW_NORMAL;
+                lf.lfCharSet = DEFAULT_CHARSET;
+                lf.lfQuality = CLEARTYPE_QUALITY;
+                wcscpy_s(lf.lfFaceName, L"Segoe Fluent Icons");
+                m_hFontFaytIcon = CreateFontIndirectW(&lf);
+                if (!m_hFontFaytIcon)
+                {
+                    wcscpy_s(lf.lfFaceName, L"Segoe MDL2 Assets");
+                    m_hFontFaytIcon = CreateFontIndirectW(&lf);
+                }
+            }
+            if (!m_hFontFaytText)
+            {
+                LOGFONTW lf = { 0 };
+                lf.lfHeight = -MulDiv(9 * 10, GetDpiForSystem(), 720);
+                lf.lfWeight = FW_SEMIBOLD;
+                lf.lfCharSet = DEFAULT_CHARSET;
+                lf.lfQuality = CLEARTYPE_QUALITY;
+                wcscpy_s(lf.lfFaceName, L"Segoe UI");
+                m_hFontFaytText = CreateFontIndirectW(&lf);
+            }
+
+            // Bottom bar background strip
+            int barTop = height - FAYT_BAR_HEIGHT;
+            RECT rcFaytBar = { 0, barTop, width, height };
+            COLORREF barBg = RGB(22, 22, 25);
+            HBRUSH hbrBar = CreateSolidBrush(barBg);
+            FillRect(hMemDC, &rcFaytBar, hbrBar);
+            DeleteObject(hbrBar);
+
+            // 1px Top divider for the bottom bar
+            HPEN hPenTopDiv = CreatePen(PS_SOLID, 1, RGB(48, 48, 54));
+            HPEN hOldDivPen = (HPEN)SelectObject(hMemDC, hPenTopDiv);
+            MoveToEx(hMemDC, 0, barTop, NULL);
+            LineTo(hMemDC, width, barTop);
+            SelectObject(hMemDC, hOldDivPen);
+            DeleteObject(hPenTopDiv);
+
+            // Inner floating pill inside bottom bar (stretched to full width till splitter)
+            int pillH = 24;
+            int pillY = barTop + (FAYT_BAR_HEIGHT - pillH) / 2;
+            int pillX = 4;
+            int pillW = width - 8;
+            if (pillW < 100) pillW = 100;
+
+            m_rcFaytPill = { pillX, pillY, pillX + pillW, pillY + pillH };
+
+            COLORREF faytBg = RGB(36, 16, 22);
+            COLORREF faytBorder = RGB(95, 38, 48);
+            if (m_faytMatches.empty() && !m_faytQuery.empty())
+            {
+                faytBg = RGB(46, 18, 20);
+                faytBorder = RGB(160, 45, 45); // Soft red border when no matches
+            }
+
+            HBRUSH hbrFayt = CreateSolidBrush(faytBg);
+            HPEN hPenFayt = CreatePen(PS_SOLID, 1, faytBorder);
+            HBRUSH hOldB = (HBRUSH)SelectObject(hMemDC, hbrFayt);
+            HPEN hOldP = (HPEN)SelectObject(hMemDC, hPenFayt);
+
+            RoundRect(hMemDC, m_rcFaytPill.left, m_rcFaytPill.top, m_rcFaytPill.right, m_rcFaytPill.bottom, 6, 6);
+
+            SelectObject(hMemDC, hOldB);
+            SelectObject(hMemDC, hOldP);
+            DeleteObject(hbrFayt);
+            DeleteObject(hPenFayt);
+
+            // Button rects on right
+            int btnSize = 18;
+            int btnY = m_rcFaytPill.top + (pillH - btnSize) / 2;
+            int curBtnRight = m_rcFaytPill.right - 4;
+
+            m_rcFaytCloseBtn = { curBtnRight - btnSize, btnY, curBtnRight, btnY + btnSize };
+            curBtnRight -= (btnSize + 2);
+
+            m_rcFaytNextBtn = { curBtnRight - btnSize, btnY, curBtnRight, btnY + btnSize };
+            curBtnRight -= (btnSize + 2);
+
+            m_rcFaytPrevBtn = { curBtnRight - btnSize, btnY, curBtnRight, btnY + btnSize };
+            curBtnRight -= (btnSize + 4);
+
+            auto drawPillButton = [&](const RECT& rcBtn, int btnId, const wchar_t* glyph) {
+                if (m_faytHoverBtn == btnId)
+                {
+                    HBRUSH hbrHov = CreateSolidBrush(RGB(65, 26, 34));
+                    HBRUSH hPrev = (HBRUSH)SelectObject(hMemDC, hbrHov);
+                    HPEN hNullPen = CreatePen(PS_NULL, 0, 0);
+                    HPEN hPrevPen = (HPEN)SelectObject(hMemDC, hNullPen);
+                    RoundRect(hMemDC, rcBtn.left, rcBtn.top, rcBtn.right, rcBtn.bottom, 4, 4);
+                    SelectObject(hMemDC, hPrevPen);
+                    DeleteObject(hNullPen);
+                    SelectObject(hMemDC, hPrev);
+                    DeleteObject(hbrHov);
+                }
+                SetBkMode(hMemDC, TRANSPARENT);
+                SetTextColor(hMemDC, m_faytHoverBtn == btnId ? RGB(255, 255, 255) : RGB(200, 190, 195));
+                HFONT hOldF = (HFONT)SelectObject(hMemDC, m_hFontFaytIcon ? m_hFontFaytIcon : GetStockObject(DEFAULT_GUI_FONT));
+                DrawTextW(hMemDC, glyph, -1, (LPRECT)&rcBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(hMemDC, hOldF);
+            };
+
+            drawPillButton(m_rcFaytCloseBtn, 3, L"\xE711"); // Close X
+            drawPillButton(m_rcFaytNextBtn, 2, L"\xE70D");  // Chevron Down
+            drawPillButton(m_rcFaytPrevBtn, 1, L"\xE70E");  // Chevron Up
+
+            // Left Search Icon (\xE721)
+            RECT rcSearchIcon = { m_rcFaytPill.left + 6, m_rcFaytPill.top, m_rcFaytPill.left + 22, m_rcFaytPill.bottom };
+            SetBkMode(hMemDC, TRANSPARENT);
+            SetTextColor(hMemDC, RGB(0, 150, 255));
+            HFONT hOldF = (HFONT)SelectObject(hMemDC, m_hFontFaytIcon ? m_hFontFaytIcon : GetStockObject(DEFAULT_GUI_FONT));
+            DrawTextW(hMemDC, L"\xE721", -1, &rcSearchIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            // Search Query Text and Match Status
+            RECT rcText = { m_rcFaytPill.left + 24, m_rcFaytPill.top, curBtnRight, m_rcFaytPill.bottom };
+            SelectObject(hMemDC, m_hFontFaytText ? m_hFontFaytText : GetStockObject(DEFAULT_GUI_FONT));
+
+            std::wstring matchStatus;
+            if (!m_faytMatches.empty())
+            {
+                matchStatus = L" [" + std::to_wstring(m_faytMatchIndex + 1) + L"/" + std::to_wstring(m_faytMatches.size()) + L"]";
+            }
+            else
+            {
+                matchStatus = L" [No match]";
+            }
+
+            std::wstring fullDisplayText = L"Find: \"" + m_faytQuery + L"\"" + matchStatus;
+            SetTextColor(hMemDC, m_faytMatches.empty() ? RGB(255, 120, 120) : RGB(245, 245, 245));
+            DrawTextW(hMemDC, fullDisplayText.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+            SelectObject(hMemDC, hOldF);
+        }
+
         BitBlt(hdc, 0, 0, width, height, hMemDC, 0, 0, SRCCOPY);
 
         SelectObject(hMemDC, hOldBmp);
@@ -1271,6 +1386,11 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 StopAutoScroll();
             }
 
+            return 0;
+        }
+        else if (wParam == TIMER_FAYT_TIMEOUT_ID)
+        {
+            CloseFayt();
             return 0;
         }
         break;
@@ -1400,6 +1520,30 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         if (m_hScroll.IsVisible() && y >= rcList.bottom)
         {
             return 0;
+        }
+
+        if (m_bFaytActive)
+        {
+            if (PtInRect(&m_rcFaytCloseBtn, pt))
+            {
+                CloseFayt();
+                return 0;
+            }
+            if (PtInRect(&m_rcFaytNextBtn, pt))
+            {
+                FaytNext();
+                return 0;
+            }
+            if (PtInRect(&m_rcFaytPrevBtn, pt))
+            {
+                FaytPrev();
+                return 0;
+            }
+            if (PtInRect(&m_rcFaytPill, pt))
+            {
+                ResetFaytTimer();
+                return 0;
+            }
         }
 
         if (y <= m_headerHeight)
@@ -1592,6 +1736,20 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         {
             m_scrollX = m_hScroll.GetPos();
             Invalidate();
+        }
+
+        if (m_bFaytActive)
+        {
+            int newHoverBtn = 0;
+            if (PtInRect(&m_rcFaytPrevBtn, pt)) newHoverBtn = 1;
+            else if (PtInRect(&m_rcFaytNextBtn, pt)) newHoverBtn = 2;
+            else if (PtInRect(&m_rcFaytCloseBtn, pt)) newHoverBtn = 3;
+
+            if (newHoverBtn != m_faytHoverBtn)
+            {
+                m_faytHoverBtn = newHoverBtn;
+                InvalidateRect(m_hWnd, &m_rcFaytPill, FALSE);
+            }
         }
 
         RECT rcClient;
@@ -2256,8 +2414,74 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             return 0;
         }
 
+        if (m_bFaytActive)
+        {
+            if (wParam == VK_F3)
+            {
+                bool bShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                if (bShift) FaytPrev();
+                else FaytNext();
+                ResetFaytTimer();
+                return 0;
+            }
+            if (wParam == VK_ESCAPE)
+            {
+                CloseFayt();
+                return 0;
+            }
+            if (wParam == VK_BACK)
+            {
+                if (!m_faytQuery.empty())
+                {
+                    m_faytQuery.pop_back();
+                    if (m_faytQuery.empty())
+                    {
+                        CloseFayt();
+                    }
+                    else
+                    {
+                        UpdateFaytMatches();
+                        ResetFaytTimer();
+                    }
+                }
+                return 0;
+            }
+            if (wParam == VK_DOWN)
+            {
+                FaytNext();
+                ResetFaytTimer();
+                return 0;
+            }
+            if (wParam == VK_UP)
+            {
+                FaytPrev();
+                ResetFaytTimer();
+                return 0;
+            }
+            if (wParam == VK_RETURN)
+            {
+                bool bShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                if (bShift) FaytPrev();
+                else FaytNext();
+                ResetFaytTimer();
+                return 0;
+            }
+        }
+        else
+        {
+            if (wParam == VK_F3 && !m_faytMatches.empty())
+            {
+                m_bFaytActive = true;
+                bool bShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                if (bShift) FaytPrev();
+                else FaytNext();
+                ResetFaytTimer();
+                return 0;
+            }
+        }
+
         // Forward shortcuts to parent
-        if (wParam == VK_DELETE || (bCtrl && (wParam == 'Z' || wParam == 'z' || wParam == 'Y' || wParam == 'y' || wParam == 'C' || wParam == 'c' || wParam == 'X' || wParam == 'x' || wParam == 'V' || wParam == 'v' || wParam == 'R' || wParam == 'r')) || wParam == 'F' || wParam == 'f')
+        if (wParam == VK_DELETE || (bCtrl && (wParam == 'Z' || wParam == 'z' || wParam == 'Y' || wParam == 'y' || wParam == 'C' || wParam == 'c' || wParam == 'X' || wParam == 'x' || wParam == 'V' || wParam == 'v' || wParam == 'R' || wParam == 'r' || wParam == 'F' || wParam == 'f')))
         {
             SendMessageW(GetParent(m_hWnd), WM_KEYDOWN, wParam, lParam);
             return 0;
@@ -2543,5 +2767,133 @@ void CustomListControl::StopAutoScroll()
         KillTimer(m_hWnd, TIMER_AUTOSCROLL_ID);
     }
 }
+
+// ---------------------------------------------------------------------------
+// DOpus-Style Find-As-You-Type (FAYT) Quick Search
+// ---------------------------------------------------------------------------
+void CustomListControl::StartFayt(wchar_t initialChar)
+{
+    m_bFaytActive = true;
+    m_faytQuery = std::wstring(1, initialChar);
+    UpdateScrollbars();
+    UpdateFaytMatches();
+    ResetFaytTimer();
+}
+
+void CustomListControl::UpdateFaytMatches()
+{
+    m_faytMatches.clear();
+    m_faytMatchIndex = -1;
+
+    if (m_faytQuery.empty())
+    {
+        Invalidate();
+        return;
+    }
+
+    int count = GetItemCount();
+    int numCols = (int)m_columns.size();
+
+    for (int i = 0; i < count; ++i)
+    {
+        bool bMatched = false;
+        for (int c = 0; c < numCols; ++c)
+        {
+            std::wstring cellText = GetCellText(i, c);
+            if (StrStrIW(cellText.c_str(), m_faytQuery.c_str()) != NULL)
+            {
+                bMatched = true;
+                break;
+            }
+        }
+        if (bMatched)
+        {
+            m_faytMatches.push_back(i);
+        }
+    }
+
+    if (!m_faytMatches.empty())
+    {
+        // Select the first match at or after current selection, or wrap to 0
+        int targetMatch = 0;
+        for (size_t m = 0; m < m_faytMatches.size(); ++m)
+        {
+            if (m_faytMatches[m] >= m_selectedIndex)
+            {
+                targetMatch = (int)m;
+                break;
+            }
+        }
+        m_faytMatchIndex = targetMatch;
+        int matchedRow = m_faytMatches[m_faytMatchIndex];
+        SetSelectedIndex(matchedRow);
+        EnsureVisible(matchedRow);
+
+        NMHDR nmhdr = { 0 };
+        nmhdr.hwndFrom = m_hWnd;
+        nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+        nmhdr.code     = NM_CLICK;
+        SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+    }
+
+    Invalidate();
+}
+
+void CustomListControl::FaytNext()
+{
+    if (m_faytMatches.empty()) return;
+
+    m_faytMatchIndex = (m_faytMatchIndex + 1) % (int)m_faytMatches.size();
+    int matchedRow = m_faytMatches[m_faytMatchIndex];
+    SetSelectedIndex(matchedRow);
+    EnsureVisible(matchedRow);
+
+    NMHDR nmhdr = { 0 };
+    nmhdr.hwndFrom = m_hWnd;
+    nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+    nmhdr.code     = NM_CLICK;
+    SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+
+    ResetFaytTimer();
+    Invalidate();
+}
+
+void CustomListControl::FaytPrev()
+{
+    if (m_faytMatches.empty()) return;
+
+    m_faytMatchIndex = (m_faytMatchIndex - 1 + (int)m_faytMatches.size()) % (int)m_faytMatches.size();
+    int matchedRow = m_faytMatches[m_faytMatchIndex];
+    SetSelectedIndex(matchedRow);
+    EnsureVisible(matchedRow);
+
+    NMHDR nmhdr = { 0 };
+    nmhdr.hwndFrom = m_hWnd;
+    nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+    nmhdr.code     = NM_CLICK;
+    SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+
+    ResetFaytTimer();
+    Invalidate();
+}
+
+void CustomListControl::CloseFayt()
+{
+    if (!m_bFaytActive) return;
+    m_bFaytActive = false;
+    m_faytQuery.clear();
+    m_faytMatches.clear();
+    m_faytMatchIndex = -1;
+    m_faytHoverBtn = 0;
+    KillTimer(m_hWnd, TIMER_FAYT_TIMEOUT_ID);
+    UpdateScrollbars();
+    Invalidate();
+}
+
+void CustomListControl::ResetFaytTimer()
+{
+    SetTimer(m_hWnd, TIMER_FAYT_TIMEOUT_ID, 5000, NULL);
+}
+
 
 

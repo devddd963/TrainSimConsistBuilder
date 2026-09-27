@@ -17,6 +17,8 @@
 #define CMD_ACTION_SORT               8
 #define CMD_ACTION_BATCH_WIZARD       9
 #define CMD_ACTION_POOL_MANAGER       10
+#define CMD_ACTION_STOCK_INFO         15
+#define CMD_ACTION_SHAPE_VIEWER       16
 #define CMD_ACTION_POOL_MUTATOR       13
 #define CMD_ACTION_MORE               11
 #define CMD_ACTION_DETAILS            12

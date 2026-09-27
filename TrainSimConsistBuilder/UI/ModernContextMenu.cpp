@@ -9,23 +9,60 @@
 #pragma comment(lib, "dwmapi.lib")
 
 struct ModernContextMenuState {
-    HWND hWnd;
-    HWND hParent;
+    HWND hWnd = NULL;
+    HWND hParent = NULL;
     std::vector<ContextMenuItem> items;
-    BOOL bDarkMode;
-    int hoveredIndex;
-    int selectedId;
-    bool isDone;
-    int maxShortcutW;
-    HFONT hFontText;
-    HFONT hFontIcons;
-    HFONT hFontShortcuts;
+    BOOL bDarkMode = TRUE;
+    int hoveredIndex = -1;
+    int selectedId = 0;
+    bool isDone = false;
+    int maxShortcutW = 0;
+    HFONT hFontText = NULL;
+    HFONT hFontIcons = NULL;
+    HFONT hFontShortcuts = NULL;
+
+    // Submenu cascading
+    HWND hSubMenuWnd = NULL;
+    int activeSubMenuIndex = -1;
+    ModernContextMenuState* pSubMenuState = nullptr;
+    ModernContextMenuState* pParentMenuState = nullptr;
 };
 
 static const int ITEM_HEIGHT = 32;
 static const int SEPARATOR_HEIGHT = 9;
 static const int PADDING_V = 6;
-static const int MIN_MENU_WIDTH = 260;
+static const int MIN_MENU_WIDTH = 250;
+
+static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+static HWND CreateMenuWindow(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode, int minWidth, ModernContextMenuState* pParentState, ModernContextMenuState* pStateOut);
+
+static bool IsPointInMenuChain(ModernContextMenuState* pState, POINT pt)
+{
+    if (!pState || !pState->hWnd || !IsWindow(pState->hWnd)) return false;
+    RECT rc;
+    GetWindowRect(pState->hWnd, &rc);
+    if (PtInRect(&rc, pt)) return true;
+
+    if (pState->pSubMenuState)
+    {
+        return IsPointInMenuChain(pState->pSubMenuState, pt);
+    }
+    return false;
+}
+
+static HWND FindMenuWindowUnderPoint(ModernContextMenuState* pState, POINT pt)
+{
+    if (!pState || !pState->hWnd || !IsWindow(pState->hWnd)) return NULL;
+    if (pState->pSubMenuState && pState->pSubMenuState->hWnd && IsWindow(pState->pSubMenuState->hWnd))
+    {
+        HWND hChildHit = FindMenuWindowUnderPoint(pState->pSubMenuState, pt);
+        if (hChildHit) return hChildHit;
+    }
+    RECT rc;
+    GetWindowRect(pState->hWnd, &rc);
+    if (PtInRect(&rc, pt)) return pState->hWnd;
+    return NULL;
+}
 
 static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
@@ -90,7 +127,7 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             else
             {
                 RECT rcItem = { 6, curY, w - 6, curY + ITEM_HEIGHT };
-                bool isHovered = ((int)i == pState->hoveredIndex) && item.isEnabled;
+                bool isHovered = (((int)i == pState->hoveredIndex) || ((int)i == pState->activeSubMenuIndex)) && item.isEnabled;
 
                 if (isHovered)
                 {
@@ -117,8 +154,16 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                     SelectObject(hMemDC, hOldF);
                 }
 
-                int shortcutW = pState->maxShortcutW;
-                int textRight = (shortcutW > 0) ? (rcItem.right - shortcutW - 16) : (rcItem.right - 10);
+                int rightMargin = 12;
+                int textRight = rcItem.right - rightMargin;
+                if (!item.subItems.empty())
+                {
+                    textRight = rcItem.right - 26;
+                }
+                else if (pState->maxShortcutW > 0)
+                {
+                    textRight = rcItem.right - pState->maxShortcutW - 16;
+                }
 
                 // 2. Item Text
                 if (pState->hFontText && !item.text.empty())
@@ -130,8 +175,19 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                     SelectObject(hMemDC, hOldF);
                 }
 
-                // 3. Shortcut / Tag Text
-                if (pState->hFontShortcuts && !item.shortcut.empty())
+                // 3. Submenu Chevron or Shortcut Text
+                if (!item.subItems.empty())
+                {
+                    if (pState->hFontIcons)
+                    {
+                        HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontIcons);
+                        SetTextColor(hMemDC, item.isEnabled ? textShort : textDis);
+                        RECT rcChev = { rcItem.right - 22, rcItem.top, rcItem.right - 6, rcItem.bottom };
+                        DrawTextW(hMemDC, L"\xE76C", -1, &rcChev, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        SelectObject(hMemDC, hOldF);
+                    }
+                }
+                else if (pState->hFontShortcuts && !item.shortcut.empty())
                 {
                     HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontShortcuts);
                     SetTextColor(hMemDC, item.isEnabled ? textShort : textDis);
@@ -188,6 +244,54 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         if (newHover != pState->hoveredIndex)
         {
             pState->hoveredIndex = newHover;
+
+            // If switching away from currently open submenu item, close it
+            if (pState->hSubMenuWnd && newHover != -1 && newHover != pState->activeSubMenuIndex)
+            {
+                if (IsWindow(pState->hSubMenuWnd))
+                {
+                    DestroyWindow(pState->hSubMenuWnd);
+                }
+                pState->hSubMenuWnd = NULL;
+                pState->activeSubMenuIndex = -1;
+                if (pState->pSubMenuState)
+                {
+                    delete pState->pSubMenuState;
+                    pState->pSubMenuState = nullptr;
+                }
+            }
+
+            // If hovered over an item with subItems, open the sub-menu!
+            if (newHover >= 0 && newHover < (int)pState->items.size())
+            {
+                const auto& item = pState->items[newHover];
+                if (!item.subItems.empty() && item.isEnabled && pState->activeSubMenuIndex != newHover)
+                {
+                    int itemY = PADDING_V;
+                    for (int k = 0; k < newHover; ++k)
+                    {
+                        itemY += pState->items[k].isSeparator ? SEPARATOR_HEIGHT : ITEM_HEIGHT;
+                    }
+
+                    RECT rcClient;
+                    GetClientRect(hWnd, &rcClient);
+                    POINT ptSub = { rcClient.right - 2, itemY - 4 };
+                    ClientToScreen(hWnd, &ptSub);
+
+                    if (!pState->pSubMenuState)
+                    {
+                        pState->pSubMenuState = new ModernContextMenuState();
+                    }
+
+                    HWND hSub = CreateMenuWindow(hWnd, ptSub.x, ptSub.y, item.subItems, pState->bDarkMode, 0, pState, pState->pSubMenuState);
+                    if (hSub)
+                    {
+                        pState->hSubMenuWnd = hSub;
+                        pState->activeSubMenuIndex = newHover;
+                    }
+                }
+            }
+
             InvalidateRect(hWnd, NULL, FALSE);
         }
         return 0;
@@ -201,10 +305,50 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             const auto& item = pState->items[pState->hoveredIndex];
             if (item.isEnabled && !item.isSeparator)
             {
-                pState->selectedId = item.id;
-                pState->isDone = true;
-                DestroyWindow(hWnd);
-                return 0;
+                if (!item.subItems.empty())
+                {
+                    // If clicked on submenu item and not already open, open it
+                    if (!pState->hSubMenuWnd)
+                    {
+                        int itemY = PADDING_V;
+                        for (int k = 0; k < pState->hoveredIndex; ++k)
+                        {
+                            itemY += pState->items[k].isSeparator ? SEPARATOR_HEIGHT : ITEM_HEIGHT;
+                        }
+
+                        RECT rcClient;
+                        GetClientRect(hWnd, &rcClient);
+                        POINT ptSub = { rcClient.right - 2, itemY - 4 };
+                        ClientToScreen(hWnd, &ptSub);
+
+                        if (!pState->pSubMenuState)
+                        {
+                            pState->pSubMenuState = new ModernContextMenuState();
+                        }
+
+                        HWND hSub = CreateMenuWindow(hWnd, ptSub.x, ptSub.y, item.subItems, pState->bDarkMode, 0, pState, pState->pSubMenuState);
+                        if (hSub)
+                        {
+                            pState->hSubMenuWnd = hSub;
+                            pState->activeSubMenuIndex = pState->hoveredIndex;
+                        }
+                    }
+                    return 0;
+                }
+                else if (item.id > 0)
+                {
+                    // Action item selected! Bubble up to root
+                    int chosenId = item.id;
+                    ModernContextMenuState* pCur = pState;
+                    while (pCur)
+                    {
+                        pCur->selectedId = chosenId;
+                        pCur->isDone = true;
+                        pCur = pCur->pParentMenuState;
+                    }
+                    DestroyWindow(hWnd);
+                    return 0;
+                }
             }
         }
         break;
@@ -218,21 +362,14 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             {
                 pState->selectedId = 0;
                 pState->isDone = true;
+                if (pState->pParentMenuState)
+                {
+                    pState->pParentMenuState->selectedId = 0;
+                    pState->pParentMenuState->isDone = true;
+                }
                 DestroyWindow(hWnd);
                 return 0;
             }
-        }
-        break;
-    }
-
-    case WM_KILLFOCUS:
-    {
-        if (pState && !pState->isDone)
-        {
-            pState->selectedId = 0;
-            pState->isDone = true;
-            DestroyWindow(hWnd);
-            return 0;
         }
         break;
     }
@@ -241,6 +378,23 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
     {
         if (pState)
         {
+            if (pState->hSubMenuWnd && IsWindow(pState->hSubMenuWnd))
+            {
+                DestroyWindow(pState->hSubMenuWnd);
+                pState->hSubMenuWnd = NULL;
+                pState->activeSubMenuIndex = -1;
+            }
+            if (pState->pSubMenuState)
+            {
+                delete pState->pSubMenuState;
+                pState->pSubMenuState = nullptr;
+            }
+            if (pState->hFontText) DeleteObject(pState->hFontText);
+            if (pState->hFontShortcuts) DeleteObject(pState->hFontShortcuts);
+            if (pState->hFontIcons) DeleteObject(pState->hFontIcons);
+            pState->hFontText = NULL;
+            pState->hFontShortcuts = NULL;
+            pState->hFontIcons = NULL;
             pState->isDone = true;
         }
         return 0;
@@ -250,9 +404,9 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
     return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
-int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode, int minWidth)
+static HWND CreateMenuWindow(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode, int minWidth, ModernContextMenuState* pParentState, ModernContextMenuState* pStateOut)
 {
-    if (items.empty()) return 0;
+    if (items.empty()) return NULL;
 
     static bool s_registered = false;
     HINSTANCE hInst = GetModuleHandle(NULL);
@@ -270,44 +424,49 @@ int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<Contex
         s_registered = true;
     }
 
-    ModernContextMenuState state;
-    state.hWnd = NULL;
-    state.hParent = hParent;
-    state.items = items;
-    state.bDarkMode = bDarkMode;
-    state.hoveredIndex = -1;
-    state.selectedId = 0;
-    state.isDone = false;
-    state.maxShortcutW = 0;
+    ModernContextMenuState* pState = pStateOut;
+    pState->hWnd = NULL;
+    pState->hParent = hParent;
+    pState->items = items;
+    pState->bDarkMode = bDarkMode;
+    pState->hoveredIndex = -1;
+    pState->selectedId = 0;
+    pState->isDone = false;
+    pState->maxShortcutW = 0;
+    pState->hSubMenuWnd = NULL;
+    pState->activeSubMenuIndex = -1;
+    pState->pSubMenuState = nullptr;
+    pState->pParentMenuState = pParentState;
 
-    state.hFontText = CreateFontW(
+    pState->hFontText = CreateFontW(
         -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
 
-    state.hFontShortcuts = CreateFontW(
+    pState->hFontShortcuts = CreateFontW(
         -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
 
-    state.hFontIcons = CreateFontW(
+    pState->hFontIcons = CreateFontW(
         -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe Fluent Icons");
-    if (!state.hFontIcons)
+    if (!pState->hFontIcons)
     {
-        state.hFontIcons = CreateFontW(
+        pState->hFontIcons = CreateFontW(
             -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
     }
 
-    // Compute total menu height & width with full text and shortcut measurement
+    // Compute total menu height & width
     int totalH = PADDING_V * 2;
     int maxTextW = 80;
     int maxShortcutW = 0;
+    bool hasSubmenus = false;
     HDC hScreenDC = GetDC(NULL);
-    HFONT hOldF = (HFONT)SelectObject(hScreenDC, state.hFontText);
+    HFONT hOldF = (HFONT)SelectObject(hScreenDC, pState->hFontText);
 
     for (const auto& item : items)
     {
@@ -325,31 +484,47 @@ int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<Contex
                 if (szText.cx > maxTextW) maxTextW = szText.cx;
             }
 
-            if (!item.shortcut.empty())
+            if (!item.subItems.empty())
             {
-                SelectObject(hScreenDC, state.hFontShortcuts);
+                hasSubmenus = true;
+            }
+            else if (!item.shortcut.empty())
+            {
+                SelectObject(hScreenDC, pState->hFontShortcuts);
                 SIZE szShort;
                 GetTextExtentPoint32W(hScreenDC, item.shortcut.c_str(), (int)item.shortcut.size(), &szShort);
                 if (szShort.cx > maxShortcutW) maxShortcutW = szShort.cx;
-                SelectObject(hScreenDC, state.hFontText);
+                SelectObject(hScreenDC, pState->hFontText);
             }
         }
     }
     SelectObject(hScreenDC, hOldF);
     ReleaseDC(NULL, hScreenDC);
 
-    state.maxShortcutW = maxShortcutW;
+    pState->maxShortcutW = maxShortcutW;
 
-    int leftIconPad = 40; // icon area
-    int gap = (maxShortcutW > 0) ? 24 : 16;
-    int rightPad = 16;
+    int leftIconPad = 38;
+    int gap = (maxShortcutW > 0 || hasSubmenus) ? 24 : 16;
+    int rightPad = hasSubmenus ? 24 : 16;
     int calculatedW = leftIconPad + maxTextW + gap + maxShortcutW + rightPad;
     int menuW = (std::max)({ MIN_MENU_WIDTH, minWidth, calculatedW });
 
     // Screen bounds adjustment
     RECT rcWork;
     SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
-    if (x + menuW > rcWork.right) x = rcWork.right - menuW - 6;
+    if (x + menuW > rcWork.right)
+    {
+        if (pParentState && pParentState->hWnd && IsWindow(pParentState->hWnd))
+        {
+            RECT rcParentWin;
+            GetWindowRect(pParentState->hWnd, &rcParentWin);
+            x = rcParentWin.left - menuW + 2;
+        }
+        else
+        {
+            x = rcWork.right - menuW - 6;
+        }
+    }
     if (y + totalH > rcWork.bottom) y = rcWork.bottom - totalH - 6;
     if (x < rcWork.left) x = rcWork.left + 6;
     if (y < rcWork.top) y = rcWork.top + 6;
@@ -359,16 +534,10 @@ int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<Contex
         L"ModernContextMenuClass", L"",
         WS_POPUP | WS_VISIBLE,
         x, y, menuW, totalH,
-        hParent, NULL, hInst, &state
+        hParent, NULL, hInst, pState
     );
 
-    if (!hMenuWnd)
-    {
-        if (state.hFontText) DeleteObject(state.hFontText);
-        if (state.hFontShortcuts) DeleteObject(state.hFontShortcuts);
-        if (state.hFontIcons) DeleteObject(state.hFontIcons);
-        return 0;
-    }
+    if (!hMenuWnd) return NULL;
 
     // Apply DWM Dark Mode & Rounded Corners
     BOOL useDark = TRUE;
@@ -376,30 +545,88 @@ int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<Contex
     DWORD corner = 2; // DWMWCP_ROUND
     DwmSetWindowAttribute(hMenuWnd, (DWMWINDOWATTRIBUTE)33, &corner, sizeof(corner));
 
-    SetFocus(hMenuWnd);
-    SetCapture(hMenuWnd);
+    return hMenuWnd;
+}
 
-    // Modal message loop
+int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode, int minWidth)
+{
+    if (items.empty()) return 0;
+
+    ModernContextMenuState rootState;
+    HWND hRootMenuWnd = CreateMenuWindow(hParent, x, y, items, bDarkMode, minWidth, nullptr, &rootState);
+    if (!hRootMenuWnd) return 0;
+
+    SetFocus(hRootMenuWnd);
+    SetCapture(hRootMenuWnd);
+
+    // Modal message loop with intelligent routing across parent and cascading submenus
     MSG msg;
-    while (!state.isDone && GetMessageW(&msg, NULL, 0, 0))
+    while (!rootState.isDone && GetMessageW(&msg, NULL, 0, 0))
     {
-        if (msg.message == WM_LBUTTONDOWN || msg.message == WM_RBUTTONDOWN || msg.message == WM_NCLBUTTONDOWN)
+        if (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST)
         {
-            POINT pt = msg.pt;
-            RECT rcWindow;
-            GetWindowRect(hMenuWnd, &rcWindow);
-            if (!PtInRect(&rcWindow, pt))
+            POINT ptScreen = msg.pt;
+            HWND hTargetWnd = FindMenuWindowUnderPoint(&rootState, ptScreen);
+
+            if (hTargetWnd)
             {
-                // Clicked outside menu -> dismiss
-                state.selectedId = 0;
-                state.isDone = true;
-                break;
+                // Route message directly to targeted menu window with client coordinates
+                POINT ptLocal = ptScreen;
+                ScreenToClient(hTargetWnd, &ptLocal);
+                msg.hwnd = hTargetWnd;
+                msg.lParam = MAKELPARAM(ptLocal.x, ptLocal.y);
+            }
+            else
+            {
+                // Mouse event outside all menu windows
+                if (msg.message == WM_LBUTTONDOWN || msg.message == WM_RBUTTONDOWN || msg.message == WM_NCLBUTTONDOWN)
+                {
+                    rootState.selectedId = 0;
+                    rootState.isDone = true;
+
+                    POINT ptScreen = msg.pt;
+                    ReleaseCapture();
+                    if (IsWindow(hRootMenuWnd))
+                    {
+                        DestroyWindow(hRootMenuWnd);
+                        hRootMenuWnd = NULL;
+                    }
+
+                    HWND hClicked = WindowFromPoint(ptScreen);
+                    if (hClicked && IsWindow(hClicked))
+                    {
+                        LRESULT ht = SendMessageW(hClicked, WM_NCHITTEST, 0, MAKELPARAM(ptScreen.x, ptScreen.y));
+                        if (ht == HTTRANSPARENT)
+                        {
+                            HWND hParentWin = GetParent(hClicked);
+                            if (hParentWin && IsWindow(hParentWin))
+                            {
+                                hClicked = hParentWin;
+                                ht = SendMessageW(hClicked, WM_NCHITTEST, 0, MAKELPARAM(ptScreen.x, ptScreen.y));
+                            }
+                        }
+
+                        if (ht == HTCLIENT)
+                        {
+                            POINT ptLocal = ptScreen;
+                            ScreenToClient(hClicked, &ptLocal);
+                            UINT postMsg = (msg.message == WM_RBUTTONDOWN || msg.message == WM_NCRBUTTONDOWN) ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
+                            PostMessageW(hClicked, postMsg, msg.wParam, MAKELPARAM(ptLocal.x, ptLocal.y));
+                        }
+                        else if (ht != HTNOWHERE && ht != HTERROR)
+                        {
+                            UINT postNcMsg = (msg.message == WM_RBUTTONDOWN || msg.message == WM_NCRBUTTONDOWN) ? WM_NCRBUTTONDOWN : WM_NCLBUTTONDOWN;
+                            PostMessageW(hClicked, postNcMsg, (WPARAM)ht, MAKELPARAM(ptScreen.x, ptScreen.y));
+                        }
+                    }
+                    break;
+                }
             }
         }
         else if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE)
         {
-            state.selectedId = 0;
-            state.isDone = true;
+            rootState.selectedId = 0;
+            rootState.isDone = true;
             break;
         }
 
@@ -408,14 +635,10 @@ int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<Contex
     }
 
     ReleaseCapture();
-    if (IsWindow(hMenuWnd))
+    if (IsWindow(hRootMenuWnd))
     {
-        DestroyWindow(hMenuWnd);
+        DestroyWindow(hRootMenuWnd);
     }
 
-    if (state.hFontText) DeleteObject(state.hFontText);
-    if (state.hFontShortcuts) DeleteObject(state.hFontShortcuts);
-    if (state.hFontIcons) DeleteObject(state.hFontIcons);
-
-    return state.selectedId;
+    return rootState.selectedId;
 }

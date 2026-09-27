@@ -83,14 +83,43 @@ namespace PoolManager
     bool CycleUnitFlipMode(int poolIndex, int unitIndex);
     bool SetUnitFlipMode(int poolIndex, int unitIndex, UnitFlipMode mode);
     bool CyclePoolFlipPolicy(int poolIndex);
-
-    // Clipboard transfer helpers
     int PasteUnitsToPool(int poolIndex, const std::vector<ConsistReader::UnitInfo>& clipboardUnits);
     bool CopyPoolUnitsToClipboard(int poolIndex);
     bool CopySingleUnitToClipboard(int poolIndex, int unitIndex);
     bool CopyMultipleUnitsToClipboard(int poolIndex, const std::vector<int>& unitIndices);
     bool RemoveMultipleUnitsFromPool(int poolIndex, const std::vector<int>& unitIndices);
     bool SetMultipleUnitsFlipMode(int poolIndex, const std::vector<int>& unitIndices, UnitFlipMode mode);
+
+    // Replacement Group / Palette for Context Menu Instant Unit Swap
+    struct ReplacementGroup {
+        std::wstring name;                         // e.g. "Twin WAP-7 Locos", "LHB 3A Coaches", "BOXN Wagons"
+        bool isCollapsed = false;                  // UI collapse/expand state
+        std::vector<PoolUnit> units;               // Curated units in this group
+    };
+
+    // Cache File Management (AppData\ReplacementGroups.dat)
+    std::wstring GetReplacementGroupsCacheFilePath();
+    bool LoadReplacementGroupsFromDisk(std::vector<ReplacementGroup>& outGroups);
+    bool SaveReplacementGroupsToDisk(const std::vector<ReplacementGroup>& groups);
+
+    // Global in-memory replacement groups cache
+    extern std::vector<ReplacementGroup> g_ReplacementGroupsCache;
+
+    // Initialization & persistence
+    void InitializeReplacementGroups();
+    void PersistReplacementGroups();
+
+    // Replacement Group CRUD operations
+    int AddReplacementGroup(const std::wstring& name = L"");
+    bool RemoveReplacementGroup(int groupIndex);
+    bool RenameReplacementGroup(int groupIndex, const std::wstring& newName);
+    bool AddUnitToReplacementGroup(int groupIndex, const PoolUnit& unit);
+    bool RemoveUnitFromReplacementGroup(int groupIndex, int unitIndex);
+    bool ClearReplacementGroupUnits(int groupIndex);
+    int PasteUnitsToReplacementGroup(int groupIndex, const std::vector<ConsistReader::UnitInfo>& clipboardUnits);
+    bool RemoveMultipleUnitsFromReplacementGroup(int groupIndex, const std::vector<int>& unitIndices);
+    bool SetMultipleUnitsFlipModeInReplacementGroup(int groupIndex, const std::vector<int>& unitIndices, UnitFlipMode mode);
+    bool PickUnitFromGroup(int groupIndex, PoolUnit& outUnit);
 }
 
 // Backward compatibility namespace

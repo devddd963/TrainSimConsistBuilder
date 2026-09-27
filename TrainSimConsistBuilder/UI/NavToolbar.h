@@ -22,3 +22,5 @@ void NavToolbar_GetPath(HWND hNavToolbar, wchar_t* szBuffer, int maxLen);
 void NavToolbar_GetSearchQuery(HWND hNavToolbar, wchar_t* szBuffer, int maxLen);
 void NavToolbar_SetSearchQuery(HWND hNavToolbar, const wchar_t* szQuery);
 void NavToolbar_SetDarkMode(HWND hNavToolbar, BOOL bDarkMode);
+void NavToolbar_SetSearchPlaceholder(HWND hNavToolbar, const wchar_t* szPlaceholder);
+void NavToolbar_SetAddressPlaceholder(HWND hNavToolbar, const wchar_t* szPlaceholder);

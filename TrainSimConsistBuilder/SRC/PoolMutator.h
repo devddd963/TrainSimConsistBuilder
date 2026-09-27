@@ -27,18 +27,28 @@ namespace PoolMutator
         TailPosition = 3         // At the very end of the consist
     };
 
+    enum class InsertSource {
+        FavouriteGroup = 0,   // Insert units from a Replacement Group (Favourite Batch)
+        PoolPreset = 1        // Insert units generated from a Pool Preset
+    };
+
     struct MutatorOptions {
         MutatorMode mode = MutatorMode::MutateConsists;
         int presetIndex = 0;
         int poolIndex = -1; // -1 = Entire Preset (All Pools), >= 0 = Specific Pool (legacy)
-        std::vector<int> selectedPoolIndices; // Empty = All pools in preset; otherwise sorted subset of pool indices
+        std::vector<int> selectedPoolIndices; // For Tab 0: subset of pools in preset. Empty = All pools
+        std::vector<int> selectedPresetIndices; // For Tab 1: subset of presets in library. Empty = All presets
         CountMode countMode = CountMode::KeepOriginalCount;
         int customCount = 20;
         bool createClones = false;
         std::wstring cloneSuffix = L"_PoolVar";
         PositionMode posMode = PositionMode::TailPosition;
         int positionIndex = 0;
-        int insertCount = 2;
+        std::vector<int> specificIndices; // 0-based indices parsed from semicolon/comma input
+        int insertCount = 2; // Mandatory for groups; optional (0 = dynamic pool rules) for presets
+        InsertSource insertSource = InsertSource::FavouriteGroup;
+        int replacementGroupIndex = 0;
+        std::vector<int> selectedReplacementGroupIndices; // For Tab 1: subset of favourite groups. Empty = All groups
 
         bool IsAllPoolsSelected(size_t totalPoolsInPreset) const
         {
@@ -92,6 +102,28 @@ namespace PoolMutator
         const MutatorOptions& options,
         std::wstring& outError
     );
+
+    // Persistence of user configuration
+    struct MutatorSavedSettings {
+        int activeTab = 0; // 0 = Mutate Consist, 1 = Insert Units
+        int selectedPresetIdx = 0;
+        std::vector<int> selectedPoolIndices;
+        std::vector<int> selectedPresetIndices;
+        int countMode = 0; // 0 = KeepOriginal, 1 = Dynamic, 2 = Custom
+        int customCount = 20;
+        bool createClones = false;
+        std::wstring cloneSuffix = L"_PoolVar";
+        int insertSource = 0; // 0 = Favourite Group, 1 = Pool Preset
+        int selectedGroupIdx = 0;
+        std::vector<int> selectedGroupIndices;
+        int insertCount = 2;
+        int posMode = 3; // 0 = Head, 1 = BehindEngines, 2 = Specific, 3 = Tail
+        std::wstring positionIndexText = L"1";
+    };
+
+    std::wstring GetPoolMutationCacheFilePath();
+    bool SaveMutationSettings(const MutatorSavedSettings& settings);
+    bool LoadMutationSettings(MutatorSavedSettings& settings);
 
     // Helpers for generating units from a pool preset, subset of pools, or specific pool
     std::vector<ConsistReader::UnitInfo> GenerateUnitsFromPreset(

@@ -25,7 +25,9 @@ struct TitleBarState
     HFONT hFontIcons = NULL;
     HICON hAppIcon = NULL;
 
-    int activeTab = 0; // 0 = MAIN CONSISTS, 1 = ACTIVITY CONSISTS
+    std::wstring titleText = L"Train Sim Consist Builder for Open Rails";
+
+    int activeTab = 0;
     int hoverTab = -1;
 
     // Caption button rects & hover state (0: Min, 1: Max/Restore, 2: Close)
@@ -37,8 +39,6 @@ struct TitleBarState
 
     std::vector<TitleBarTab> tabs;
 };
-
-static TitleBarState g_TitleBarState;
 
 static HFONT CreateCustomFont(float pointSize, int weight, const wchar_t* faceName)
 {
@@ -53,51 +53,90 @@ static HFONT CreateCustomFont(float pointSize, int weight, const wchar_t* faceNa
 
 static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+    TitleBarState* pState = (TitleBarState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
     HWND hMainWnd = GetParent(hWnd);
 
     switch (uMsg)
     {
+    case WM_NCCREATE:
+    {
+        CREATESTRUCTW* cs = (CREATESTRUCTW*)lParam;
+        if (cs->lpCreateParams)
+        {
+            pState = (TitleBarState*)cs->lpCreateParams;
+        }
+        else
+        {
+            pState = new TitleBarState();
+        }
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)pState);
+        return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+    }
+
     case WM_CREATE:
     {
-        g_TitleBarState.hFontTitle = CreateCustomFont(9.0f, FW_NORMAL, L"Segoe UI");
-        g_TitleBarState.hFontTabs  = CreateCustomFont(9.0f, FW_SEMIBOLD, L"Segoe UI");
-        g_TitleBarState.hFontIcons = CreateCustomFont(9.5f, FW_NORMAL, L"Segoe Fluent Icons");
-        if (!g_TitleBarState.hFontIcons)
-            g_TitleBarState.hFontIcons = CreateCustomFont(9.5f, FW_NORMAL, L"Segoe MDL2 Assets");
+        if (!pState)
+        {
+            pState = new TitleBarState();
+            SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)pState);
+        }
 
-        g_TitleBarState.hAppIcon = (HICON)GetClassLongPtrW(hMainWnd, GCLP_HICONSM);
-        if (!g_TitleBarState.hAppIcon)
-            g_TitleBarState.hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+        pState->hFontTitle = CreateCustomFont(9.0f, FW_NORMAL, L"Segoe UI");
+        pState->hFontTabs  = CreateCustomFont(9.0f, FW_SEMIBOLD, L"Segoe UI");
+        pState->hFontIcons = CreateCustomFont(9.5f, FW_NORMAL, L"Segoe Fluent Icons");
+        if (!pState->hFontIcons)
+            pState->hFontIcons = CreateCustomFont(9.5f, FW_NORMAL, L"Segoe MDL2 Assets");
 
-        g_TitleBarState.tabs.clear();
-        g_TitleBarState.tabs.push_back({ L"\xE7C0", L"MAIN CONSISTS", { 0 } });
-        g_TitleBarState.tabs.push_back({ L"\xE707", L"ACTIVITY CONSISTS", { 0 } });
+        pState->hAppIcon = (HICON)GetClassLongPtrW(hMainWnd, GCLP_HICONSM);
+        if (!pState->hAppIcon)
+            pState->hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+
+        if (pState->tabs.empty())
+        {
+            pState->tabs.push_back({ L"\xE7C0", L"MAIN CONSISTS", { 0 } });
+            pState->tabs.push_back({ L"\xE707", L"ACTIVITY CONSISTS", { 0 } });
+        }
         return 0;
     }
 
+    case WM_SIZE:
+    {
+        InvalidateRect(hWnd, NULL, TRUE);
+        return 0;
+    }
+
+    case WM_ERASEBKGND:
+        return 1;
+
     case WM_DESTROY:
     {
-        if (g_TitleBarState.hFontTitle) DeleteObject(g_TitleBarState.hFontTitle);
-        if (g_TitleBarState.hFontTabs)  DeleteObject(g_TitleBarState.hFontTabs);
-        if (g_TitleBarState.hFontIcons) DeleteObject(g_TitleBarState.hFontIcons);
+        if (pState)
+        {
+            if (pState->hFontTitle) DeleteObject(pState->hFontTitle);
+            if (pState->hFontTabs)  DeleteObject(pState->hFontTabs);
+            if (pState->hFontIcons) DeleteObject(pState->hFontIcons);
+            delete pState;
+            SetWindowLongPtrW(hWnd, GWLP_USERDATA, 0);
+        }
         return 0;
     }
 
     case WM_NCHITTEST:
     {
+        if (!pState) return HTCLIENT;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ScreenToClient(hWnd, &pt);
 
         // Top caption buttons handle client clicks
-        if (PtInRect(&g_TitleBarState.rcBtnMin, pt) ||
-            PtInRect(&g_TitleBarState.rcBtnMax, pt) ||
-            PtInRect(&g_TitleBarState.rcBtnClose, pt))
+        if (PtInRect(&pState->rcBtnMin, pt) ||
+            PtInRect(&pState->rcBtnMax, pt) ||
+            PtInRect(&pState->rcBtnClose, pt))
         {
             return HTCLIENT;
         }
 
         // Tabs in Row 2 handle client clicks
-        for (const auto& tab : g_TitleBarState.tabs)
+        for (const auto& tab : pState->tabs)
         {
             if (PtInRect(&tab.rc, pt))
                 return HTCLIENT;
@@ -106,7 +145,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         // Top Row (0 to 30px) is draggable caption
         if (pt.y < 30)
         {
-            return HTTRANSPARENT; // Let main window receive HTCAPTION
+            return HTTRANSPARENT; // Let parent frame receive HTCAPTION for dragging/snapping
         }
 
         return HTCLIENT;
@@ -114,27 +153,28 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
 
     case WM_MOUSEMOVE:
     {
+        if (!pState) break;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
         int newHoverBtn = -1;
-        if (PtInRect(&g_TitleBarState.rcBtnMin, pt))   newHoverBtn = 0;
-        else if (PtInRect(&g_TitleBarState.rcBtnMax, pt))   newHoverBtn = 1;
-        else if (PtInRect(&g_TitleBarState.rcBtnClose, pt)) newHoverBtn = 2;
+        if (PtInRect(&pState->rcBtnMin, pt))        newHoverBtn = 0;
+        else if (PtInRect(&pState->rcBtnMax, pt))   newHoverBtn = 1;
+        else if (PtInRect(&pState->rcBtnClose, pt)) newHoverBtn = 2;
 
         int newHoverTab = -1;
-        for (size_t i = 0; i < g_TitleBarState.tabs.size(); ++i)
+        for (size_t i = 0; i < pState->tabs.size(); ++i)
         {
-            if (PtInRect(&g_TitleBarState.tabs[i].rc, pt))
+            if (PtInRect(&pState->tabs[i].rc, pt))
             {
                 newHoverTab = (int)i;
                 break;
             }
         }
 
-        if (newHoverBtn != g_TitleBarState.hoverBtn || newHoverTab != g_TitleBarState.hoverTab)
+        if (newHoverBtn != pState->hoverBtn || newHoverTab != pState->hoverTab)
         {
-            g_TitleBarState.hoverBtn = newHoverBtn;
-            g_TitleBarState.hoverTab = newHoverTab;
+            pState->hoverBtn = newHoverBtn;
+            pState->hoverTab = newHoverTab;
             InvalidateRect(hWnd, NULL, FALSE);
 
             TRACKMOUSEEVENT tme = { 0 };
@@ -148,47 +188,51 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
 
     case WM_MOUSELEAVE:
     {
-        g_TitleBarState.hoverBtn = -1;
-        g_TitleBarState.hoverTab = -1;
-        InvalidateRect(hWnd, NULL, FALSE);
+        if (pState)
+        {
+            pState->hoverBtn = -1;
+            pState->hoverTab = -1;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
         return 0;
     }
 
     case WM_LBUTTONDOWN:
     {
+        if (!pState) break;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-        if (PtInRect(&g_TitleBarState.rcBtnMin, pt))
+        if (PtInRect(&pState->rcBtnMin, pt))
         {
-            g_TitleBarState.pressedBtn = 0;
+            pState->pressedBtn = 0;
             SetCapture(hWnd);
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
-        if (PtInRect(&g_TitleBarState.rcBtnMax, pt))
+        if (PtInRect(&pState->rcBtnMax, pt))
         {
-            g_TitleBarState.pressedBtn = 1;
+            pState->pressedBtn = 1;
             SetCapture(hWnd);
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
-        if (PtInRect(&g_TitleBarState.rcBtnClose, pt))
+        if (PtInRect(&pState->rcBtnClose, pt))
         {
-            g_TitleBarState.pressedBtn = 2;
+            pState->pressedBtn = 2;
             SetCapture(hWnd);
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
 
-        for (size_t i = 0; i < g_TitleBarState.tabs.size(); ++i)
+        for (size_t i = 0; i < pState->tabs.size(); ++i)
         {
-            if (PtInRect(&g_TitleBarState.tabs[i].rc, pt))
+            if (PtInRect(&pState->tabs[i].rc, pt))
             {
-                if (g_TitleBarState.activeTab != (int)i)
+                if (pState->activeTab != (int)i)
                 {
-                    g_TitleBarState.activeTab = (int)i;
+                    pState->activeTab = (int)i;
                     InvalidateRect(hWnd, NULL, FALSE);
-                    SendMessageW(hMainWnd, WM_TITLEBAR_TABCHANGED, (WPARAM)g_TitleBarState.activeTab, 0);
+                    SendMessageW(hMainWnd, WM_TITLEBAR_TABCHANGED, (WPARAM)pState->activeTab, 0);
                 }
                 return 0;
             }
@@ -201,17 +245,18 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         if (GetCapture() == hWnd)
             ReleaseCapture();
 
+        if (!pState) break;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        int releasedBtn = g_TitleBarState.pressedBtn;
-        g_TitleBarState.pressedBtn = -1;
+        int releasedBtn = pState->pressedBtn;
+        pState->pressedBtn = -1;
         InvalidateRect(hWnd, NULL, FALSE);
 
-        if (releasedBtn == 0 && PtInRect(&g_TitleBarState.rcBtnMin, pt))
+        if (releasedBtn == 0 && PtInRect(&pState->rcBtnMin, pt))
         {
             ShowWindow(hMainWnd, SW_MINIMIZE);
             return 0;
         }
-        if (releasedBtn == 1 && PtInRect(&g_TitleBarState.rcBtnMax, pt))
+        if (releasedBtn == 1 && PtInRect(&pState->rcBtnMax, pt))
         {
             if (IsZoomed(hMainWnd))
                 ShowWindow(hMainWnd, SW_RESTORE);
@@ -219,8 +264,26 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
                 ShowWindow(hMainWnd, SW_MAXIMIZE);
             return 0;
         }
-        if (releasedBtn == 2 && PtInRect(&g_TitleBarState.rcBtnClose, pt))
+        if (releasedBtn == 2 && PtInRect(&pState->rcBtnClose, pt))
         {
+            HWND hOwner = GetWindow(hMainWnd, GW_OWNER);
+            if (!hOwner || !IsWindow(hOwner))
+            {
+                hOwner = GetParent(hMainWnd);
+            }
+            if (hOwner && IsWindow(hOwner))
+            {
+                EnableWindow(hOwner, TRUE);
+                if (IsIconic(hOwner))
+                {
+                    ShowWindow(hOwner, SW_RESTORE);
+                }
+                SetWindowPos(hOwner, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                SetForegroundWindow(hOwner);
+                SetActiveWindow(hOwner);
+                BringWindowToTop(hOwner);
+                SetFocus(hOwner);
+            }
             PostMessageW(hMainWnd, WM_CLOSE, 0, 0);
             return 0;
         }
@@ -229,8 +292,9 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
 
     case WM_LBUTTONDBLCLK:
     {
+        if (!pState) break;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        if (pt.y < 30 && !PtInRect(&g_TitleBarState.rcBtnMin, pt) && !PtInRect(&g_TitleBarState.rcBtnMax, pt) && !PtInRect(&g_TitleBarState.rcBtnClose, pt))
+        if (pt.y < 30 && !PtInRect(&pState->rcBtnMin, pt) && !PtInRect(&pState->rcBtnMax, pt) && !PtInRect(&pState->rcBtnClose, pt))
         {
             if (IsZoomed(hMainWnd))
                 ShowWindow(hMainWnd, SW_RESTORE);
@@ -245,6 +309,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
     {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
+        if (!pState) { EndPaint(hWnd, &ps); return 0; }
 
         RECT rcClient;
         GetClientRect(hWnd, &rcClient);
@@ -268,54 +333,54 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         // App Icon
         int iconX = 10;
         int iconY = (row1H - 16) / 2;
-        if (g_TitleBarState.hAppIcon)
+        if (pState->hAppIcon)
         {
-            DrawIconEx(memDC, iconX, iconY, g_TitleBarState.hAppIcon, 16, 16, 0, NULL, DI_NORMAL);
+            DrawIconEx(memDC, iconX, iconY, pState->hAppIcon, 16, 16, 0, NULL, DI_NORMAL);
         }
 
         // App Title Typography (Segoe UI 9pt)
-        SelectObject(memDC, g_TitleBarState.hFontTitle);
+        SelectObject(memDC, pState->hFontTitle);
         SetBkMode(memDC, TRANSPARENT);
         SetTextColor(memDC, RGB(225, 225, 225));
 
         RECT rcTitleText = { iconX + 22, 0, w - 150, row1H };
-        DrawTextW(memDC, L"Train Sim Consist Builder for Open Rails", -1, &rcTitleText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(memDC, pState->titleText.c_str(), -1, &rcTitleText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         // Caption Buttons (Flush to top-right corner, 46px x 30px)
         int btnW = 46;
-        g_TitleBarState.rcBtnClose = { w - btnW, 0, w, row1H };
-        g_TitleBarState.rcBtnMax   = { w - (btnW * 2), 0, w - btnW, row1H };
-        g_TitleBarState.rcBtnMin   = { w - (btnW * 3), 0, w - (btnW * 2), row1H };
+        pState->rcBtnClose = { w - btnW, 0, w, row1H };
+        pState->rcBtnMax   = { w - (btnW * 2), 0, w - btnW, row1H };
+        pState->rcBtnMin   = { w - (btnW * 3), 0, w - (btnW * 2), row1H };
 
         // Minimize Button
-        if (g_TitleBarState.hoverBtn == 0)
+        if (pState->hoverBtn == 0)
         {
-            COLORREF hovMin = (g_TitleBarState.pressedBtn == 0 ? RGB(48, 18, 24) : RGB(38, 14, 18));
+            COLORREF hovMin = (pState->pressedBtn == 0 ? RGB(48, 18, 24) : RGB(38, 14, 18));
             HBRUSH hbrMin = CreateSolidBrush(hovMin);
-            FillRect(memDC, &g_TitleBarState.rcBtnMin, hbrMin);
+            FillRect(memDC, &pState->rcBtnMin, hbrMin);
             DeleteObject(hbrMin);
         }
-        SelectObject(memDC, g_TitleBarState.hFontIcons);
+        SelectObject(memDC, pState->hFontIcons);
         SetTextColor(memDC, RGB(200, 200, 205));
-        DrawTextW(memDC, L"\xE921", -1, &g_TitleBarState.rcBtnMin, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(memDC, L"\xE921", -1, &pState->rcBtnMin, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         // Maximize / Restore Button
-        if (g_TitleBarState.hoverBtn == 1)
+        if (pState->hoverBtn == 1)
         {
-            COLORREF hovMax = (g_TitleBarState.pressedBtn == 1 ? RGB(48, 18, 24) : RGB(38, 14, 18));
+            COLORREF hovMax = (pState->pressedBtn == 1 ? RGB(48, 18, 24) : RGB(38, 14, 18));
             HBRUSH hbrMax = CreateSolidBrush(hovMax);
-            FillRect(memDC, &g_TitleBarState.rcBtnMax, hbrMax);
+            FillRect(memDC, &pState->rcBtnMax, hbrMax);
             DeleteObject(hbrMax);
         }
         bool isMax = IsZoomed(hMainWnd) != FALSE;
-        DrawTextW(memDC, isMax ? L"\xE923" : L"\xE922", -1, &g_TitleBarState.rcBtnMax, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(memDC, isMax ? L"\xE923" : L"\xE922", -1, &pState->rcBtnMax, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         // Close Button
-        if (g_TitleBarState.hoverBtn == 2)
+        if (pState->hoverBtn == 2)
         {
-            COLORREF hovClose = g_TitleBarState.pressedBtn == 2 ? RGB(160, 30, 20) : RGB(196, 43, 28);
+            COLORREF hovClose = pState->pressedBtn == 2 ? RGB(160, 30, 20) : RGB(196, 43, 28);
             HBRUSH hbrClose = CreateSolidBrush(hovClose);
-            FillRect(memDC, &g_TitleBarState.rcBtnClose, hbrClose);
+            FillRect(memDC, &pState->rcBtnClose, hbrClose);
             DeleteObject(hbrClose);
             SetTextColor(memDC, RGB(255, 255, 255));
         }
@@ -323,7 +388,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         {
             SetTextColor(memDC, RGB(200, 200, 205));
         }
-        DrawTextW(memDC, L"\xE8BB", -1, &g_TitleBarState.rcBtnClose, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(memDC, L"\xE8BB", -1, &pState->rcBtnClose, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         // ====================================================================
         // TIER 2: FULL-WIDTH DARK MICA TAB RIBBON (Y = 30 to 66px)
@@ -341,13 +406,13 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         const int r_b = 6;
         const int r_t = 8;
 
-        for (size_t i = 0; i < g_TitleBarState.tabs.size(); ++i)
+        for (size_t i = 0; i < pState->tabs.size(); ++i)
         {
             RECT rcTab = { tabStartX + (int)i * (tabW + 2), row1H, tabStartX + (int)i * (tabW + 2) + tabW, h };
-            g_TitleBarState.tabs[i].rc = rcTab;
+            pState->tabs[i].rc = rcTab;
 
-            bool isActive = (g_TitleBarState.activeTab == (int)i);
-            bool isHover  = (g_TitleBarState.hoverTab == (int)i);
+            bool isActive = (pState->activeTab == (int)i);
+            bool isHover  = (pState->hoverTab == (int)i);
 
             int tabLeft   = rcTab.left + r_b;
             int tabRight  = rcTab.right - r_b;
@@ -355,7 +420,6 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
 
             if (isActive)
             {
-                // Active Tab Surface (Light Mica Wine tone matching NavToolbar)
                 COLORREF clrActiveSurface = RGB(52, 22, 27);
                 HBRUSH hbrSurface = CreateSolidBrush(clrActiveSurface);
                 HPEN hNullPen = CreatePen(PS_NULL, 0, 0);
@@ -396,18 +460,18 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
                 SelectObject(memDC, hOldOutlinePen);
                 DeleteObject(hOutlinePen);
 
-                // Draw Tab Icon and Text (Left Aligned like Explorer)
+                // Draw Tab Icon and Text
                 int contentLeft = tabLeft + 12;
                 RECT rcIcon = { contentLeft, row1H + 2, contentLeft + 20, h };
                 RECT rcText = { contentLeft + 24, row1H + 2, tabRight - 10, h };
 
-                SelectObject(memDC, g_TitleBarState.hFontIcons);
+                SelectObject(memDC, pState->hFontIcons);
                 SetTextColor(memDC, RGB(255, 255, 255));
-                DrawTextW(memDC, g_TitleBarState.tabs[i].icon.c_str(), -1, &rcIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, pState->tabs[i].icon.c_str(), -1, &rcIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-                SelectObject(memDC, g_TitleBarState.hFontTabs);
+                SelectObject(memDC, pState->hFontTabs);
                 SetTextColor(memDC, RGB(255, 255, 255));
-                DrawTextW(memDC, g_TitleBarState.tabs[i].text.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, pState->tabs[i].text.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
             else
             {
@@ -435,37 +499,33 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
                     DeleteObject(hNullPen);
                 }
 
-                // Draw Tab Icon and Text (Left Aligned like Explorer)
                 int contentLeft = tabLeft + 12;
                 RECT rcIcon = { contentLeft, row1H + 2, contentLeft + 20, h };
                 RECT rcText = { contentLeft + 24, row1H + 2, tabRight - 10, h };
 
                 COLORREF clrTabContent = isHover ? RGB(230, 225, 225) : RGB(180, 175, 175);
 
-                SelectObject(memDC, g_TitleBarState.hFontIcons);
+                SelectObject(memDC, pState->hFontIcons);
                 SetTextColor(memDC, clrTabContent);
-                DrawTextW(memDC, g_TitleBarState.tabs[i].icon.c_str(), -1, &rcIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, pState->tabs[i].icon.c_str(), -1, &rcIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-                SelectObject(memDC, g_TitleBarState.hFontTabs);
+                SelectObject(memDC, pState->hFontTabs);
                 SetTextColor(memDC, clrTabContent);
-                DrawTextW(memDC, g_TitleBarState.tabs[i].text.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(memDC, pState->tabs[i].text.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
         }
 
-        // 1px App-Drawn Perimeter Border (Top, Left, Right) when windowed
+        // 1px App-Drawn Perimeter Border
         if (!IsZoomed(hMainWnd))
         {
             COLORREF clrBorder = RGB(78, 32, 38);
             HPEN hPenBorder = CreatePen(PS_SOLID, 1, clrBorder);
             HPEN hOldBorder = (HPEN)SelectObject(memDC, hPenBorder);
 
-            // Top border
             MoveToEx(memDC, 0, 0, NULL);
             LineTo(memDC, w, 0);
-            // Left border
             MoveToEx(memDC, 0, 0, NULL);
             LineTo(memDC, 0, h);
-            // Right border
             MoveToEx(memDC, w - 1, 0, NULL);
             LineTo(memDC, w - 1, h);
 
@@ -473,7 +533,6 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
             DeleteObject(hPenBorder);
         }
 
-        // Blit to screen
         BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
         SelectObject(memDC, oldBM);
         DeleteObject(memBM);
@@ -513,27 +572,89 @@ HWND CreateCustomTitleBar(HWND hParent, HINSTANCE hInstance, int x, int y, int w
     );
 }
 
+HWND CreateCustomTitleBarEx(HWND hParent, HINSTANCE hInstance, int x, int y, int width, int height, UINT_PTR controlId, const wchar_t* title, const std::vector<TitleBarTabItem>& tabs)
+{
+    RegisterCustomTitleBarClass(hInstance);
+
+    TitleBarState* pState = new TitleBarState();
+    if (title) pState->titleText = title;
+
+    pState->tabs.clear();
+    for (const auto& t : tabs)
+    {
+        pState->tabs.push_back({ t.icon, t.text, { 0 } });
+    }
+
+    return CreateWindowExW(
+        0, L"CustomTitleBarWindow", L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        x, y, width, height,
+        hParent, (HMENU)controlId, hInstance, (LPVOID)pState
+    );
+}
+
 void CustomTitleBar_SetDarkMode(HWND hTitleBar, BOOL bDarkMode)
 {
-    g_TitleBarState.bDarkMode = bDarkMode;
     if (hTitleBar && IsWindow(hTitleBar))
+    {
+        TitleBarState* pState = (TitleBarState*)GetWindowLongPtrW(hTitleBar, GWLP_USERDATA);
+        if (pState) pState->bDarkMode = bDarkMode;
         InvalidateRect(hTitleBar, NULL, FALSE);
+    }
 }
 
 void CustomTitleBar_SetActiveTab(HWND hTitleBar, int tabIndex)
 {
-    g_TitleBarState.activeTab = tabIndex;
     if (hTitleBar && IsWindow(hTitleBar))
+    {
+        TitleBarState* pState = (TitleBarState*)GetWindowLongPtrW(hTitleBar, GWLP_USERDATA);
+        if (pState) pState->activeTab = tabIndex;
         InvalidateRect(hTitleBar, NULL, FALSE);
+    }
 }
 
 int CustomTitleBar_GetActiveTab(HWND hTitleBar)
 {
-    return g_TitleBarState.activeTab;
+    if (hTitleBar && IsWindow(hTitleBar))
+    {
+        TitleBarState* pState = (TitleBarState*)GetWindowLongPtrW(hTitleBar, GWLP_USERDATA);
+        if (pState) return pState->activeTab;
+    }
+    return 0;
 }
 
 void CustomTitleBar_UpdateWindowState(HWND hTitleBar)
 {
     if (hTitleBar && IsWindow(hTitleBar))
         InvalidateRect(hTitleBar, NULL, FALSE);
+}
+
+void CustomTitleBar_SetTitle(HWND hTitleBar, const wchar_t* title)
+{
+    if (hTitleBar && IsWindow(hTitleBar) && title)
+    {
+        TitleBarState* pState = (TitleBarState*)GetWindowLongPtrW(hTitleBar, GWLP_USERDATA);
+        if (pState)
+        {
+            pState->titleText = title;
+            InvalidateRect(hTitleBar, NULL, FALSE);
+        }
+    }
+}
+
+void CustomTitleBar_SetTabs(HWND hTitleBar, const std::vector<TitleBarTabItem>& tabs)
+{
+    if (hTitleBar && IsWindow(hTitleBar))
+    {
+        TitleBarState* pState = (TitleBarState*)GetWindowLongPtrW(hTitleBar, GWLP_USERDATA);
+        if (pState)
+        {
+            pState->tabs.clear();
+            for (const auto& t : tabs)
+            {
+                pState->tabs.push_back({ t.icon, t.text, { 0 } });
+            }
+            InvalidateRect(hTitleBar, NULL, FALSE);
+        }
+    }
 }

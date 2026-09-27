@@ -606,7 +606,14 @@ int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, c
     if (hWndParent && IsWindow(hWndParent))
     {
         EnableWindow(hWndParent, TRUE);
+        if (IsIconic(hWndParent))
+        {
+            ShowWindow(hWndParent, SW_RESTORE);
+        }
+        SetWindowPos(hWndParent, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         SetForegroundWindow(hWndParent);
+        SetActiveWindow(hWndParent);
+        BringWindowToTop(hWndParent);
         SetFocus(hWndParent);
     }
 

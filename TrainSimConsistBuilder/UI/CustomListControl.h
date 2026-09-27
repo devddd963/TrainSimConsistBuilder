@@ -50,6 +50,7 @@ private:
     int m_headerHeight;
     static const int V_SCROLLBAR_WIDTH = 14; // Width of vertical scrollbar
     static const int H_SCROLLBAR_HEIGHT = 14; // Height of horizontal scrollbar area
+    static const int FAYT_BAR_HEIGHT = 32;    // Height of bottom Find-As-You-Type search bar
 
     // Selection state
     int m_selectedIndex;
@@ -101,10 +102,31 @@ private:
     bool m_pressedHeaderInDropdown; // Mouse down was initiated in the dropdown area
     std::vector<std::vector<std::wstring>> m_activeFilters; // Checked filters per column
 
-    // Focus & Type-Ahead state
+    // Focus & Type-Ahead / FAYT state
     bool m_hasFocus;
     std::wstring m_typeAheadBuffer;
     DWORD m_lastTypeAheadTime;
+
+    // Find-As-You-Type (FAYT) / DOpus-style Quick Search
+    bool m_bFaytActive;
+    std::wstring m_faytQuery;
+    std::vector<int> m_faytMatches;
+    int m_faytMatchIndex;
+    RECT m_rcFaytPill;
+    RECT m_rcFaytPrevBtn;
+    RECT m_rcFaytNextBtn;
+    RECT m_rcFaytCloseBtn;
+    int m_faytHoverBtn; // 0=none, 1=prev, 2=next, 3=close
+    HFONT m_hFontFaytIcon;
+    HFONT m_hFontFaytText;
+    static constexpr UINT_PTR TIMER_FAYT_TIMEOUT_ID = 0x5C03;
+
+    void StartFayt(wchar_t initialChar);
+    void UpdateFaytMatches();
+    void FaytNext();
+    void FaytPrev();
+    void CloseFayt();
+    void ResetFaytTimer();
 
 public:
     CustomListControl();

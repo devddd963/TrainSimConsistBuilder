@@ -1,6 +1,8 @@
 #include "BatchConsistGeneratorDlg.h"
 #include "PoolManagerDlg.h"
+#include "CustomTitleBar.h"
 #include "ModernContextMenu.h"
+#include "CustomDropDownMenu.h"
 #include "UITheme.h"
 #include "ModernMessageBox.h"
 #include "../SRC/BatchConsistGenerator.h"
@@ -96,26 +98,31 @@ static void DrawModernButton(HDC hdc, const RECT& rc, const wchar_t* text, bool 
     if (hasIcon && hasText)
     {
         SelectObject(hdc, hIconFont);
-        RECT rcIconMeasure = { 0, 0, 0, 0 };
-        DrawTextW(hdc, iconGlyph, -1, &rcIconMeasure, DT_CALCRECT | DT_NOPREFIX);
-        int iconW = rcIconMeasure.right - rcIconMeasure.left;
-        if (iconW <= 0) iconW = 12;
+        SIZE iconSz = { 0 };
+        GetTextExtentPoint32W(hdc, iconGlyph, (int)wcslen(iconGlyph), &iconSz);
+        int iconW = iconSz.cx > 0 ? iconSz.cx : 12;
 
         SelectObject(hdc, hFont);
-        RECT rcTextMeasure = { 0, 0, 0, 0 };
-        DrawTextW(hdc, text, -1, &rcTextMeasure, DT_CALCRECT | DT_NOPREFIX);
-        int textW = rcTextMeasure.right - rcTextMeasure.left;
+        SIZE textSz = { 0 };
+        GetTextExtentPoint32W(hdc, text, (int)wcslen(text), &textSz);
+        int textW = textSz.cx;
 
         int gap = 6;
         int totalW = iconW + gap + textW;
+        int minMargin = 6;
+
         int startX = rc.left + (rc.right - rc.left - totalW) / 2;
+        if (startX < rc.left + minMargin)
+        {
+            startX = rc.left + minMargin;
+        }
 
         SelectObject(hdc, hIconFont);
-        RECT rcIcon = { startX - 2, rc.top, startX + iconW + 2, rc.bottom };
+        RECT rcIcon = { startX, rc.top, startX + iconW, rc.bottom };
         DrawTextW(hdc, iconGlyph, -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         SelectObject(hdc, hFont);
-        RECT rcText = { startX + iconW + gap, rc.top, rc.right, rc.bottom };
+        RECT rcText = { startX + iconW + gap, rc.top, rc.right - minMargin, rc.bottom };
         DrawTextW(hdc, text, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
     else if (hasIcon)
@@ -575,11 +582,14 @@ struct ExportDialogState
 {
     HWND hWnd = NULL;
     HWND hParent = NULL;
-    RECT rcTopCloseBtn = { 0 };
-    bool isTopCloseHover = false;
+    HWND hTitleBar = NULL;
     HWND hEditBaseName = NULL;
     PoolManager::PoolPreset preset;
     std::wstring targetFolder;
+
+    // Preset & Pool Multi-Select Filtering
+    int selectedPresetIdx = 0;
+    std::vector<int> selectedPoolIndices; // Subset of pool indices within preset. Empty = All pools in preset
 
     // Mode: 0 = Auto-Numbered, 1 = Manual List
     int namingMode = 0;
@@ -621,9 +631,8 @@ struct ExportDialogState
         TARGET_NONE,
         TARGET_CLOSE,
         TARGET_PRESET_DROPDOWN,
+        TARGET_POOLS_DROPDOWN,
         TARGET_MANAGE_POOLS_BTN,
-        TARGET_TAB_AUTO,
-        TARGET_TAB_MANUAL,
         TARGET_COUNT_MINUS,
         TARGET_COUNT_PLUS,
         TARGET_COUNT_BOX,
@@ -679,12 +688,189 @@ struct ExportDialogState
     }
 };
 
+static PoolManager::PoolPreset GetEffectivePreset(const ExportDialogState* pState)
+{
+    if (!pState) return PoolManager::PoolPreset();
+    PoolManager::PoolPreset eff = pState->preset;
+    if (!pState->selectedPoolIndices.empty() && pState->selectedPoolIndices.size() < pState->preset.pools.size())
+    {
+        eff.pools.clear();
+        for (int idx : pState->selectedPoolIndices)
+        {
+            if (idx >= 0 && idx < (int)pState->preset.pools.size())
+            {
+                eff.pools.push_back(pState->preset.pools[idx]);
+            }
+        }
+    }
+    return eff;
+}
+
+static void ShowPresetDropdown(HWND hWnd, ExportDialogState* pState, const RECT& rcAnchor)
+{
+    PoolManager::InitializePoolPresets();
+    if (PoolManager::g_PoolPresetsCache.empty()) return;
+
+    std::vector<DropDownItem> items;
+    int currentSelId = 1;
+    for (size_t i = 0; i < PoolManager::g_PoolPresetsCache.size(); ++i)
+    {
+        const auto& p = PoolManager::g_PoolPresetsCache[i];
+        int totalU = 0;
+        for (const auto& pl : p.pools) totalU += (int)pl.units.size();
+
+        std::wstring label = p.presetName.empty() ? (L"Preset " + std::to_wstring(i + 1)) : p.presetName;
+        std::wstring tag = std::to_wstring(p.pools.size()) + L" pools • " + std::to_wstring(totalU) + L" units";
+        bool isCurrent = ((int)i == pState->selectedPresetIdx);
+        if (isCurrent) currentSelId = (int)i + 1;
+        items.push_back(DropDownItem::Action((int)i + 1, isCurrent ? L"\xE73E" : L"\xE71D", label, tag, isCurrent, true));
+    }
+
+    int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, rcAnchor, items, currentSelId);
+    if (chosen > 0)
+    {
+        int selIdx = chosen - 1;
+        pState->selectedPresetIdx = selIdx;
+        PoolManager::g_ActivePresetIndex = selIdx;
+        pState->preset = PoolManager::g_PoolPresetsCache[selIdx];
+        pState->selectedPoolIndices.clear();
+
+        pState->baseName = pState->preset.presetName;
+        for (auto& ch : pState->baseName)
+        {
+            if (ch == L' ' || ch == L'-') ch = L'_';
+        }
+        if (pState->baseName.empty()) pState->baseName = L"Consist";
+
+        int sumMax = 0;
+        for (const auto& pl : pState->preset.pools)
+        {
+            sumMax += pl.maxCount;
+        }
+        pState->autoFixedUnits = (sumMax > 0) ? sumMax : 6;
+        pState->SyncAutoUnits();
+
+        if (pState->hEditBaseName && IsWindow(pState->hEditBaseName))
+        {
+            SetWindowTextW(pState->hEditBaseName, pState->baseName.c_str());
+        }
+
+        InvalidateRect(hWnd, NULL, TRUE);
+    }
+}
+
+static void ShowPoolMultiDropdown(HWND hWnd, ExportDialogState* pState, const RECT& rcAnchor)
+{
+    if (pState->preset.pools.empty())
+    {
+        ShowModernMessageBox(hWnd, L"Selected preset has no pools defined.", L"Pools", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    size_t numPools = pState->preset.pools.size();
+    bool isAllSelected = (numPools > 0 && (pState->selectedPoolIndices.empty() || pState->selectedPoolIndices.size() >= numPools));
+    bool hasAnySelected = (!pState->selectedPoolIndices.empty() && !isAllSelected);
+
+    std::vector<DropDownItem> items;
+    items.push_back(DropDownItem::Header(1, L"\xE735", L"Entire Preset (All Pools)", L"", isAllSelected, hasAnySelected));
+
+    for (size_t i = 0; i < numPools; ++i)
+    {
+        const auto& pl = pState->preset.pools[i];
+        std::wstring label = std::to_wstring(i + 1) + L". " + (pl.name.empty() ? L"Pool #" + std::to_wstring(i + 1) : pl.name);
+        std::wstring modeStr = (pl.pickMode == PoolManager::PoolPickMode::Random) ? L"Rnd" : L"Seq";
+        std::wstring tag = std::to_wstring(pl.units.size()) + L" units • [" + modeStr + L", Min:" + std::to_wstring(pl.minCount) + L", Max:" + std::to_wstring(pl.maxCount) + L"]";
+        bool isChecked = isAllSelected || (std::find(pState->selectedPoolIndices.begin(), pState->selectedPoolIndices.end(), (int)i) != pState->selectedPoolIndices.end());
+        items.push_back(DropDownItem::Action((int)i + 2, L"", label, tag, isChecked, true));
+    }
+
+    CustomDropDownMenu::ShowMultiSelect(hWnd, rcAnchor, items, [hWnd, pState](const std::vector<DropDownItem>& updatedItems) {
+        pState->selectedPoolIndices.clear();
+        for (size_t k = 1; k < updatedItems.size(); ++k)
+        {
+            if (updatedItems[k].isChecked)
+            {
+                pState->selectedPoolIndices.push_back((int)k - 1);
+            }
+        }
+
+        // Recalculate auto fixed units default from effective preset
+        auto eff = GetEffectivePreset(pState);
+        int sumMax = 0;
+        for (const auto& pl : eff.pools) sumMax += pl.maxCount;
+        pState->autoFixedUnits = (sumMax > 0) ? sumMax : 6;
+        pState->SyncAutoUnits();
+
+        InvalidateRect(hWnd, NULL, TRUE);
+    });
+}
+
+static void RestoreParentWindowFocus(HWND hParent)
+{
+    if (hParent && IsWindow(hParent))
+    {
+        EnableWindow(hParent, TRUE);
+        if (IsIconic(hParent))
+        {
+            ShowWindow(hParent, SW_RESTORE);
+        }
+        SetWindowPos(hParent, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        SetForegroundWindow(hParent);
+        SetActiveWindow(hParent);
+        BringWindowToTop(hParent);
+        SetFocus(hParent);
+    }
+}
+
 static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     ExportDialogState* pState = (ExportDialogState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
 
     switch (uMsg)
     {
+    case WM_GETMINMAXINFO:
+    {
+        MINMAXINFO* pMMI = (MINMAXINFO*)lParam;
+        HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+        if (hMonitor)
+        {
+            MONITORINFO mi = { sizeof(mi) };
+            if (GetMonitorInfoW(hMonitor, &mi))
+            {
+                pMMI->ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
+                pMMI->ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
+                pMMI->ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
+                pMMI->ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
+            }
+        }
+        return 0;
+    }
+
+    case WM_NCCALCSIZE:
+    {
+        if (wParam)
+        {
+            NCCALCSIZE_PARAMS* pParams = (NCCALCSIZE_PARAMS*)lParam;
+            if (IsZoomed(hWnd))
+            {
+                HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+                if (hMonitor)
+                {
+                    MONITORINFO mi = { sizeof(mi) };
+                    if (GetMonitorInfoW(hMonitor, &mi))
+                    {
+                        pParams->rgrc[0] = mi.rcWork;
+                    }
+                }
+            }
+            return 0;
+        }
+        break;
+    }
+
+    case WM_NCPAINT:
+        return 0;
+
     case WM_NCACTIVATE:
         return TRUE;
 
@@ -693,38 +879,83 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
     case WM_NCHITTEST:
     {
-        if (!pState) break;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         ScreenToClient(hWnd, &pt);
         RECT rcClient;
         GetClientRect(hWnd, &rcClient);
 
-        RECT rcTopClose = { rcClient.right - 44, 0, rcClient.right, 42 };
-        if (PtInRect(&rcTopClose, pt)) return HTCLIENT;
-
-        // 1. Border resize handling (8px border)
-        int b = 8;
-        if (pt.y < b && pt.x < b) return HTTOPLEFT;
-        if (pt.y < b && pt.x >= rcClient.right - b) return HTTOPRIGHT;
-        if (pt.y >= rcClient.bottom - b && pt.x < b) return HTBOTTOMLEFT;
-        if (pt.y >= rcClient.bottom - b && pt.x >= rcClient.right - b) return HTBOTTOMRIGHT;
-        if (pt.y < b) return HTTOP;
-        if (pt.y >= rcClient.bottom - b) return HTBOTTOM;
-        if (pt.x < b) return HTLEFT;
-        if (pt.x >= rcClient.right - b) return HTRIGHT;
-
-        // 2. Interactive controls
-        for (const auto& hit : pState->hitItems)
+        // 1. Border resize handling (6px border when not zoomed)
+        if (!IsZoomed(hWnd))
         {
-            if (PtInRect(&hit.rc, pt)) return HTCLIENT;
+            int b = 6;
+            if (pt.y < b && pt.x < b) return HTTOPLEFT;
+            if (pt.y < b && pt.x >= rcClient.right - b) return HTTOPRIGHT;
+            if (pt.y >= rcClient.bottom - b && pt.x < b) return HTBOTTOMLEFT;
+            if (pt.y >= rcClient.bottom - b && pt.x >= rcClient.right - b) return HTBOTTOMRIGHT;
+            if (pt.y < b) return HTTOP;
+            if (pt.y >= rcClient.bottom - b) return HTBOTTOM;
+            if (pt.x < b) return HTLEFT;
+            if (pt.x >= rcClient.right - b) return HTRIGHT;
         }
 
-        // 3. Header area is draggable (except top right close area)
-        if (pt.y <= 42 && pt.x < rcClient.right - 44)
+        // 2. Forward to CustomTitleBar for Y = 0..66
+        if (pt.y >= 0 && pt.y < 66)
         {
-            return HTCAPTION;
+            if (pState && pState->hTitleBar && IsWindow(pState->hTitleBar))
+            {
+                LRESULT hit = SendMessageW(pState->hTitleBar, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y));
+                if (hit == HTTRANSPARENT)
+                {
+                    return HTCAPTION;
+                }
+            }
         }
-        return HTCLIENT;
+
+        return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+    }
+
+    case WM_TITLEBAR_TABCHANGED:
+    {
+        if (!pState) break;
+        pState->namingMode = (int)wParam;
+        if (pState->namingMode == 0)
+        {
+            if (pState->hEditBaseName && IsWindow(pState->hEditBaseName))
+                ShowWindow(pState->hEditBaseName, SW_SHOW);
+        }
+        else
+        {
+            if (pState->hEditBaseName && IsWindow(pState->hEditBaseName))
+                ShowWindow(pState->hEditBaseName, SW_HIDE);
+
+            if (pState->manualItems.empty())
+            {
+                pState->SyncAutoUnits();
+                for (int i = 1; i <= pState->count; ++i)
+                {
+                    std::wstring sep = (pState->separatorIndex == 0) ? L"_" : ((pState->separatorIndex == 1) ? L"-" : ((pState->separatorIndex == 2) ? L" " : L""));
+                    ManualConsistItem mi;
+                    mi.name = BatchConsistGenerator::FormatSerializedName(pState->baseName, i, pState->count, pState->styleIndex, sep);
+                    mi.targetUnits = (i - 1 < (int)pState->autoConsistUnits.size()) ? pState->autoConsistUnits[i - 1] : ((pState->autoSizingMode == 1) ? pState->autoFixedUnits : 0);
+                    pState->manualItems.push_back(mi);
+                }
+            }
+        }
+        InvalidateRect(hWnd, NULL, FALSE);
+        return 0;
+    }
+
+    case WM_SIZE:
+    {
+        int w = LOWORD(lParam);
+        int h = HIWORD(lParam);
+        if (pState && pState->hTitleBar && IsWindow(pState->hTitleBar))
+        {
+            SetWindowPos(pState->hTitleBar, NULL, 0, 0, w, 66, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            InvalidateRect(pState->hTitleBar, NULL, TRUE);
+        }
+        InvalidateRect(hWnd, NULL, FALSE);
+        return 0;
     }
 
     case WM_KILLFOCUS:
@@ -734,7 +965,6 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         {
             pState->hoveredTarget = ExportDialogState::TARGET_NONE;
             pState->hoveredIdx = -1;
-            pState->isTopCloseHover = false;
             InvalidateRect(hWnd, NULL, FALSE);
         }
         return 0;
@@ -761,10 +991,34 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         if (!pState->hFontIcon)
             pState->hFontIcon = CreateCustomFont(10, FW_NORMAL, L"Segoe MDL2 Assets");
 
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+        int w = rcClient.right > 0 ? rcClient.right : 940;
+
+        std::vector<TitleBarTabItem> tabs = {
+            { L"\xE9D9", L"Auto Consist Naming" },
+            { L"\xE70F", L"Manual Consists" }
+        };
+
+        pState->hTitleBar = CreateCustomTitleBarEx(
+            hWnd,
+            GetModuleHandleW(NULL),
+            0, 0, w, 66,
+            20002,
+            L"Batch Consist Export & Generation - TrainSim Consist Builder",
+            tabs
+        );
+
+        if (pState->hTitleBar)
+        {
+            CustomTitleBar_SetDarkMode(pState->hTitleBar, TRUE);
+            CustomTitleBar_SetActiveTab(pState->hTitleBar, pState->namingMode);
+        }
+
         pState->hEditBaseName = CreateWindowExW(
             0, L"EDIT", pState->baseName.c_str(),
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            34, 194, 380, 20, hWnd, (HMENU)201, GetModuleHandleW(NULL), NULL
+            28, 186, 380, 20, hWnd, (HMENU)201, GetModuleHandleW(NULL), NULL
         );
         SendMessageW(pState->hEditBaseName, WM_SETFONT, (WPARAM)pState->hFontMain, TRUE);
         SendMessageW(pState->hEditBaseName, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 6));
@@ -777,11 +1031,7 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
     {
         if ((wParam & 0xFFF0) == SC_CLOSE)
         {
-            if (pState && pState->hParent && IsWindow(pState->hParent))
-            {
-                SetForegroundWindow(pState->hParent);
-                SetActiveWindow(pState->hParent);
-            }
+            RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
             DestroyWindow(hWnd);
             return 0;
         }
@@ -790,11 +1040,7 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
     case WM_CLOSE:
     {
-        if (pState && pState->hParent && IsWindow(pState->hParent))
-        {
-            SetForegroundWindow(pState->hParent);
-            SetActiveWindow(pState->hParent);
-        }
+        RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
         DestroyWindow(hWnd);
         return 0;
     }
@@ -803,11 +1049,7 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
     {
         if (wParam == VK_ESCAPE)
         {
-            if (pState && pState->hParent && IsWindow(pState->hParent))
-            {
-                SetForegroundWindow(pState->hParent);
-                SetActiveWindow(pState->hParent);
-            }
+            RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
             DestroyWindow(hWnd);
             return 0;
         }
@@ -856,13 +1098,6 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         if (!pState) break;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-        bool hTopClose = PtInRect(&pState->rcTopCloseBtn, pt) != FALSE;
-        if (hTopClose != pState->isTopCloseHover)
-        {
-            pState->isTopCloseHover = hTopClose;
-            InvalidateRect(hWnd, &pState->rcTopCloseBtn, FALSE);
-        }
-
         ExportDialogState::ClickTarget newHover = ExportDialogState::TARGET_NONE;
         int newHoverIdx = -1;
 
@@ -891,11 +1126,6 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
     case WM_MOUSELEAVE:
     {
         if (!pState) break;
-        if (pState->isTopCloseHover)
-        {
-            pState->isTopCloseHover = false;
-            InvalidateRect(hWnd, &pState->rcTopCloseBtn, FALSE);
-        }
         if (pState->hoveredTarget != ExportDialogState::TARGET_NONE)
         {
             pState->hoveredTarget = ExportDialogState::TARGET_NONE;
@@ -910,17 +1140,6 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         if (!pState) break;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-        if (PtInRect(&pState->rcTopCloseBtn, pt))
-        {
-            if (pState && pState->hParent && IsWindow(pState->hParent))
-            {
-                SetForegroundWindow(pState->hParent);
-                SetActiveWindow(pState->hParent);
-            }
-            DestroyWindow(hWnd);
-            return 0;
-        }
-
         for (const auto& item : pState->hitItems)
         {
             if (PtInRect(&item.rc, pt))
@@ -929,11 +1148,7 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                 {
                 case ExportDialogState::TARGET_CLOSE:
                 case ExportDialogState::TARGET_CANCEL_BTN:
-                    if (pState && pState->hParent && IsWindow(pState->hParent))
-                    {
-                        SetForegroundWindow(pState->hParent);
-                        SetActiveWindow(pState->hParent);
-                    }
+                    RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
                     DestroyWindow(hWnd);
                     return 0;
 
@@ -942,81 +1157,11 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     return 0;
 
                 case ExportDialogState::TARGET_PRESET_DROPDOWN:
-                {
-                    if (PoolManager::g_PoolPresetsCache.empty()) return 0;
-
-                    std::vector<ContextMenuItem> items;
-                    for (size_t i = 0; i < PoolManager::g_PoolPresetsCache.size(); ++i)
-                    {
-                        const auto& p = PoolManager::g_PoolPresetsCache[i];
-                        int totalU = 0;
-                        for (const auto& pl : p.pools) totalU += (int)pl.units.size();
-
-                        std::wstring label = p.presetName.empty() ? (L"Preset " + std::to_wstring(i + 1)) : p.presetName;
-                        std::wstring tag = std::to_wstring(p.pools.size()) + L" pools • " + std::to_wstring(totalU) + L" units";
-                        bool isCurrent = (p.presetName == pState->preset.presetName);
-                        items.push_back(ContextMenuItem::Action((int)i + 1, isCurrent ? L"\xE73E" : L"\xE71D", label, tag, true));
-                    }
-
-                    RECT rcScreen = item.rc;
-                    MapWindowPoints(hWnd, NULL, (LPPOINT)&rcScreen, 2);
-                    int pickerW = rcScreen.right - rcScreen.left;
-
-                    int chosen = ModernContextMenu::Show(hWnd, rcScreen.left, rcScreen.bottom + 2, items, TRUE, pickerW);
-                    if (chosen > 0)
-                    {
-                        int selIdx = chosen - 1;
-                        PoolManager::g_ActivePresetIndex = selIdx;
-                        pState->preset = PoolManager::g_PoolPresetsCache[selIdx];
-
-                        pState->baseName = pState->preset.presetName;
-                        for (auto& ch : pState->baseName)
-                        {
-                            if (ch == L' ' || ch == L'-') ch = L'_';
-                        }
-                        if (pState->baseName.empty()) pState->baseName = L"Consist";
-
-                        int sumMax = 0;
-                        for (const auto& pl : pState->preset.pools)
-                        {
-                            sumMax += pl.maxCount;
-                        }
-                        pState->autoFixedUnits = (sumMax > 0) ? sumMax : 6;
-                        pState->SyncAutoUnits();
-
-                        if (pState->hEditBaseName && IsWindow(pState->hEditBaseName))
-                        {
-                            SetWindowTextW(pState->hEditBaseName, pState->baseName.c_str());
-                        }
-
-                        InvalidateRect(hWnd, NULL, FALSE);
-                    }
-                    return 0;
-                }
-
-
-                case ExportDialogState::TARGET_TAB_AUTO:
-                    pState->namingMode = 0;
-                    ShowWindow(pState->hEditBaseName, SW_SHOW);
-                    InvalidateRect(hWnd, NULL, FALSE);
+                    ShowPresetDropdown(hWnd, pState, item.rc);
                     return 0;
 
-                case ExportDialogState::TARGET_TAB_MANUAL:
-                    pState->namingMode = 1;
-                    ShowWindow(pState->hEditBaseName, SW_HIDE);
-                    if (pState->manualItems.empty())
-                    {
-                        pState->SyncAutoUnits();
-                        for (int i = 1; i <= pState->count; ++i)
-                        {
-                            std::wstring sep = (pState->separatorIndex == 0) ? L"_" : ((pState->separatorIndex == 1) ? L"-" : ((pState->separatorIndex == 2) ? L" " : L""));
-                            ManualConsistItem mi;
-                            mi.name = BatchConsistGenerator::FormatSerializedName(pState->baseName, i, pState->count, pState->styleIndex, sep);
-                            mi.targetUnits = (i - 1 < (int)pState->autoConsistUnits.size()) ? pState->autoConsistUnits[i - 1] : ((pState->autoSizingMode == 1) ? pState->autoFixedUnits : 0);
-                            pState->manualItems.push_back(mi);
-                        }
-                    }
-                    InvalidateRect(hWnd, NULL, FALSE);
+                case ExportDialogState::TARGET_POOLS_DROPDOWN:
+                    ShowPoolMultiDropdown(hWnd, pState, item.rc);
                     return 0;
 
                 case ExportDialogState::TARGET_COUNT_MINUS:
@@ -1266,6 +1411,13 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                         return 0;
                     }
 
+                    auto effPreset = GetEffectivePreset(pState);
+                    if (effPreset.pools.empty())
+                    {
+                        ShowModernMessageBox(hWnd, L"No pools selected for generation. Please select at least one pool from the Pools dropdown.", L"Validation", MB_OK | MB_ICONWARNING);
+                        return 0;
+                    }
+
                     std::vector<BatchConsistGenerator::GeneratedConsistSpec> specs;
                     if (pState->namingMode == 0) // Auto
                     {
@@ -1315,7 +1467,7 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     std::vector<std::wstring> createdFiles;
                     std::wstring outErr;
                     bool ok = BatchConsistGenerator::BatchGenerateConsists(
-                        pState->preset, specs, pState->targetFolder, pState->overwriteExisting, createdFiles, outErr
+                        effPreset, specs, pState->targetFolder, pState->overwriteExisting, createdFiles, outErr
                     );
 
                     if (ok)
@@ -1329,11 +1481,7 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                         std::wstring successMsg = L"Successfully generated " + std::to_wstring(createdFiles.size()) + L" consist files in:\r\n" + pState->targetFolder;
                         ShowModernMessageBox(hWnd, successMsg.c_str(), L"Batch Generation Complete", MB_OK | MB_ICONINFORMATION);
 
-                        if (pState && pState->hParent && IsWindow(pState->hParent))
-                        {
-                            SetForegroundWindow(pState->hParent);
-                            SetActiveWindow(pState->hParent);
-                        }
+                        RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
                         DestroyWindow(hWnd);
                         return 0;
                     }
@@ -1370,72 +1518,30 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         pState->SyncAutoUnits();
 
         // 1. Background Fill
-        COLORREF bgCol = RGB(22, 22, 25);
+        COLORREF bgCol = PoolTheme::GutterBackground;
         HBRUSH hbrBg = CreateSolidBrush(bgCol);
         FillRect(memDC, &rcClient, hbrBg);
         DeleteObject(hbrBg);
 
-        COLORREF titleBgCol = RGB(32, 32, 34);
-        COLORREF borderCol = RGB(55, 55, 62);
-        COLORREF textPrimary = RGB(255, 255, 255);
-        COLORREF textSecondary = RGB(160, 160, 168);
-        COLORREF accentCol = RGB(0, 120, 215);
-
-        // 2. Title Bar (Height = 42px)
-        RECT rcTitleBar = { 0, 0, w, 42 };
-        HBRUSH hbrTitle = CreateSolidBrush(titleBgCol);
-        FillRect(memDC, &rcTitleBar, hbrTitle);
-        DeleteObject(hbrTitle);
+        COLORREF borderCol = PoolTheme::BorderLine;
+        COLORREF textPrimary = PoolTheme::TextPrimary;
+        COLORREF textSecondary = PoolTheme::TextSecondary;
+        COLORREF accentCol = PoolTheme::AccentBlue;
 
         SetBkMode(memDC, TRANSPARENT);
 
-        if (pState->hFontIcon)
-        {
-            SelectObject(memDC, pState->hFontIcon);
-            SetTextColor(memDC, accentCol);
-            RECT rcIcon = { 16, 0, 42, 42 };
-            DrawTextW(memDC, L"\xE768", -1, &rcIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        }
-        if (pState->hFontTitle)
-        {
-            SelectObject(memDC, pState->hFontTitle);
-            SetTextColor(memDC, textPrimary);
-            RECT rcTitle = { 46, 0, w - 50, 42 };
-            DrawTextW(memDC, L"Batch Consist Export & Generation", -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        }
-
-        // Top-Right Close Button [✕]
-        pState->rcTopCloseBtn = { w - 44, 0, w, 42 };
-        if (pState->isTopCloseHover)
-        {
-            HBRUSH hbrClose = CreateSolidBrush(RGB(232, 17, 35));
-            FillRect(memDC, &pState->rcTopCloseBtn, hbrClose);
-            DeleteObject(hbrClose);
-            SetTextColor(memDC, RGB(255, 255, 255));
-        }
-        else
-        {
-            SetTextColor(memDC, textSecondary);
-        }
-        SelectObject(memDC, pState->hFontIcon ? pState->hFontIcon : pState->hFontMain);
-        DrawTextW(memDC, L"\xE711", -1, &pState->rcTopCloseBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-        // 1st Divider Line (Below Title Bar at Y = 42)
-        HPEN hPenLine = CreatePen(PS_SOLID, 1, borderCol);
-        HPEN holdPen = (HPEN)SelectObject(memDC, hPenLine);
-        MoveToEx(memDC, 0, 42, NULL);
-        LineTo(memDC, w, 42);
-
-        // 3. Sub-Header Toolbar (Y = 43 to 89, Height = 46px)
-        int toolbarY = 43;
-        int toolbarH = 46;
+        // 2. Sub-Header Toolbar (Y = 66 to 114, Height = 48px) - Matches Active Tab color seamlessly
+        int toolbarY = 66;
+        int toolbarH = 48;
         RECT rcToolbar = { 0, toolbarY, w, toolbarY + toolbarH };
-        COLORREF tbBg = RGB(28, 28, 32);
+        COLORREF tbBg = PoolTheme::ToolbarBackground; // RGB(52, 22, 27) matching active tab
         HBRUSH hbrTb = CreateSolidBrush(tbBg);
         FillRect(memDC, &rcToolbar, hbrTb);
         DeleteObject(hbrTb);
 
-        // 2nd Divider Line (Below Preset Toolbar at Y = toolbarY + toolbarH = 89)
+        // Divider Line Below Toolbar at Y = 114 (Matching tab highlight line)
+        HPEN hPenLine = CreatePen(PS_SOLID, 1, RGB(78, 32, 38));
+        HPEN holdPen = (HPEN)SelectObject(memDC, hPenLine);
         MoveToEx(memDC, 0, toolbarY + toolbarH, NULL);
         LineTo(memDC, w, toolbarY + toolbarH);
 
@@ -1462,28 +1568,46 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             pState->hitItems.push_back({ target, rc });
         };
 
-        // Left of Toolbar: Mode Tabs (Height 32px)
-        int tabBtnH = 32;
-        int tabBtnY = toolbarY + (toolbarH - tabBtnH) / 2;
-        RECT rcTabAuto = { 20, tabBtnY, 20 + 220, tabBtnY + tabBtnH };
-        RECT rcTabManual = { rcTabAuto.right + 8, tabBtnY, rcTabAuto.right + 8 + 200, tabBtnY + tabBtnH };
-        DrawTabPill(rcTabAuto, L"\U0001F522 Auto-Numbered Sequence", pState->namingMode == 0, pState->hoveredTarget == ExportDialogState::TARGET_TAB_AUTO, ExportDialogState::TARGET_TAB_AUTO);
-        DrawTabPill(rcTabManual, L"\U0001F4DD Manual Consist Names", pState->namingMode == 1, pState->hoveredTarget == ExportDialogState::TARGET_TAB_MANUAL, ExportDialogState::TARGET_TAB_MANUAL);
-
-        // Right of Toolbar: Preset Selector & Manage Pools Button
-        int managePoolsW = 130;
+        // Right of Toolbar: Preset Selector Dropdown, Pools Multi-Dropdown & Manage Pools Button
+        int managePoolsW = 120;
         int tbBtnH = 32;
         int tbBtnY = toolbarY + (toolbarH - tbBtnH) / 2;
         RECT rcManagePoolsBtn = { w - 20 - managePoolsW, tbBtnY, w - 20, tbBtnY + tbBtnH };
-        int presetPickerW = 250;
-        RECT rcPresetPicker = { rcManagePoolsBtn.left - 10 - presetPickerW, tbBtnY, rcManagePoolsBtn.left - 10, tbBtnY + tbBtnH };
+
+        int poolPickerW = 180;
+        RECT rcPoolPicker = { rcManagePoolsBtn.left - 8 - poolPickerW, tbBtnY, rcManagePoolsBtn.left - 8, tbBtnY + tbBtnH };
+
+        int presetPickerW = 180;
+        RECT rcPresetPicker = { rcPoolPicker.left - 8 - presetPickerW, tbBtnY, rcPoolPicker.left - 8, tbBtnY + tbBtnH };
+
+        // Left of Toolbar: Preset & Selection Summary Info
+        auto effPreset = GetEffectivePreset(pState);
+        int totalUnitsInSelected = 0;
+        for (const auto& pl : effPreset.pools) totalUnitsInSelected += (int)pl.units.size();
+
+        if (pState->hFontIcon)
+        {
+            SelectObject(memDC, pState->hFontIcon);
+            SetTextColor(memDC, accentCol);
+            RECT rcPoolIcon = { 20, toolbarY, 44, toolbarY + toolbarH };
+            DrawTextW(memDC, L"\xE71D", -1, &rcPoolIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+
+        SelectObject(memDC, pState->hFontBold);
+        SetTextColor(memDC, textPrimary);
+        RECT rcPoolTitle = { 46, toolbarY, rcPresetPicker.left - 12, toolbarY + toolbarH };
+        std::wstring poolSummaryStr = L"Active: " + pState->preset.presetName + L" (" +
+            std::to_wstring(effPreset.pools.size()) + L"/" + std::to_wstring(pState->preset.pools.size()) +
+            L" pools • " + std::to_wstring(totalUnitsInSelected) + L" units)";
+        DrawTextW(memDC, poolSummaryStr.c_str(), -1, &rcPoolTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
         bool isHoverPreset = (pState->hoveredTarget == ExportDialogState::TARGET_PRESET_DROPDOWN);
+        bool isHoverPools  = (pState->hoveredTarget == ExportDialogState::TARGET_POOLS_DROPDOWN);
         bool isHoverManage = (pState->hoveredTarget == ExportDialogState::TARGET_MANAGE_POOLS_BTN);
 
-        // Draw Preset Selector Dropdown Box
-        COLORREF comboBg = isHoverPreset ? RGB(45, 45, 50) : RGB(34, 34, 38);
-        COLORREF comboBorder = isHoverPreset ? RGB(90, 90, 100) : RGB(60, 60, 68);
+        // 1. Draw Preset Selector Dropdown Box
+        COLORREF comboBg = isHoverPreset ? RGB(72, 30, 36) : RGB(40, 16, 20);
+        COLORREF comboBorder = isHoverPreset ? RGB(110, 45, 54) : RGB(78, 32, 38);
         HBRUSH hbrCombo = CreateSolidBrush(comboBg);
         HPEN hPenCombo = CreatePen(PS_SOLID, 1, comboBorder);
         SelectObject(memDC, hbrCombo);
@@ -1492,13 +1616,13 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         DeleteObject(hbrCombo);
         DeleteObject(hPenCombo);
 
-        RECT rcComboText = { rcPresetPicker.left + 10, rcPresetPicker.top, rcPresetPicker.right - 26, rcPresetPicker.bottom };
+        RECT rcComboText = { rcPresetPicker.left + 10, rcPresetPicker.top, rcPresetPicker.right - 22, rcPresetPicker.bottom };
         SelectObject(memDC, pState->hFontBold);
         SetTextColor(memDC, textPrimary);
         std::wstring presetLabel = L"Preset: " + pState->preset.presetName;
         DrawTextW(memDC, presetLabel.c_str(), -1, &rcComboText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-        RECT rcChevron = { rcPresetPicker.right - 24, rcPresetPicker.top, rcPresetPicker.right - 6, rcPresetPicker.bottom };
+        RECT rcChevron = { rcPresetPicker.right - 20, rcPresetPicker.top, rcPresetPicker.right - 6, rcPresetPicker.bottom };
         int chevCX = (rcChevron.left + rcChevron.right) / 2;
         int chevCY = (rcChevron.top + rcChevron.bottom) / 2;
         COLORREF arrCol = isHoverPreset ? RGB(255, 255, 255) : textSecondary;
@@ -1515,14 +1639,77 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
         pState->hitItems.push_back({ ExportDialogState::TARGET_PRESET_DROPDOWN, rcPresetPicker, -1 });
 
-        // Draw Manage Pools Button
+        // 2. Draw Pools Multi-Select Dropdown Box
+        COLORREF poolBg = isHoverPools ? RGB(72, 30, 36) : RGB(40, 16, 20);
+        COLORREF poolBorder = isHoverPools ? RGB(110, 45, 54) : RGB(78, 32, 38);
+        HBRUSH hbrPool = CreateSolidBrush(poolBg);
+        HPEN hPenPool = CreatePen(PS_SOLID, 1, poolBorder);
+        SelectObject(memDC, hbrPool);
+        SelectObject(memDC, hPenPool);
+        RoundRect(memDC, rcPoolPicker.left, rcPoolPicker.top, rcPoolPicker.right, rcPoolPicker.bottom, 6, 6);
+        DeleteObject(hbrPool);
+        DeleteObject(hPenPool);
+
+        size_t numTotalPools = pState->preset.pools.size();
+        bool isAllPools = (numTotalPools > 0 && (pState->selectedPoolIndices.empty() || pState->selectedPoolIndices.size() >= numTotalPools));
+        std::wstring poolsLabel;
+        if (isAllPools)
+        {
+            poolsLabel = L"Pools: All (" + std::to_wstring(numTotalPools) + L")";
+        }
+        else if (pState->selectedPoolIndices.size() == 1)
+        {
+            int pIdx = pState->selectedPoolIndices[0];
+            if (pIdx >= 0 && pIdx < (int)numTotalPools)
+            {
+                std::wstring pName = pState->preset.pools[pIdx].name;
+                if (pName.empty()) pName = L"Pool #" + std::to_wstring(pIdx + 1);
+                poolsLabel = L"Pool: " + pName;
+            }
+            else
+            {
+                poolsLabel = L"1 Pool Selected";
+            }
+        }
+        else if (pState->selectedPoolIndices.empty())
+        {
+            poolsLabel = L"Pools: None";
+        }
+        else
+        {
+            poolsLabel = L"Pools: " + std::to_wstring(pState->selectedPoolIndices.size()) + L"/" + std::to_wstring(numTotalPools);
+        }
+
+        RECT rcPoolText = { rcPoolPicker.left + 10, rcPoolPicker.top, rcPoolPicker.right - 22, rcPoolPicker.bottom };
+        SelectObject(memDC, pState->hFontBold);
+        SetTextColor(memDC, textPrimary);
+        DrawTextW(memDC, poolsLabel.c_str(), -1, &rcPoolText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+        RECT rcPoolChevron = { rcPoolPicker.right - 20, rcPoolPicker.top, rcPoolPicker.right - 6, rcPoolPicker.bottom };
+        int pChevCX = (rcPoolChevron.left + rcPoolChevron.right) / 2;
+        int pChevCY = (rcPoolChevron.top + rcPoolChevron.bottom) / 2;
+        COLORREF pArrCol = isHoverPools ? RGB(255, 255, 255) : textSecondary;
+        HBRUSH hBrPChev = CreateSolidBrush(pArrCol);
+        HPEN hPenPChev = CreatePen(PS_SOLID, 1, pArrCol);
+        HBRUSH hOldBrPC = (HBRUSH)SelectObject(memDC, hBrPChev);
+        HPEN hOldPenPC = (HPEN)SelectObject(memDC, hPenPChev);
+        POINT ptsPChev[3] = { { pChevCX - 4, pChevCY - 2 }, { pChevCX + 4, pChevCY - 2 }, { pChevCX, pChevCY + 3 } };
+        Polygon(memDC, ptsPChev, 3);
+        SelectObject(memDC, hOldBrPC);
+        SelectObject(memDC, hOldPenPC);
+        DeleteObject(hBrPChev);
+        DeleteObject(hPenPChev);
+
+        pState->hitItems.push_back({ ExportDialogState::TARGET_POOLS_DROPDOWN, rcPoolPicker, -1 });
+
+        // 3. Draw Manage Pools Button
         DrawModernButton(memDC, rcManagePoolsBtn, L"Manage Pools", isHoverManage, false, false, pState->hFontMain, pState->hFontIcon, L"\xE713");
         pState->hitItems.push_back({ ExportDialogState::TARGET_MANAGE_POOLS_BTN, rcManagePoolsBtn, -1 });
 
-        // 4. Target Folder Banner Card (Y = 97..129, Height = 32px)
-        RECT rcFolderCard = { 20, 97, w - 20, 129 };
-        COLORREF cardBg = RGB(30, 30, 34);
-        COLORREF cardBorder = RGB(48, 48, 54);
+        // 3. Target Folder Banner Card (Y = 120..152, Height = 32px)
+        RECT rcFolderCard = { 20, 120, w - 20, 152 };
+        COLORREF cardBg = PoolTheme::CardBackground;
+        COLORREF cardBorder = PoolTheme::CardBorder;
         HBRUSH hbrCard = CreateSolidBrush(cardBg);
         HPEN hPenCard = CreatePen(PS_SOLID, 1, cardBorder);
         SelectObject(memDC, hbrCard);
@@ -1552,15 +1739,15 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             DrawTextW(memDC, L"\u26A0 Train Simulator directory not set. Consists cannot be saved.", -1, &rcFolderText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
 
-        // Calculate pool capacity range
+        // Calculate pool capacity range from effective preset
         int minTotal = 0, maxTotal = 0;
-        for (const auto& pl : pState->preset.pools)
+        for (const auto& pl : effPreset.pools)
         {
             minTotal += (std::max)(0, pl.minCount);
             maxTotal += (std::max)((std::max)(0, pl.minCount), pl.maxCount);
         }
 
-        // 5. Mode Content
+        // 4. Mode Content (starts at Y = 160)
         if (pState->namingMode == 0) // Auto-Numbered Mode
         {
             int colSplitX = 20 + (w - 40 - 12) / 2;
@@ -1568,17 +1755,17 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             // Ensure edit control is strictly positioned inside rcEditFrame
             if (pState->hEditBaseName && IsWindow(pState->hEditBaseName))
             {
-                SetWindowPos(pState->hEditBaseName, NULL, 28, 163, (colSplitX - 10) - 36, 20, SWP_NOZORDER | SWP_NOACTIVATE);
+                SetWindowPos(pState->hEditBaseName, NULL, 28, 186, (colSplitX - 10) - 36, 20, SWP_NOZORDER | SWP_NOACTIVATE);
             }
 
             // Row A: Base Name & Count
             SetTextColor(memDC, RGB(220, 220, 225));
             SelectObject(memDC, pState->hFontSection);
-            RECT rcLblBase = { 20, 137, colSplitX - 10, 155 };
+            RECT rcLblBase = { 20, 160, colSplitX - 10, 178 };
             DrawTextW(memDC, L"Consist Base Filename:", -1, &rcLblBase, DT_LEFT | DT_SINGLELINE);
 
             // Edit frame for base name
-            RECT rcEditFrame = { 20, 157, colSplitX - 10, 189 };
+            RECT rcEditFrame = { 20, 180, colSplitX - 10, 212 };
             HBRUSH hbrEditF = CreateSolidBrush(RGB(30, 30, 32));
             HPEN hPenEditF = CreatePen(PS_SOLID, 1, RGB(65, 65, 75));
             SelectObject(memDC, hbrEditF);
@@ -1587,14 +1774,14 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             DeleteObject(hbrEditF);
             DeleteObject(hPenEditF);
 
-            RECT rcLblCount = { colSplitX + 10, 137, w - 20, 155 };
+            RECT rcLblCount = { colSplitX + 10, 160, w - 20, 178 };
             DrawTextW(memDC, L"Number of Consists to Generate:", -1, &rcLblCount, DT_LEFT | DT_SINGLELINE);
 
             // Consist Count Stepper
             int countRightEdge = w - 20;
-            RECT rcMinus = { colSplitX + 10, 157, colSplitX + 10 + 44, 189 };
-            RECT rcPlus = { countRightEdge - 44, 157, countRightEdge, 189 };
-            RECT rcNumBox = { rcMinus.right + 8, 157, rcPlus.left - 8, 189 };
+            RECT rcMinus = { colSplitX + 10, 180, colSplitX + 10 + 44, 212 };
+            RECT rcPlus = { countRightEdge - 44, 180, countRightEdge, 212 };
+            RECT rcNumBox = { rcMinus.right + 8, 180, rcPlus.left - 8, 212 };
 
             DrawModernButton(memDC, rcMinus, L"-", pState->hoveredTarget == ExportDialogState::TARGET_COUNT_MINUS, false, false, pState->hFontMain);
             pState->hitItems.push_back({ ExportDialogState::TARGET_COUNT_MINUS, rcMinus });
@@ -1621,10 +1808,10 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             // Row B: Sequence Styles & Separator
             SetTextColor(memDC, RGB(220, 220, 225));
             SelectObject(memDC, pState->hFontSection);
-            RECT rcLblStyles = { 20, 197, colSplitX - 10, 215 };
+            RECT rcLblStyles = { 20, 220, colSplitX - 10, 238 };
             DrawTextW(memDC, L"Numbering Style:", -1, &rcLblStyles, DT_LEFT | DT_SINGLELINE);
 
-            RECT rcLblSep = { colSplitX + 10, 197, w - 20, 215 };
+            RECT rcLblSep = { colSplitX + 10, 220, w - 20, 238 };
             DrawTextW(memDC, L"Separator:", -1, &rcLblSep, DT_LEFT | DT_SINGLELINE);
 
             // 5 styles in left column with 6px gaps
@@ -1640,7 +1827,7 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             };
             for (int s = 0; s < 5; ++s)
             {
-                RECT rcSt = { 20 + s * (sColW + 6), 217, 20 + s * (sColW + 6) + sColW, 249 };
+                RECT rcSt = { 20 + s * (sColW + 6), 240, 20 + s * (sColW + 6) + sColW, 272 };
                 DrawTabPill(rcSt, styleNames[s], pState->styleIndex == s, pState->hoveredTarget == styleTargets[s], styleTargets[s]);
             }
 
@@ -1656,28 +1843,28 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             };
             for (int sp = 0; sp < 4; ++sp)
             {
-                RECT rcSp = { (colSplitX + 10) + sp * (sepColW + 8), 217, (colSplitX + 10) + sp * (sepColW + 8) + sepColW, 249 };
+                RECT rcSp = { (colSplitX + 10) + sp * (sepColW + 8), 240, (colSplitX + 10) + sp * (sepColW + 8) + sepColW, 272 };
                 DrawTabPill(rcSp, sepNames[sp], pState->separatorIndex == sp, pState->hoveredTarget == sepTargets[sp], sepTargets[sp]);
             }
 
             // Row C: Total Units Sizing Mode (DYNAMIC vs FIXED)
             SetTextColor(memDC, RGB(220, 220, 225));
             SelectObject(memDC, pState->hFontSection);
-            RECT rcLblSizing = { 20, 257, w - 20, 275 };
+            RECT rcLblSizing = { 20, 280, w - 20, 298 };
             DrawTextW(memDC, L"Consist Total Units Sizing Mode (Click preview badges below to customize individual consists):", -1, &rcLblSizing, DT_LEFT | DT_SINGLELINE);
 
             // Dynamic Pill
             std::wstring dynamicLabel = L"Dynamic Pool-Sum (" + std::to_wstring(minTotal) + (minTotal == maxTotal ? L"" : (L"–" + std::to_wstring(maxTotal))) + L" units)";
-            RECT rcDynPill = { 20, 277, 20 + 310, 309 };
+            RECT rcDynPill = { 20, 300, 20 + 310, 332 };
             DrawTabPill(rcDynPill, dynamicLabel.c_str(), pState->autoSizingMode == 0, pState->hoveredTarget == ExportDialogState::TARGET_SIZING_DYNAMIC, ExportDialogState::TARGET_SIZING_DYNAMIC);
 
             // Fixed Pill & Stepper
-            RECT rcFixPill = { rcDynPill.right + 12, 277, rcDynPill.right + 12 + 150, 309 };
+            RECT rcFixPill = { rcDynPill.right + 12, 300, rcDynPill.right + 12 + 150, 332 };
             DrawTabPill(rcFixPill, L"Fixed Total Units", pState->autoSizingMode == 1, pState->hoveredTarget == ExportDialogState::TARGET_SIZING_FIXED, ExportDialogState::TARGET_SIZING_FIXED);
 
-            RECT rcFixMinus = { rcFixPill.right + 12, 277, rcFixPill.right + 12 + 36, 309 };
-            RECT rcFixBox   = { rcFixMinus.right + 6, 277, rcFixMinus.right + 6 + 96, 309 };
-            RECT rcFixPlus  = { rcFixBox.right + 6, 277, rcFixBox.right + 6 + 36, 309 };
+            RECT rcFixMinus = { rcFixPill.right + 12, 300, rcFixPill.right + 12 + 36, 332 };
+            RECT rcFixBox   = { rcFixMinus.right + 6, 300, rcFixMinus.right + 6 + 96, 332 };
+            RECT rcFixPlus  = { rcFixBox.right + 6, 300, rcFixBox.right + 6 + 36, 332 };
 
             DrawModernButton(memDC, rcFixMinus, L"-", pState->hoveredTarget == ExportDialogState::TARGET_SIZING_MINUS, false, false, pState->hFontMain);
             pState->hitItems.push_back({ ExportDialogState::TARGET_SIZING_MINUS, rcFixMinus });
@@ -1701,11 +1888,11 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             pState->hitItems.push_back({ ExportDialogState::TARGET_SIZING_PLUS, rcFixPlus });
 
             // Row D: Preview Box
-            RECT rcLblPrev = { 20, 317, w - 20, 335 };
+            RECT rcLblPrev = { 20, 340, w - 20, 358 };
             std::wstring prevTitle = L"Generated Consist Files Preview (" + std::to_wstring(pState->count) + L" consists \u2022 Click any [u] badge to customize that consist):";
             DrawTextW(memDC, prevTitle.c_str(), -1, &rcLblPrev, DT_LEFT | DT_SINGLELINE);
 
-            RECT rcPrevBox = { 20, 337, w - 20, h - 62 };
+            RECT rcPrevBox = { 20, 360, w - 20, h - 62 };
             HBRUSH hbrPrev = CreateSolidBrush(RGB(16, 16, 18));
             HPEN hPenPrev = CreatePen(PS_SOLID, 1, RGB(45, 45, 52));
             SelectObject(memDC, hbrPrev);
@@ -1780,22 +1967,22 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         {
             SetTextColor(memDC, RGB(220, 220, 225));
             SelectObject(memDC, pState->hFontSection);
-            RECT rcLblManual = { 20, 137, w - 340, 169 };
+            RECT rcLblManual = { 20, 160, w - 340, 192 };
             std::wstring manTitle = L"Manual Consist Filenames & Sizes (" + std::to_wstring(pState->manualItems.size()) + L" consists):";
             DrawTextW(memDC, manTitle.c_str(), -1, &rcLblManual, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
             // [ ⚙ Set Sizing For All... ] button
-            RECT rcSetAllBtn = { w - 20 - 300, 137, w - 20 - 145, 169 };
+            RECT rcSetAllBtn = { w - 20 - 300, 160, w - 20 - 145, 192 };
             DrawModernButton(memDC, rcSetAllBtn, L"Set Sizing For All...", pState->hoveredTarget == ExportDialogState::TARGET_SET_ALL_MANUAL_SIZING, false, false, pState->hFontBold, pState->hFontIcon, L"\xE713");
             pState->hitItems.push_back({ ExportDialogState::TARGET_SET_ALL_MANUAL_SIZING, rcSetAllBtn });
 
-            // [+ Add Consist Name] button
-            RECT rcAddBtn = { w - 20 - 135, 137, w - 20, 169 };
+            // [+ Add Consist] button
+            RECT rcAddBtn = { w - 20 - 135, 160, w - 20, 192 };
             DrawModernButton(memDC, rcAddBtn, L"Add Consist", pState->hoveredTarget == ExportDialogState::TARGET_ADD_MANUAL, false, true, pState->hFontBold, pState->hFontIcon, L"\xE710");
             pState->hitItems.push_back({ ExportDialogState::TARGET_ADD_MANUAL, rcAddBtn });
 
             // Table Container
-            RECT rcTable = { 20, 177, w - 20, h - 62 };
+            RECT rcTable = { 20, 200, w - 20, h - 62 };
             HBRUSH hbrTable = CreateSolidBrush(RGB(16, 16, 18));
             HPEN hPenTable = CreatePen(PS_SOLID, 1, RGB(45, 45, 52));
             SelectObject(memDC, hbrTable);
@@ -1841,20 +2028,20 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     DrawTextW(memDC, rIdxStr.c_str(), -1, &rcIdx, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
                     // Filename + edit prompt
-                    RECT rcName = { rcRow.left + 50, rcRow.top, rcRow.right - 210, rcRow.bottom };
+                    RECT rcName = { rcRow.left + 50, rcRow.top, rcRow.right - 230, rcRow.bottom };
                     SetTextColor(memDC, RGB(235, 235, 240));
                     SelectObject(memDC, pState->hFontMono);
                     std::wstring fullConName = pState->manualItems[r].name + L".con";
                     DrawTextW(memDC, fullConName.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS);
                     pState->hitItems.push_back({ ExportDialogState::TARGET_EDIT_MANUAL, rcName, r });
 
-                    // Edit button hint
-                    RECT rcEditHint = { rcRow.right - 200, rcRow.top + 3, rcRow.right - 160, rcRow.bottom - 3 };
+                    // Edit button hint (widened to 64px for clean margins and proper pencil rendering)
+                    RECT rcEditHint = { rcRow.right - 224, rcRow.top + 3, rcRow.right - 160, rcRow.bottom - 3 };
                     DrawModernButton(memDC, rcEditHint, L"Edit", isHoverRow, false, false, pState->hFontSmall, pState->hFontIcon, L"\xE70F");
                     pState->hitItems.push_back({ ExportDialogState::TARGET_EDIT_MANUAL, rcEditHint, r });
 
                     // Total Units Sizing Badge Button (Dynamic vs Fixed X units)
-                    RECT rcUnitsBadge = { rcRow.right - 152, rcRow.top + 3, rcRow.right - 36, rcRow.bottom - 3 };
+                    RECT rcUnitsBadge = { rcRow.right - 154, rcRow.top + 3, rcRow.right - 36, rcRow.bottom - 3 };
                     int uVal = pState->manualItems[r].targetUnits;
                     std::wstring uBadgeStr = (uVal > 0) ? (std::to_wstring(uVal) + L" Units") : L"Dynamic";
                     bool isHoverU = (pState->hoveredTarget == ExportDialogState::TARGET_TOGGLE_MANUAL_SIZING && pState->hoveredIdx == r);
@@ -1870,7 +2057,7 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             }
         }
 
-        // 6. Footer Area (Height = 54px)
+        // 5. Footer Area (Height = 54px)
         int footerH = 54;
         int footBtnH = 34;
         int footBtnY = (h - footerH) + (footerH - footBtnH) / 2;
@@ -1951,11 +2138,7 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
     {
         if (pState)
         {
-            if (pState->hParent && IsWindow(pState->hParent))
-            {
-                SetForegroundWindow(pState->hParent);
-                SetActiveWindow(pState->hParent);
-            }
+            RestoreParentWindowFocus(pState->hParent ? pState->hParent : GetWindow(hWnd, GW_OWNER));
             if (pState->hFontTitle) DeleteObject(pState->hFontTitle);
             if (pState->hFontSubtitle) DeleteObject(pState->hFontSubtitle);
             if (pState->hFontSection) DeleteObject(pState->hFontSection);
@@ -1968,6 +2151,16 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         }
         g_hBatchGeneratorDlg = NULL;
         return 0;
+    }
+
+    case WM_NCDESTROY:
+    {
+        HWND hOwner = GetWindow(hWnd, GW_OWNER);
+        if (hOwner && IsWindow(hOwner))
+        {
+            RestoreParentWindowFocus(hOwner);
+        }
+        break;
     }
 
     default:
@@ -2014,6 +2207,7 @@ void ShowBatchConsistGeneratorDialog(HWND hWndParent, int presetIndex)
     pState->hParent = hWndParent;
     if (presetIndex >= 0 && presetIndex < (int)PoolManager::g_PoolPresetsCache.size())
     {
+        pState->selectedPresetIdx = presetIndex;
         PoolManager::g_ActivePresetIndex = presetIndex;
         pState->preset = PoolManager::g_PoolPresetsCache[presetIndex];
     }
@@ -2021,8 +2215,10 @@ void ShowBatchConsistGeneratorDialog(HWND hWndParent, int presetIndex)
     {
         if (PoolManager::g_ActivePresetIndex < 0 || PoolManager::g_ActivePresetIndex >= (int)PoolManager::g_PoolPresetsCache.size())
             PoolManager::g_ActivePresetIndex = 0;
+        pState->selectedPresetIdx = PoolManager::g_ActivePresetIndex;
         pState->preset = PoolManager::g_PoolPresetsCache[PoolManager::g_ActivePresetIndex];
     }
+    pState->selectedPoolIndices.clear();
     pState->targetFolder = GetAppConsistsDirectory();
     
     // Clean base name from preset name
@@ -2059,8 +2255,8 @@ void ShowBatchConsistGeneratorDialog(HWND hWndParent, int presetIndex)
     int y = rcParent.top + (rcParent.bottom - rcParent.top - dlgH) / 2;
 
     HWND hDlg = CreateWindowExW(
-        WS_EX_APPWINDOW, szClassName, L"Batch Consist Export & Generation",
-        WS_POPUP | WS_CLIPCHILDREN | WS_THICKFRAME,
+        0, szClassName, L"Batch Consist Export & Generation",
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, dlgW, dlgH, hWndParent, NULL, GetModuleHandleW(NULL), pState
     );
 
@@ -2086,7 +2282,21 @@ void ShowBatchConsistGeneratorDialog(HWND hWndParent, int presetIndex)
     MARGINS margins = { 0, 0, 0, 0 };
     DwmExtendFrameIntoClientArea(hDlg, &margins);
 
+    SetWindowPos(hDlg, NULL, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+
     ShowWindow(hDlg, SW_SHOW);
+
+    RECT rc;
+    GetClientRect(hDlg, &rc);
+    int clientW = rc.right - rc.left;
+    if (pState->hTitleBar && IsWindow(pState->hTitleBar))
+    {
+        SetWindowPos(pState->hTitleBar, NULL, 0, 0, clientW, 66, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        RedrawWindow(pState->hTitleBar, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
+    }
+
+    RedrawWindow(hDlg, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
     UpdateWindow(hDlg);
     return;
 }

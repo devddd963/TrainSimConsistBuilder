@@ -12,3 +12,10 @@ void ShowPoolMutatorDialog(
     const std::vector<std::wstring>& targetConsistFilePaths = {},
     const std::vector<int>& targetSelectedUnitIndices = {}
 );
+
+bool PoolMutatorDlg_IsOpen();
+
+void PoolMutatorDlg_UpdateSelection(
+    const std::vector<std::wstring>& targetConsistFilePaths,
+    const std::vector<int>& targetSelectedUnitIndices = {}
+);

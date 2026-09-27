@@ -7,7 +7,6 @@ ActivePane g_ActivePane = PANE_CONSIST;
 
 #include "framework.h"
 #include "TrainSimConsistBuilder.h"
-#include "../UI/AddressBar.h"
 #include "../UI/UITheme.h"
 #include "../UI/CustomTreeView.h"
 #include <vector>
@@ -55,10 +54,14 @@ CustomTreeNode* g_pNodeTender = nullptr;
 #include "../UI/ModernContextMenu.h"
 #include "../UI/BatchConsistGenerationWizardDlg.h"
 #include "../UI/PoolManagerDlg.h"
+#include "PoolManager.h"
 #include "../UI/BatchConsistGeneratorDlg.h"
 #include "../UI/PoolMutatorDlg.h"
 #include "PoolMutator.h"
 #include "../UI/CustomTitleBar.h"
+#include "../UI/StockInfoDlg.h"
+// #include "../UI/3D-VisualStudio.h"  // [DISABLED] Shape viewer removed — to be rebuilt from scratch
+#include "StockSpecReader.h"
 
 LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 #include "../UI/CustomListControl.h"
@@ -145,6 +148,44 @@ static bool IsUnitBrokenOnDisk(const ConsistReader::UnitInfo& unit, const std::w
     unitPath += L"TRAINS\\TRAINSET\\" + unit.parentDir + L"\\" + unit.uid + ext;
     DWORD attr = GetFileAttributesW(unitPath.c_str());
     return (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+static std::wstring BuildFullStockPath(const std::wstring& basePath, const std::wstring& folder, const std::wstring& fileName, const std::wstring& ext = L"")
+{
+    if (folder.empty() || fileName.empty()) return L"";
+    std::wstring p = basePath;
+    if (!p.empty() && p.back() != L'\\' && p.back() != L'/') p += L'\\';
+    p += L"TRAINS\\TRAINSET\\" + folder + L"\\" + fileName;
+
+    // Check if filename already ends with .eng or .wag
+    std::wstring lowerP = p;
+    for (wchar_t& c : lowerP) c = towlower(c);
+    if (lowerP.size() >= 4 && (lowerP.substr(lowerP.size() - 4) == L".eng" || lowerP.substr(lowerP.size() - 4) == L".wag"))
+    {
+        return p;
+    }
+
+    std::wstring extension = ext;
+    if (!extension.empty())
+    {
+        if (extension[0] != L'.') extension = L"." + extension;
+        std::wstring testP = p + extension;
+        if (GetFileAttributesW(testP.c_str()) != INVALID_FILE_ATTRIBUTES) return testP;
+    }
+
+    std::wstring pEng = p + L".eng";
+    if (GetFileAttributesW(pEng.c_str()) != INVALID_FILE_ATTRIBUTES) return pEng;
+
+    std::wstring pWag = p + L".wag";
+    if (GetFileAttributesW(pWag.c_str()) != INVALID_FILE_ATTRIBUTES) return pWag;
+
+    // If file does not exist on disk, respect caller's requested extension
+    if (!extension.empty())
+    {
+        return p + extension;
+    }
+
+    return pEng;
 }
 
 static std::wstring EvaluateAndUpdateConsistStatus(
@@ -528,6 +569,7 @@ HFONT GetAdaptiveSystemFont()
 
 // Custom Tab Control Subclass rendering WinUI 3 / Windows 11 File Explorer borderless tabs is no longer needed
 
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPWSTR    lpCmdLine,
@@ -535,6 +577,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
 {
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
+
 
     g_bDarkMode = TRUE;
     g_hbrDarkBackground = CreateSolidBrush(UITheme::DarkBackground);
@@ -1354,9 +1397,6 @@ static void TriggerConsistsRescan(HWND hWnd)
         g_ConsistList.Clear();
     }
 
-    ResetConsistEditorWorkspace(hWnd);
-
-
     // Cancel existing scan
     g_bCancelScan = TRUE;
     if (g_hScanThread != NULL)
@@ -1386,7 +1426,17 @@ std::wstring GetAppConsistsDirectory()
 
 std::wstring EnsureConsistFilePath(const std::wstring& basePath, const std::wstring& fileName)
 {
-    if (fileName.empty() || basePath.empty()) return L"";
+    if (fileName.empty()) return L"";
+    if (fileName.find(L':') != std::wstring::npos || (fileName.length() >= 2 && fileName[0] == L'\\' && fileName[1] == L'\\'))
+    {
+        std::wstring p = fileName;
+        if (p.length() < 4 || _wcsicmp(p.c_str() + p.length() - 4, L".con") != 0)
+        {
+            p += L".con";
+        }
+        return p;
+    }
+    if (basePath.empty()) return fileName;
     std::wstring p = basePath;
     if (p.back() != L'\\' && p.back() != L'/') p += L'\\';
     p += L"TRAINS\\CONSISTS\\";
@@ -2407,6 +2457,63 @@ static std::vector<int> GetSelectedConsistUnitIndices()
         }
     }
     return unitIndices;
+}
+
+static void GetActiveTargetConsistsAndUnits(std::vector<std::wstring>& outConsists, std::vector<int>& outUnits)
+{
+    outConsists.clear();
+    outUnits.clear();
+
+    std::vector<int> selRows = g_ConsistList.GetSelectedIndices();
+    if (selRows.empty())
+    {
+        int singleSel = g_ConsistList.GetSelectedIndex();
+        if (singleSel >= 0) selRows.push_back(singleSel);
+    }
+    if (g_ActiveTab == 1)
+    {
+        for (int row : selRows)
+        {
+            std::wstring idxStr = g_ConsistList.GetCellText(row, 3);
+            if (!idxStr.empty())
+            {
+                outConsists.push_back(L"ACTIVITY:" + idxStr);
+            }
+        }
+        if (outConsists.empty() && g_CurrentActivityConsistIndex >= 0 && g_CurrentActivityConsistIndex < (int)g_CurrentActivityData.consists.size())
+        {
+            outConsists.push_back(L"ACTIVITY:" + std::to_wstring(g_CurrentActivityConsistIndex));
+        }
+    }
+    else
+    {
+        for (int row : selRows)
+        {
+            std::wstring fname = g_ConsistList.GetCellText(row, 4);
+            if (!fname.empty())
+            {
+                std::wstring fullPath = EnsureConsistFilePath(g_szBasePath, fname);
+                if (!fullPath.empty()) outConsists.push_back(fullPath);
+            }
+        }
+        if (outConsists.empty() && !g_szCurrentConsistFile.empty())
+        {
+            std::wstring fullPath = EnsureConsistFilePath(g_szBasePath, g_szCurrentConsistFile);
+            if (!fullPath.empty()) outConsists.push_back(fullPath);
+        }
+    }
+    outUnits = GetSelectedConsistUnitIndices();
+}
+
+static void SyncPoolMutatorSelectionIfOpen()
+{
+    if (PoolMutatorDlg_IsOpen())
+    {
+        std::vector<std::wstring> selConsists;
+        std::vector<int> selUnits;
+        GetActiveTargetConsistsAndUnits(selConsists, selUnits);
+        PoolMutatorDlg_UpdateSelection(selConsists, selUnits);
+    }
 }
 
 static int GetSelectedConsistUnitIndex()
@@ -3462,6 +3569,48 @@ static void ReplaceAllConsistUnitsWithName(HWND hWnd, const std::wstring& target
     ExecuteConsistReplacement(hWnd, SCOPE_ALL_MATCHING);
 }
 
+static void ExecuteReplacementFromGroup(HWND hWnd, int groupIdx, const std::vector<int>& selIndices)
+{
+    if (groupIdx < 0 || groupIdx >= (int)PoolManager::g_ReplacementGroupsCache.size() || selIndices.empty())
+        return;
+
+    const auto& grp = PoolManager::g_ReplacementGroupsCache[groupIdx];
+    if (grp.units.empty())
+    {
+        ShowModernMessageBox(hWnd, L"The selected replacement group contains no stock units.\n\nAdd units to this group in the Pool Manager before replacing.", L"Empty Replacement Group", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    PushUndoState(L"Replace with " + grp.name);
+
+    for (int selIdx : selIndices)
+    {
+        if (selIdx >= 0 && selIdx < (int)g_LoadedConsistUnits.size())
+        {
+            PoolManager::PoolUnit pickedUnit;
+            if (PoolManager::PickUnitFromGroup(groupIdx, pickedUnit))
+            {
+                g_LoadedConsistUnits[selIdx].uid = pickedUnit.szFileName;
+                g_LoadedConsistUnits[selIdx].parentDir = pickedUnit.szFolder;
+                g_LoadedConsistUnits[selIdx].isEngine = pickedUnit.isEngine;
+                if (pickedUnit.flipMode == PoolManager::UnitFlipMode::Flipped)
+                    g_LoadedConsistUnits[selIdx].isFlipped = true;
+                else if (pickedUnit.flipMode == PoolManager::UnitFlipMode::Forward)
+                    g_LoadedConsistUnits[selIdx].isFlipped = false;
+                else if (pickedUnit.flipMode == PoolManager::UnitFlipMode::Random)
+                    g_LoadedConsistUnits[selIdx].isFlipped = (rand() % 2 == 1);
+            }
+        }
+    }
+
+    RefreshEditorUnitList();
+    if (g_hVisualConsistView)
+    {
+        VisualConsistView_SetUnits(g_hVisualConsistView, g_LoadedConsistUnits, g_szBasePath);
+    }
+    SaveCurrentConsist(hWnd);
+}
+
 static void FlipSelectedConsistUnits(HWND hWnd)
 {
     std::vector<int> selIndices = GetSelectedConsistUnitIndices();
@@ -3939,8 +4088,8 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
         if (g_hEditorUnitList)   ShowWindow(g_hEditorUnitList,  SW_SHOW);
 
         // Populate edit controls
-        SetWindowTextW(g_hEditTrainCfgId, trainCfg.trainCfgId.c_str());
-        SetWindowTextW(g_hEditTrainName,  trainCfg.name.c_str());
+        if (g_hEditTrainCfgId) SetWindowTextW(g_hEditTrainCfgId, trainCfg.trainCfgId.c_str());
+        if (g_hEditTrainName)  SetWindowTextW(g_hEditTrainName,  trainCfg.name.c_str());
 
         auto FormatNumber = [](double v, wchar_t* buf, size_t bufCch) {
             double whole;
@@ -4005,6 +4154,7 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
         InvalidateRect(hWnd, NULL, TRUE);
         UpdateWindow(hWnd);
         g_bIsLoadingConsist = false;
+        SyncPoolMutatorSelectionIfOpen();
     }
     catch (const std::exception& e)
     {
@@ -4092,6 +4242,7 @@ static void LoadAndDisplayActivityConsist(HWND hWnd, int consistIndex)
         InvalidateRect(hWnd, NULL, TRUE);
         UpdateWindow(hWnd);
         g_bIsLoadingConsist = false;
+        SyncPoolMutatorSelectionIfOpen();
     }
     catch (const std::exception& e)
     {
@@ -4543,6 +4694,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_CREATE:
     {
         InitializeCriticalSection(&g_StockCacheCS);
+        PoolManager::InitializePoolPresets();
+        PoolManager::InitializeReplacementGroups();
         Updater::CleanupOldUpdateFiles();
         Updater::CheckForUpdates(hWnd, true);
         BOOL bLoaded = FALSE;
@@ -5057,6 +5210,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 InvalidateRect(g_hConsistHeader, NULL, TRUE);
                 InvalidateRect(g_hStockHeader, NULL, TRUE);
                 InvalidateRect(hWnd, NULL, TRUE);
+
+                if (newPane == PANE_CONSIST)
+                {
+                    NavToolbar_SetSearchQuery(g_hNavToolbar, g_szConsistSearchQuery.c_str());
+                }
+                else if (newPane == PANE_STOCK)
+                {
+                    NavToolbar_SetSearchQuery(g_hNavToolbar, g_szStockSearchQuery.c_str());
+                }
             }
         }
     }
@@ -5465,51 +5627,93 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case CMD_ACTION_REVERSE_CONSIST:
             ActionReverseConsist(hWnd);
             break;
+        case CMD_ACTION_STOCK_INFO:
+        {
+            std::wstring targetUnitPath = L"";
+
+            // 1. Check if user has selected a unit in Consist Editor Unit Table
+            int selConsistUnit = GetSelectedConsistUnitIndex();
+            if (selConsistUnit >= 0 && selConsistUnit < (int)g_LoadedConsistUnits.size())
+            {
+                const auto& u = g_LoadedConsistUnits[selConsistUnit];
+                targetUnitPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, u.isEngine ? L".eng" : L".wag");
+            }
+
+            // 2. Check if user has selected a unit in Stock Library
+            if (targetUnitPath.empty())
+            {
+                std::vector<ConsistReader::UnitInfo> stockUnits = GetSelectedStockUnitsFromLibrary();
+                if (!stockUnits.empty())
+                {
+                    const auto& u = stockUnits[0];
+                    targetUnitPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, u.isEngine ? L".eng" : L".wag");
+                }
+            }
+
+            // 3. Check single selection in Stock Library direct cache lookup
+            if (targetUnitPath.empty())
+            {
+                int selStock = g_AssetList.GetSelectedIndex();
+                EnterCriticalSection(&g_StockCacheCS);
+                if (selStock >= 0 && selStock < (int)g_FilteredStockIndices.size())
+                {
+                    size_t origIdx = g_FilteredStockIndices[selStock];
+                    if (origIdx < g_StockCache.size())
+                    {
+                        const auto& item = g_StockCache[origIdx];
+                        targetUnitPath = BuildFullStockPath(g_szBasePath, item.szFolder, item.szFileName, item.szExtension);
+                    }
+                }
+                LeaveCriticalSection(&g_StockCacheCS);
+            }
+
+            // 4. Fallback: Take the first unit from the currently loaded consist if any
+            if (targetUnitPath.empty() && !g_LoadedConsistUnits.empty())
+            {
+                const auto& u = g_LoadedConsistUnits[0];
+                targetUnitPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, u.isEngine ? L".eng" : L".wag");
+            }
+
+            // 5. Fallback: Take the first stock item in library if any
+            if (targetUnitPath.empty())
+            {
+                EnterCriticalSection(&g_StockCacheCS);
+                if (!g_FilteredStockIndices.empty())
+                {
+                    size_t origIdx = g_FilteredStockIndices[0];
+                    if (origIdx < g_StockCache.size())
+                    {
+                        const auto& item = g_StockCache[origIdx];
+                        targetUnitPath = BuildFullStockPath(g_szBasePath, item.szFolder, item.szFileName, item.szExtension);
+                    }
+                }
+                LeaveCriticalSection(&g_StockCacheCS);
+            }
+
+            if (targetUnitPath.empty())
+            {
+                ShowModernMessageBox(hWnd, L"Please select a rolling stock unit from the Stock Library or Consist Editor to inspect its specifications.", L"Stock Specification Inspector", MB_OK | MB_ICONINFORMATION);
+            }
+            else
+            {
+                ShowStockInfoDialog(hWnd, targetUnitPath, g_szBasePath);
+            }
+            break;
+        }
+        // [DISABLED] Shape viewer removed — to be rebuilt from scratch
+        // case CMD_ACTION_SHAPE_VIEWER:
+        // {
+        //     ShowShapeViewerDialog(hWnd, L"", g_szBasePath);
+        //     break;
+        // }
         case CMD_ACTION_POOL_MANAGER:
             ShowPoolManagerDialog(hWnd);
             break;
         case CMD_ACTION_POOL_MUTATOR:
         {
             std::vector<std::wstring> selConsists;
-            std::vector<int> selRows = g_ConsistList.GetSelectedIndices();
-            if (selRows.empty())
-            {
-                int singleSel = g_ConsistList.GetSelectedIndex();
-                if (singleSel >= 0) selRows.push_back(singleSel);
-            }
-            if (g_ActiveTab == 1)
-            {
-                for (int row : selRows)
-                {
-                    std::wstring idxStr = g_ConsistList.GetCellText(row, 3);
-                    if (!idxStr.empty())
-                    {
-                        selConsists.push_back(L"ACTIVITY:" + idxStr);
-                    }
-                }
-                if (selConsists.empty() && g_CurrentActivityConsistIndex >= 0 && g_CurrentActivityConsistIndex < (int)g_CurrentActivityData.consists.size())
-                {
-                    selConsists.push_back(L"ACTIVITY:" + std::to_wstring(g_CurrentActivityConsistIndex));
-                }
-            }
-            else
-            {
-                for (int row : selRows)
-                {
-                    std::wstring fname = g_ConsistList.GetCellText(row, 4);
-                    if (!fname.empty())
-                    {
-                        std::wstring fullPath = EnsureConsistFilePath(g_szBasePath, fname);
-                        if (!fullPath.empty()) selConsists.push_back(fullPath);
-                    }
-                }
-                if (selConsists.empty() && !g_szCurrentConsistFile.empty())
-                {
-                    std::wstring fullPath = EnsureConsistFilePath(g_szBasePath, g_szCurrentConsistFile);
-                    if (!fullPath.empty()) selConsists.push_back(fullPath);
-                }
-            }
-            std::vector<int> selUnits = GetSelectedConsistUnitIndices();
+            std::vector<int> selUnits;
+            GetActiveTargetConsistsAndUnits(selConsists, selUnits);
             ShowPoolMutatorDialog(hWnd, PoolMutator::MutatorMode::MutateConsists, selConsists, selUnits);
             break;
         }
@@ -6378,6 +6582,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 menuItems.push_back(ContextMenuItem::Action(2, L"\xE777", L"Replace Selected Unit(s)", L"Ctrl+R", canReplace));
                 menuItems.push_back(ContextMenuItem::Action(3, L"\xE8D7", replaceAllText, L"Ctrl+Shift+R", canReplace));
                 menuItems.push_back(ContextMenuItem::Action(14, L"\xE790", L"Replace Selected from Pool Preset...", L"", hasSelection));
+
+                // Cascading Submenu: "Replace with ▶"
+                std::vector<ContextMenuItem> replaceSubItems;
+                if (!PoolManager::g_ReplacementGroupsCache.empty())
+                {
+                    for (size_t g = 0; g < PoolManager::g_ReplacementGroupsCache.size(); ++g)
+                    {
+                        const auto& grp = PoolManager::g_ReplacementGroupsCache[g];
+                        std::wstring label = grp.name + L" (" + std::to_wstring(grp.units.size()) + L" units)";
+                        replaceSubItems.push_back(ContextMenuItem::Action(1000 + (int)g, L"\xE8D7", label, L"", hasSelection && !grp.units.empty()));
+                    }
+                    replaceSubItems.push_back(ContextMenuItem::Separator());
+                }
+                replaceSubItems.push_back(ContextMenuItem::Action(1999, L"\xE713", L"Manage Replacement Groups...", L"", true));
+
+                menuItems.push_back(ContextMenuItem::SubMenu(L"\xE8D7", L"Replace with", replaceSubItems, true));
+
                 menuItems.push_back(ContextMenuItem::Action(4, L"\xE745", L"Flip Selected Unit(s)", L"F", hasSelection));
                 menuItems.push_back(ContextMenuItem::Separator());
                 menuItems.push_back(ContextMenuItem::Action(16, L"\xE8C6", L"Cut Selected Unit(s)", L"Ctrl+X", hasSelection));
@@ -6390,16 +6611,31 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 menuItems.push_back(ContextMenuItem::Action(11, L"\xE7B8", viewClipText, L"Alt+V", true));
                 menuItems.push_back(ContextMenuItem::Action(12, L"\xE75C", L"Clear Clipboard", L"", canInsertUnits));
                 menuItems.push_back(ContextMenuItem::Separator());
+                menuItems.push_back(ContextMenuItem::Action(17, L"\xE946", L"Inspect Unit Specifications (Stock Info)...", L"", hasSelection));
+                // [DISABLED] menuItems.push_back(ContextMenuItem::Action(18, L"\xE7B7", L"View 3D Model in Shape Viewer...", L"", hasSelection));  // Shape viewer removed
+                menuItems.push_back(ContextMenuItem::Separator());
                 menuItems.push_back(ContextMenuItem::Action(7, L"\xE7A7", L"Undo", L"Ctrl+Z", canUndo));
                 menuItems.push_back(ContextMenuItem::Action(8, L"\xE7A6", L"Redo", L"Ctrl+Y", canRedo));
             }
 
             int cmd = ModernContextMenu::Show(hWnd, screenX, screenY, menuItems, TRUE);
+            if (cmd >= 1000 && cmd < 1000 + (int)PoolManager::g_ReplacementGroupsCache.size())
+            {
+                ExecuteReplacementFromGroup(hWnd, cmd - 1000, selIndices);
+                return 0;
+            }
+            if (cmd == 1999)
+            {
+                ShowPoolManagerDialog(hWnd, 1);
+                return 0;
+            }
             switch (cmd)
             {
             case 1: DeleteSelectedConsistUnits(hWnd); break;
             case 2: ExecuteConsistReplacement(hWnd, SCOPE_SELECTED_ROWS); break;
             case 3: ExecuteConsistReplacement(hWnd, SCOPE_ALL_MATCHING); break;
+            case 17: SendMessage(hWnd, WM_COMMANDBAR_ACTION, CMD_ACTION_STOCK_INFO, 0); break;
+            // case 18: SendMessage(hWnd, WM_COMMANDBAR_ACTION, CMD_ACTION_SHAPE_VIEWER, 0); break;  // [DISABLED]
             case 14:
             {
                 if (g_ActiveTab == 1)
@@ -6581,7 +6817,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 ContextMenuItem::Action(3, L"\xE8D7", replaceAllText, L"Ctrl+Shift+R", hasStockSel && hasConsistSel),
                 ContextMenuItem::Separator(),
                 ContextMenuItem::Action(11, L"\xE7B8", viewClipText, L"Alt+V", true),
-                ContextMenuItem::Action(12, L"\xE75C", L"Clear Clipboard", L"", canInsertUnits)
+                ContextMenuItem::Action(12, L"\xE75C", L"Clear Clipboard", L"", canInsertUnits),
+                ContextMenuItem::Separator(),
+                ContextMenuItem::Action(17, L"\xE946", L"Inspect Stock Specifications (Stock Info)...", L"", hasStockSel),
+                // [DISABLED] ContextMenuItem::Action(18, L"\xE7B7", L"View 3D Model in Shape Viewer...", L"", hasStockSel)  // Shape viewer removed
             };
 
             int cmd = ModernContextMenu::Show(hWnd, screenX, screenY, menuItems, TRUE);
@@ -6595,6 +6834,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             case 3: ExecuteConsistReplacement(hWnd, SCOPE_ALL_MATCHING, &selectedStock); break;
             case 11: ShowClipboardContents(hWnd); break;
             case 12: ClearClipboard(hWnd); break;
+            case 17: SendMessage(hWnd, WM_COMMANDBAR_ACTION, CMD_ACTION_STOCK_INFO, 0); break;
+            // case 18: SendMessage(hWnd, WM_COMMANDBAR_ACTION, CMD_ACTION_SHAPE_VIEWER, 0); break;  // [DISABLED]
             }
             return 0;
         }
@@ -6655,7 +6896,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         else if (pnmhdr->code == NM_SETFOCUS)
         {
             ActivePane newPane = g_ActivePane;
-            if (pnmhdr->hwndFrom == g_hConsistList || pnmhdr->hwndFrom == g_hRouteTree || pnmhdr->hwndFrom == g_hEditorUnitList)
+            if (pnmhdr->hwndFrom == g_hConsistList || pnmhdr->hwndFrom == g_hRouteTree)
             {
                 newPane = PANE_CONSIST;
             }
@@ -6704,6 +6945,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     }
                 }
             }
+            SyncPoolMutatorSelectionIfOpen();
             return 0;
         }
         else if (pnmhdr->hwndFrom == g_hEditorUnitList && (pnmhdr->code == NM_CELLCLICK || pnmhdr->code == NM_CLICK))
@@ -6742,6 +6984,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     VisualConsistView_SetSelected(g_hVisualConsistView, originalIndex);
                 }
             }
+            SyncPoolMutatorSelectionIfOpen();
         }
     }
     break;
@@ -6850,15 +7093,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_DESTROY:
-        DeleteCriticalSection(&g_StockCacheCS);
         g_bCancelScan = TRUE;
+        CancelStockScan(g_hStockScanThread);
         if (g_hScanThread != NULL)
         {
             WaitForSingleObject(g_hScanThread, 200);
             CloseHandle(g_hScanThread);
             g_hScanThread = NULL;
         }
-        CancelStockScan(g_hStockScanThread);
+        DeleteCriticalSection(&g_StockCacheCS);
 
         // Cancel Consists Directory Watcher Thread
         g_bCancelWatcher = TRUE;
