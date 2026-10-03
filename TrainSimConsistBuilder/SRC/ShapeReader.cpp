@@ -1494,7 +1494,7 @@ bool ShapeReader::ParseShapeFile(
 
     if (isCompressed) {
         size_t zlibStart = (isUtf16 ? 34 : 16);
-        for (size_t i = (isUtf16 ? 16 : 8); i < (isUtf16 ? 64 : 32) && i + 1 < fileSize; ++i) {
+        for (size_t i = (isUtf16 ? 16u : 8u); i < (isUtf16 ? 64u : 32u) && i + 1 < (size_t)fileSize; ++i) {
             if (pRawBytes[i] == 0x78 && (pRawBytes[i + 1] == 0x9C || pRawBytes[i + 1] == 0xDA || pRawBytes[i + 1] == 0x01 || pRawBytes[i + 1] == 0x5E)) {
                 zlibStart = i;
                 break;
