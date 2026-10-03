@@ -1,6 +1,6 @@
 {
   "version": "9.0.0",
-  "build": 9000,
+  "build": 90000,
   "changelog": "Integrated support for 3D Shape Viewer and real-time Visual Consist 3D view.",
   "download_x64": "https://github.com/devddd963/TrainSimConsistBuilder/releases/download/v9.0.0/TrainSimConsistBuilder_v9.0.0_x64.exe",
   "download_x32": "https://github.com/devddd963/TrainSimConsistBuilder/releases/download/v9.0.0/TrainSimConsistBuilder_v9.0.0_x32.exe"
