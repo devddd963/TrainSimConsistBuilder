@@ -9,6 +9,7 @@
 #include <thread>
 #include "../UI/ModernMessageBox.h"
 #include "../UI/UITheme.h"
+#include "AppLogging.h"
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "shell32.lib")
@@ -207,12 +208,36 @@ namespace Updater
         wchar_t szExePath[MAX_PATH] = { 0 };
         if (GetModuleFileNameW(NULL, szExePath, MAX_PATH) > 0)
         {
-            std::wstring oldFile = std::wstring(szExePath) + L".old";
-            std::wstring newFile = std::wstring(szExePath) + L".new";
-            std::wstring tmpFile = std::wstring(szExePath) + L".tmp";
-            DeleteFileW(oldFile.c_str());
-            DeleteFileW(newFile.c_str());
-            DeleteFileW(tmpFile.c_str());
+            std::wstring exePath = szExePath;
+            size_t lastSlash = exePath.find_last_of(L"\\/");
+            std::wstring dir = (lastSlash != std::wstring::npos) ? exePath.substr(0, lastSlash + 1) : L"";
+
+            DeleteFileW((exePath + L".old").c_str());
+            DeleteFileW((exePath + L".new").c_str());
+            DeleteFileW((exePath + L".tmp").c_str());
+
+            // Also clean up any leftover .old / .tmp files in current directory
+            if (!dir.empty())
+            {
+                WIN32_FIND_DATAW fd;
+                HANDLE hFind = FindFirstFileW((dir + L"TrainSimConsistBuilder*.old").c_str(), &fd);
+                if (hFind != INVALID_HANDLE_VALUE)
+                {
+                    do {
+                        DeleteFileW((dir + fd.cFileName).c_str());
+                    } while (FindNextFileW(hFind, &fd));
+                    FindClose(hFind);
+                }
+
+                hFind = FindFirstFileW((dir + L"TrainSimConsistBuilder*.tmp").c_str(), &fd);
+                if (hFind != INVALID_HANDLE_VALUE)
+                {
+                    do {
+                        DeleteFileW((dir + fd.cFileName).c_str());
+                    } while (FindNextFileW(hFind, &fd));
+                    FindClose(hFind);
+                }
+            }
         }
     }
 
@@ -223,8 +248,44 @@ namespace Updater
         wchar_t szCurrentExe[MAX_PATH] = { 0 };
         if (GetModuleFileNameW(NULL, szCurrentExe, MAX_PATH) == 0) return false;
 
-        std::wstring szNewExe = std::wstring(szCurrentExe) + L".new";
-        std::wstring szOldExe = std::wstring(szCurrentExe) + L".old";
+        std::wstring currentExeStr = szCurrentExe;
+        std::wstring exeDir = L"";
+        size_t lastSlash = currentExeStr.find_last_of(L"\\/");
+        if (lastSlash != std::wstring::npos)
+        {
+            exeDir = currentExeStr.substr(0, lastSlash + 1);
+        }
+
+        // Determine target executable filename from the download URL
+        std::wstring targetFileName = L"";
+        size_t lastUrlSlash = info.downloadUrl.find_last_of(L"/\\");
+        if (lastUrlSlash != std::wstring::npos)
+        {
+            targetFileName = info.downloadUrl.substr(lastUrlSlash + 1);
+        }
+        size_t queryPos = targetFileName.find(L'?');
+        if (queryPos != std::wstring::npos)
+        {
+            targetFileName = targetFileName.substr(0, queryPos);
+        }
+
+        if (targetFileName.empty() || targetFileName.length() < 5 || _wcsicmp(targetFileName.substr(targetFileName.length() - 4).c_str(), L".exe") != 0)
+        {
+#if defined(_WIN64)
+            targetFileName = L"TrainSimConsistBuilder_v" + info.remoteVersion + L"_x64.exe";
+#else
+            targetFileName = L"TrainSimConsistBuilder_v" + info.remoteVersion + L"_x32.exe";
+#endif
+        }
+
+        std::wstring szTargetExe = exeDir + targetFileName;
+        std::wstring szTempDownload = szTargetExe + L".tmp";
+        std::wstring szOldExe = currentExeStr + L".old";
+
+        DeleteFileW(szTempDownload.c_str());
+
+        LOG_INFO("Downloading update from: %ls", info.downloadUrl.c_str());
+        LOG_INFO("Target executable file path: %ls", szTargetExe.c_str());
 
         HINTERNET hInternet = InternetOpenW(L"TrainSimConsistBuilder-Downloader/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
         if (!hInternet) return false;
@@ -238,7 +299,7 @@ namespace Updater
             return false;
         }
 
-        HANDLE hFile = CreateFileW(szNewExe.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        HANDLE hFile = CreateFileW(szTempDownload.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE)
         {
             InternetCloseHandle(hUrl);
@@ -269,13 +330,13 @@ namespace Updater
 
         if (!downloadSuccess || totalBytes < 100000)
         {
-            DeleteFileW(szNewExe.c_str());
+            DeleteFileW(szTempDownload.c_str());
             ShowModernMessageBox(hWndParent, L"Downloaded file is incomplete or corrupted. Update aborted.", L"Update Failed", MB_OK | MB_ICONERROR);
             return false;
         }
 
         // Verify PE Header ('MZ')
-        HANDLE hCheck = CreateFileW(szNewExe.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        HANDLE hCheck = CreateFileW(szTempDownload.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (hCheck != INVALID_HANDLE_VALUE)
         {
             WORD mzHeader = 0;
@@ -284,7 +345,7 @@ namespace Updater
             CloseHandle(hCheck);
             if (mzHeader != 0x5A4D) // 'MZ'
             {
-                DeleteFileW(szNewExe.c_str());
+                DeleteFileW(szTempDownload.c_str());
                 ShowModernMessageBox(hWndParent, L"Downloaded file signature check failed. Update aborted.", L"Security Check", MB_OK | MB_ICONERROR);
                 return false;
             }
@@ -304,25 +365,28 @@ namespace Updater
             RegCloseKey(hKey);
         }
 
-        // Atomic replacement and restart
+        // Atomic replacement and rename
         DeleteFileW(szOldExe.c_str());
         if (!MoveFileExW(szCurrentExe, szOldExe.c_str(), MOVEFILE_REPLACE_EXISTING))
         {
-            DeleteFileW(szNewExe.c_str());
-            ShowModernMessageBox(hWndParent, L"Could not prepare executable for replacement.", L"Update Error", MB_OK | MB_ICONERROR);
+            DeleteFileW(szTempDownload.c_str());
+            ShowModernMessageBox(hWndParent, L"Could not prepare current executable for replacement.", L"Update Error", MB_OK | MB_ICONERROR);
             return false;
         }
 
-        if (!MoveFileExW(szNewExe.c_str(), szCurrentExe, MOVEFILE_REPLACE_EXISTING))
+        // Move downloaded .tmp to new target filename
+        if (!MoveFileExW(szTempDownload.c_str(), szTargetExe.c_str(), MOVEFILE_REPLACE_EXISTING))
         {
-            // Rollback
+            // Rollback original exe
             MoveFileExW(szOldExe.c_str(), szCurrentExe, MOVEFILE_REPLACE_EXISTING);
-            ShowModernMessageBox(hWndParent, L"Could not replace application executable.", L"Update Error", MB_OK | MB_ICONERROR);
+            ShowModernMessageBox(hWndParent, L"Could not place updated application executable.", L"Update Error", MB_OK | MB_ICONERROR);
             return false;
         }
 
-        // Launch newly updated application
-        ShellExecuteW(NULL, L"open", szCurrentExe, NULL, NULL, SW_SHOWNORMAL);
+        LOG_INFO("Update installed successfully. Launching '%ls'...", szTargetExe.c_str());
+
+        // Launch newly updated application with its new filename
+        ShellExecuteW(NULL, L"open", szTargetExe.c_str(), NULL, NULL, SW_SHOWNORMAL);
         ExitProcess(0);
         return true;
     }

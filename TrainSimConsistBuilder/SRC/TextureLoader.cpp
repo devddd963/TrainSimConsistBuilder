@@ -556,12 +556,13 @@ static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& 
         // High-Speed Direct Planar Channel Unpacking with Row Offset Table
         outData.format = DXGI_FORMAT_R8G8B8A8_UNORM;
 
-        const uint32_t* pOffsetsTable = (const uint32_t*)(pData + curOffset);
-        if (curOffset + 4 <= dataLen && pOffsetsTable[0] == 0)
+        if (curOffset + 4 <= dataLen)
         {
-            pOffsetsTable++;
-            curOffset += 4;
+            uint32_t firstVal = *(const uint32_t*)(pData + curOffset);
+            if (firstVal == 0) curOffset += 4;
         }
+
+        const uint32_t* pOffsetsTable = (const uint32_t*)(pData + curOffset);
 
         uint32_t mw = width;
         uint32_t mh = height;
