@@ -189,14 +189,80 @@ void CustomTreeView::ToggleExpand(CustomTreeNode* node)
 
 void CustomTreeView::SelectNode(CustomTreeNode* node)
 {
-    if (m_selectedNode == node) return;
+    if (m_selectedNode == node)
+    {
+        EnsureVisible(node);
+        return;
+    }
     m_selectedNode = node;
-    Invalidate();
+    EnsureVisible(node);
 
     if (m_onSelectionChanged)
     {
         m_onSelectionChanged(m_selectedNode);
     }
+}
+
+void CustomTreeView::EnsureVisible(CustomTreeNode* node)
+{
+    if (!node || !m_hWnd) return;
+
+    // 1. Expand all ancestors up to root so that the node is visible in the tree
+    CustomTreeNode* p = node->parent;
+    bool expandedAny = false;
+    while (p)
+    {
+        if (!p->isExpanded)
+        {
+            p->isExpanded = true;
+            expandedAny = true;
+        }
+        p = p->parent;
+    }
+
+    if (expandedAny)
+    {
+        FlattenVisibleNodes();
+    }
+
+    // 2. Find node index in m_visibleNodes
+    int nodeIdx = -1;
+    for (int i = 0; i < (int)m_visibleNodes.size(); ++i)
+    {
+        if (m_visibleNodes[i] == node)
+        {
+            nodeIdx = i;
+            break;
+        }
+    }
+
+    if (nodeIdx < 0) return;
+
+    // 3. Compute visible row capacity
+    RECT rcClient;
+    GetClientRect(m_hWnd, &rcClient);
+    int ch = rcClient.bottom - rcClient.top;
+    int visRows = ch / m_rowHeight;
+    if (visRows < 1) visRows = 1;
+
+    // Adjust m_scrollY to bring nodeIdx into view
+    if (nodeIdx < m_scrollY)
+    {
+        m_scrollY = nodeIdx;
+    }
+    else if (nodeIdx >= m_scrollY + visRows)
+    {
+        m_scrollY = nodeIdx - visRows + 1;
+    }
+
+    // Clamp scroll bounds
+    int maxScroll = (int)m_visibleNodes.size() - visRows;
+    if (maxScroll < 0) maxScroll = 0;
+    if (m_scrollY > maxScroll) m_scrollY = maxScroll;
+    if (m_scrollY < 0) m_scrollY = 0;
+
+    UpdateScrollbars();
+    Invalidate();
 }
 
 CustomTreeNode* CustomTreeView::FindNodeByTag(const std::wstring& tag, CustomTreeNode* startFrom)

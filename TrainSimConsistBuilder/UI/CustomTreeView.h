@@ -43,6 +43,7 @@ public:
     void ExpandNode(CustomTreeNode* node, bool expand);
     void ToggleExpand(CustomTreeNode* node);
     void SelectNode(CustomTreeNode* node);
+    void EnsureVisible(CustomTreeNode* node);
     CustomTreeNode* GetSelectedNode() const { return m_selectedNode; }
     CustomTreeNode* FindNodeByTag(const std::wstring& tag, CustomTreeNode* startFrom = nullptr);
     CustomTreeNode* FindNodeById(int id, CustomTreeNode* startFrom = nullptr);

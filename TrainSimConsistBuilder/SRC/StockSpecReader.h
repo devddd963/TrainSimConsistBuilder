@@ -60,7 +60,21 @@ namespace StockSpecReader
         float width = 0.0f;
         float height = 0.0f;
         float length = 0.0f;
+
+        // ORTS Extended FreightAnim parameters
+        float offsetX = 0.0f;
+        float offsetY = 0.0f;
+        float offsetZ = 0.0f;
+        float rotX = 0.0f; // Pitch in degrees
+        float rotY = 0.0f; // Yaw in degrees
+        float rotZ = 0.0f; // Roll in degrees
+        std::wstring subType = L"Default";
+        std::wstring visibility = L"";
         bool isContinuous = false;
+        bool isDriver = false;
+        bool isStatic = true;
+        bool isAddedBoiler = false;
+        bool isMSTS = false;
     };
 
     struct StockSpec
@@ -83,6 +97,7 @@ namespace StockSpecReader
         bool shapeExistsOnDisk = false;
         std::wstring fullShapePath;
         std::vector<StockFreightAnim> freightAnims;
+        bool mstsFreightAnimEnabled = true;
 
         // Couplers & Buffers
         std::vector<StockCoupler> couplers;

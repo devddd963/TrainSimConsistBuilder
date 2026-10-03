@@ -28,3 +28,4 @@ BOOL RegisterCommandBarClass(HINSTANCE hInstance);
 HWND CreateCommandBar(HWND hParent, HINSTANCE hInstance, int x, int y, int width, int height, UINT_PTR controlId);
 void CommandBar_SetDarkMode(HWND hCommandBar, BOOL bDarkMode);
 void CommandBar_SetButtonText(HWND hCommandBar, int actionId, const wchar_t* newLabel, int newWidth = 0);
+RECT CommandBar_GetButtonRect(HWND hCommandBar, int actionId);

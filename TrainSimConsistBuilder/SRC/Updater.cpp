@@ -139,6 +139,29 @@ namespace Updater
         return num;
     }
 
+    static std::string UnescapeJsonString(const std::string& str)
+    {
+        std::string result;
+        result.reserve(str.length());
+        for (size_t i = 0; i < str.length(); ++i)
+        {
+            if (str[i] == '\\' && i + 1 < str.length())
+            {
+                if (str[i + 1] == 'n') { result += '\n'; i++; }
+                else if (str[i + 1] == 'r') { result += '\r'; i++; }
+                else if (str[i + 1] == 't') { result += '\t'; i++; }
+                else if (str[i + 1] == '"') { result += '"'; i++; }
+                else if (str[i + 1] == '\\') { result += '\\'; i++; }
+                else { result += str[i]; }
+            }
+            else
+            {
+                result += str[i];
+            }
+        }
+        return result;
+    }
+
     static bool ParseVersionJson(const std::string& json, UpdateInfo& outInfo)
     {
         if (json.empty()) return false;
@@ -157,7 +180,7 @@ namespace Updater
 
         outInfo.remoteVersion = ToWide(version);
         outInfo.remoteBuild = build;
-        outInfo.releaseNotes = ToWide(changelog);
+        outInfo.releaseNotes = ToWide(UnescapeJsonString(changelog));
         outInfo.releaseTitle = L"Train Sim Consist Builder v" + outInfo.remoteVersion;
 
         if (!downloadUrl.empty())

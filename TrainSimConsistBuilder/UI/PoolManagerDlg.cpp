@@ -959,10 +959,12 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             int h = HIWORD(lParam);
             if (pState->hTitleBar && IsWindow(pState->hTitleBar))
             {
-                SetWindowPos(pState->hTitleBar, NULL, 0, 0, w, 66, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-                InvalidateRect(pState->hTitleBar, NULL, TRUE);
+                SetWindowPos(pState->hTitleBar, NULL, 0, 0, w, 66, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOCOPYBITS);
+                InvalidateRect(pState->hTitleBar, NULL, FALSE);
+                UpdateWindow(pState->hTitleBar);
             }
             InvalidateRect(hWnd, NULL, FALSE);
+            UpdateWindow(hWnd);
         }
         return 0;
     }
@@ -1048,7 +1050,42 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             PoolManager::PoolPreset* pActivePreset = PoolManager::GetActivePreset();
             std::wstring activePresetName = pActivePreset ? pActivePreset->presetName : L"Default Preset";
 
-            RECT rcCombo = { 70, toolbarY + 9, 250, toolbarY + toolbarH - 9 };
+            int btnH = 30;
+            int btnY = toolbarY + (toolbarH - btnH) / 2;
+
+            // [+ Add Pool] and [Expand All] / [Collapse All] Buttons (Right cluster)
+            int addPoolW = (w < 880) ? 84 : 96;
+            int expandAllW = (w < 880) ? 80 : 92;
+            int collapseAllW = (w < 880) ? 84 : 96;
+            int curRight = w - 20;
+
+            RECT rcBtnAddPool = { curRight - addPoolW, btnY, curRight, btnY + btnH };
+            ClickableControl ccAddPool = { ClickableControl::BTN_ADD_POOL, rcBtnAddPool };
+            int idxAddPool = (int)pState->clickControls.size();
+            pState->clickControls.push_back(ccAddPool);
+            DrawModernButton(hmemDC, rcBtnAddPool, (w < 880) ? L"Add" : L"Add Pool", pState->hoveredControlIdx == idxAddPool, pState->pressedControlIdx == idxAddPool, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
+
+            curRight -= (addPoolW + 6);
+            RECT rcBtnExpAll = { curRight - expandAllW, btnY, curRight, btnY + btnH };
+            ClickableControl ccExpAll = { ClickableControl::BTN_POOLS_EXPAND_ALL, rcBtnExpAll };
+            int idxExpAll = (int)pState->clickControls.size();
+            pState->clickControls.push_back(ccExpAll);
+            DrawModernButton(hmemDC, rcBtnExpAll, (w < 880) ? L"Expand" : L"Expand All", pState->hoveredControlIdx == idxExpAll, pState->pressedControlIdx == idxExpAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
+
+            curRight -= (expandAllW + 6);
+            RECT rcBtnColAll = { curRight - collapseAllW, btnY, curRight, btnY + btnH };
+            ClickableControl ccColAll = { ClickableControl::BTN_POOLS_COLLAPSE_ALL, rcBtnColAll };
+            int idxColAll = (int)pState->clickControls.size();
+            pState->clickControls.push_back(ccColAll);
+            DrawModernButton(hmemDC, rcBtnColAll, (w < 880) ? L"Collapse" : L"Collapse All", pState->hoveredControlIdx == idxColAll, pState->pressedControlIdx == idxColAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
+
+            int rightClusterLeft = curRight - 12;
+
+            // Preset Dropdown and Action Buttons (Left cluster)
+            int comboMaxW = 180;
+            int availForLeft = rightClusterLeft - 70;
+            int comboW = (availForLeft < 480) ? (std::max)(110, availForLeft - 260) : comboMaxW;
+            RECT rcCombo = { 70, toolbarY + 9, 70 + comboW, toolbarY + toolbarH - 9 };
             pState->rcPresetDropdown = rcCombo;
 
             bool isComboHover = (pState->hoveredControlIdx >= 0 && pState->hoveredControlIdx < (int)pState->clickControls.size() &&
@@ -1094,61 +1131,49 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
             // Preset action buttons: [+ New], [✏️ Rename], [Clone], [Delete]
             int btnX = rcCombo.right + 8;
-            int btnH = 30;
-            int btnY = toolbarY + (toolbarH - btnH) / 2;
+            int btnNewW = (availForLeft < 480) ? 52 : 64;
+            int btnRenameW = (availForLeft < 480) ? 68 : 84;
+            int btnCloneW = (availForLeft < 480) ? 60 : 74;
+            int btnDelW = (availForLeft < 480) ? 60 : 74;
 
-            RECT rcBtnNew = { btnX, btnY, btnX + 64, btnY + btnH };
-            ClickableControl ccNew = { ClickableControl::BTN_PRESET_NEW, rcBtnNew };
-            int idxNew = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccNew);
-            DrawModernButton(hmemDC, rcBtnNew, L"New", pState->hoveredControlIdx == idxNew, pState->pressedControlIdx == idxNew, false, pState->hFontMain, pState->hFontIconSmall, L"\xE710");
+            if (btnX + btnNewW <= rightClusterLeft)
+            {
+                RECT rcBtnNew = { btnX, btnY, btnX + btnNewW, btnY + btnH };
+                ClickableControl ccNew = { ClickableControl::BTN_PRESET_NEW, rcBtnNew };
+                int idxNew = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccNew);
+                DrawModernButton(hmemDC, rcBtnNew, L"New", pState->hoveredControlIdx == idxNew, pState->pressedControlIdx == idxNew, false, pState->hFontMain, pState->hFontIconSmall, L"\xE710");
+                btnX += btnNewW + 6;
+            }
 
-            btnX += 64 + 6;
-            RECT rcBtnRename = { btnX, btnY, btnX + 84, btnY + btnH };
-            ClickableControl ccRename = { ClickableControl::BTN_PRESET_RENAME, rcBtnRename };
-            int idxRename = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccRename);
-            DrawModernButton(hmemDC, rcBtnRename, L"Rename", pState->hoveredControlIdx == idxRename, pState->pressedControlIdx == idxRename, false, pState->hFontMain, pState->hFontIconSmall, L"\xE70F");
+            if (btnX + btnRenameW <= rightClusterLeft)
+            {
+                RECT rcBtnRename = { btnX, btnY, btnX + btnRenameW, btnY + btnH };
+                ClickableControl ccRename = { ClickableControl::BTN_PRESET_RENAME, rcBtnRename };
+                int idxRename = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccRename);
+                DrawModernButton(hmemDC, rcBtnRename, L"Rename", pState->hoveredControlIdx == idxRename, pState->pressedControlIdx == idxRename, false, pState->hFontMain, pState->hFontIconSmall, L"\xE70F");
+                btnX += btnRenameW + 6;
+            }
 
-            btnX += 84 + 6;
-            RECT rcBtnClone = { btnX, btnY, btnX + 74, btnY + btnH };
-            ClickableControl ccClone = { ClickableControl::BTN_PRESET_CLONE, rcBtnClone };
-            int idxClone = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccClone);
-            DrawModernButton(hmemDC, rcBtnClone, L"Clone", pState->hoveredControlIdx == idxClone, pState->pressedControlIdx == idxClone, false, pState->hFontMain, pState->hFontIconSmall, L"\xE8C8");
+            if (btnX + btnCloneW <= rightClusterLeft)
+            {
+                RECT rcBtnClone = { btnX, btnY, btnX + btnCloneW, btnY + btnH };
+                ClickableControl ccClone = { ClickableControl::BTN_PRESET_CLONE, rcBtnClone };
+                int idxClone = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccClone);
+                DrawModernButton(hmemDC, rcBtnClone, L"Clone", pState->hoveredControlIdx == idxClone, pState->pressedControlIdx == idxClone, false, pState->hFontMain, pState->hFontIconSmall, L"\xE8C8");
+                btnX += btnCloneW + 6;
+            }
 
-            btnX += 74 + 6;
-            RECT rcBtnDel = { btnX, btnY, btnX + 74, btnY + btnH };
-            ClickableControl ccDel = { ClickableControl::BTN_PRESET_DELETE, rcBtnDel };
-            int idxDel = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccDel);
-            DrawModernButton(hmemDC, rcBtnDel, L"Delete", pState->hoveredControlIdx == idxDel, pState->pressedControlIdx == idxDel, false, pState->hFontMain, pState->hFontIconSmall, L"\xE74D");
-
-            // [+ Add Pool] and [Expand All] / [Collapse All] Buttons
-            int addPoolW = 96;
-            int expandAllW = 92;
-            int collapseAllW = 96;
-            int curRight = w - 20;
-
-            RECT rcBtnAddPool = { curRight - addPoolW, btnY, curRight, btnY + btnH };
-            ClickableControl ccAddPool = { ClickableControl::BTN_ADD_POOL, rcBtnAddPool };
-            int idxAddPool = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccAddPool);
-            DrawModernButton(hmemDC, rcBtnAddPool, L"Add Pool", pState->hoveredControlIdx == idxAddPool, pState->pressedControlIdx == idxAddPool, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
-
-            curRight -= (addPoolW + 6);
-            RECT rcBtnExpAll = { curRight - expandAllW, btnY, curRight, btnY + btnH };
-            ClickableControl ccExpAll = { ClickableControl::BTN_POOLS_EXPAND_ALL, rcBtnExpAll };
-            int idxExpAll = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccExpAll);
-            DrawModernButton(hmemDC, rcBtnExpAll, L"Expand All", pState->hoveredControlIdx == idxExpAll, pState->pressedControlIdx == idxExpAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
-
-            curRight -= (expandAllW + 6);
-            RECT rcBtnColAll = { curRight - collapseAllW, btnY, curRight, btnY + btnH };
-            ClickableControl ccColAll = { ClickableControl::BTN_POOLS_COLLAPSE_ALL, rcBtnColAll };
-            int idxColAll = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccColAll);
-            DrawModernButton(hmemDC, rcBtnColAll, L"Collapse All", pState->hoveredControlIdx == idxColAll, pState->pressedControlIdx == idxColAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
+            if (btnX + btnDelW <= rightClusterLeft)
+            {
+                RECT rcBtnDel = { btnX, btnY, btnX + btnDelW, btnY + btnH };
+                ClickableControl ccDel = { ClickableControl::BTN_PRESET_DELETE, rcBtnDel };
+                int idxDel = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccDel);
+                DrawModernButton(hmemDC, rcBtnDel, L"Delete", pState->hoveredControlIdx == idxDel, pState->pressedControlIdx == idxDel, false, pState->hFontMain, pState->hFontIconSmall, L"\xE74D");
+            }
 
             // 2. Scrollable Content Area: Pool Cards
             int contentY = toolbarY + toolbarH + 1;
@@ -1221,7 +1246,7 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     DrawModernButton(hmemDC, rcChevronBtn, L"", pState->hoveredControlIdx == idxCol, pState->pressedControlIdx == idxCol, false, pState->hFontSmall, pState->hFontIconSmall, pool.isCollapsed ? L"__TRI_DOWN__" : L"__TRI_UP__");
 
                     // Pool Number Badge & Name
-                    RECT rcPoolTitle = { rcCard.left + 36, rcCard.top, rcCard.right - 220, rcCard.top + 33 };
+                    RECT rcPoolTitle = { rcCard.left + 36, rcCard.top, rcCard.right - 252, rcCard.top + 33 };
                     std::wstring titleText = L"#" + std::to_wstring(p + 1) + L"  " + pool.name;
                     SelectObject(hmemDC, pState->hFontMainBold);
                     SetTextColor(hmemDC, textPrimary);
@@ -1507,6 +1532,36 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             MoveToEx(hmemDC, 0, toolbarY + toolbarH, NULL);
             LineTo(hmemDC, w, toolbarY + toolbarH);
 
+            // Right: [+ Add Group], [Expand All], [Collapse All] Buttons
+            int btnH = 30;
+            int btnY = toolbarY + (toolbarH - btnH) / 2;
+            int addGroupW = (w < 880) ? 90 : 104;
+            int expandAllW = (w < 880) ? 80 : 92;
+            int collapseAllW = (w < 880) ? 84 : 96;
+            int curRight = w - 20;
+
+            RECT rcBtnAddGrp = { curRight - addGroupW, btnY, curRight, btnY + btnH };
+            ClickableControl ccAddGrp = { ClickableControl::BTN_GROUP_NEW, rcBtnAddGrp };
+            int idxAddGrp = (int)pState->clickControls.size();
+            pState->clickControls.push_back(ccAddGrp);
+            DrawModernButton(hmemDC, rcBtnAddGrp, (w < 880) ? L"Add Group" : L"Add Group", pState->hoveredControlIdx == idxAddGrp, pState->pressedControlIdx == idxAddGrp, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
+
+            curRight -= (addGroupW + 6);
+            RECT rcBtnExpAll = { curRight - expandAllW, btnY, curRight, btnY + btnH };
+            ClickableControl ccExpAll = { ClickableControl::BTN_GROUP_EXPAND_ALL, rcBtnExpAll };
+            int idxExpAll = (int)pState->clickControls.size();
+            pState->clickControls.push_back(ccExpAll);
+            DrawModernButton(hmemDC, rcBtnExpAll, (w < 880) ? L"Expand" : L"Expand All", pState->hoveredControlIdx == idxExpAll, pState->pressedControlIdx == idxExpAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
+
+            curRight -= (expandAllW + 6);
+            RECT rcBtnColAll = { curRight - collapseAllW, btnY, curRight, btnY + btnH };
+            ClickableControl ccColAll = { ClickableControl::BTN_GROUP_COLLAPSE_ALL, rcBtnColAll };
+            int idxColAll = (int)pState->clickControls.size();
+            pState->clickControls.push_back(ccColAll);
+            DrawModernButton(hmemDC, rcBtnColAll, (w < 880) ? L"Collapse" : L"Collapse All", pState->hoveredControlIdx == idxColAll, pState->pressedControlIdx == idxColAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
+
+            int maxTitleRight = curRight - 12;
+
             // Left: Icon + Title + Subtitle
             SelectObject(hmemDC, pState->hFontIcon);
             SetTextColor(hmemDC, accentCol);
@@ -1515,41 +1570,13 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
             SelectObject(hmemDC, pState->hFontMainBold);
             SetTextColor(hmemDC, textPrimary);
-            RECT rcTitle = { 46, toolbarY + 5, 480, toolbarY + 24 };
-            DrawTextW(hmemDC, L"Unit Replacement Batches / Palettes", -1, &rcTitle, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            RECT rcTitle = { 46, toolbarY + 5, maxTitleRight, toolbarY + 24 };
+            DrawTextW(hmemDC, L"Unit Replacement Batches / Palettes", -1, &rcTitle, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             SelectObject(hmemDC, pState->hFontSmall);
             SetTextColor(hmemDC, textSecondary);
-            RECT rcSub = { 46, toolbarY + 24, 480, toolbarY + 42 };
-            DrawTextW(hmemDC, L"Curated stock groups for instant right-click unit replacement in Consist Editor", -1, &rcSub, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
-
-            // Right: [+ Add Group], [Expand All], [Collapse All] Buttons
-            int btnH = 30;
-            int btnY = toolbarY + (toolbarH - btnH) / 2;
-            int addGroupW = 104;
-            int expandAllW = 92;
-            int collapseAllW = 96;
-            int curRight = w - 20;
-
-            RECT rcBtnAddGrp = { curRight - addGroupW, btnY, curRight, btnY + btnH };
-            ClickableControl ccAddGrp = { ClickableControl::BTN_GROUP_NEW, rcBtnAddGrp };
-            int idxAddGrp = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccAddGrp);
-            DrawModernButton(hmemDC, rcBtnAddGrp, L"Add Group", pState->hoveredControlIdx == idxAddGrp, pState->pressedControlIdx == idxAddGrp, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
-
-            curRight -= (addGroupW + 6);
-            RECT rcBtnExpAll = { curRight - expandAllW, btnY, curRight, btnY + btnH };
-            ClickableControl ccExpAll = { ClickableControl::BTN_GROUP_EXPAND_ALL, rcBtnExpAll };
-            int idxExpAll = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccExpAll);
-            DrawModernButton(hmemDC, rcBtnExpAll, L"Expand All", pState->hoveredControlIdx == idxExpAll, pState->pressedControlIdx == idxExpAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
-
-            curRight -= (expandAllW + 6);
-            RECT rcBtnColAll = { curRight - collapseAllW, btnY, curRight, btnY + btnH };
-            ClickableControl ccColAll = { ClickableControl::BTN_GROUP_COLLAPSE_ALL, rcBtnColAll };
-            int idxColAll = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccColAll);
-            DrawModernButton(hmemDC, rcBtnColAll, L"Collapse All", pState->hoveredControlIdx == idxColAll, pState->pressedControlIdx == idxColAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
+            RECT rcSub = { 46, toolbarY + 24, maxTitleRight, toolbarY + 42 };
+            DrawTextW(hmemDC, L"Curated stock groups for instant right-click unit replacement in Consist Editor", -1, &rcSub, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             // 2. Scrollable Content Area: Group Cards
             int contentY = toolbarY + toolbarH + 1;
@@ -1659,7 +1686,7 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     DrawModernButton(hmemDC, rcChevronBtn, L"", pState->hoveredControlIdx == idxCol, pState->pressedControlIdx == idxCol, false, pState->hFontSmall, pState->hFontIconSmall, grp.isCollapsed ? L"__TRI_DOWN__" : L"__TRI_UP__");
 
                     // Group Name & Unit Count Badge
-                    RECT rcGroupTitle = { rcCard.left + 36, rcCard.top, rcCard.right - 280, rcCard.top + 34 };
+                    RECT rcGroupTitle = { rcCard.left + 36, rcCard.top, rcCard.right - 302, rcCard.top + 34 };
                     std::wstring titleText = grp.name + L"  (" + std::to_wstring(unitCount) + (unitCount == 1 ? L" unit)" : L" units)");
                     SelectObject(hmemDC, pState->hFontMainBold);
                     SetTextColor(hmemDC, textPrimary);
@@ -2809,11 +2836,11 @@ void ShowPoolManagerDialog(HWND hWndParent, int initialTab)
     {
         WNDCLASSEXW wcex = { 0 };
         wcex.cbSize = sizeof(WNDCLASSEXW);
-        wcex.style = CS_HREDRAW | CS_VREDRAW;
+        wcex.style = CS_DBLCLKS;
         wcex.lpfnWndProc = WizardDlgProc;
         wcex.hInstance = GetModuleHandleW(NULL);
         wcex.hCursor = LoadCursorW(NULL, IDC_ARROW);
-        wcex.hbrBackground = CreateSolidBrush(PoolTheme::GutterBackground);
+        wcex.hbrBackground = NULL;
         wcex.lpszClassName = szClassName;
         RegisterClassExW(&wcex);
         s_WizardRegistered = true;
@@ -2879,10 +2906,10 @@ void ShowPoolManagerDialog(HWND hWndParent, int initialTab)
     if (pState->hTitleBar && IsWindow(pState->hTitleBar))
     {
         SetWindowPos(pState->hTitleBar, NULL, 0, 0, clientW, 66, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        RedrawWindow(pState->hTitleBar, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
+        RedrawWindow(pState->hTitleBar, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     }
 
-    RedrawWindow(hDlg, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
+    RedrawWindow(hDlg, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     UpdateWindow(hDlg);
 }
 

@@ -60,7 +60,7 @@ CustomTreeNode* g_pNodeTender = nullptr;
 #include "PoolMutator.h"
 #include "../UI/CustomTitleBar.h"
 #include "../UI/StockInfoDlg.h"
-// #include "../UI/3D-VisualStudio.h"  // [DISABLED] Shape viewer removed — to be rebuilt from scratch
+#include "../UI/3D-VisualStudio.h"
 #include "StockSpecReader.h"
 
 LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
@@ -70,6 +70,7 @@ LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPa
 #include "ActivityConsistReader.h"
 #include "ActivityConsistWriter.h"
 #include "Updater.h"
+#include "AppLogging.h"
 CustomListControl g_ConsistList;
 CustomListControl g_AssetList;
 CustomListControl g_EditorUnitList;
@@ -139,15 +140,51 @@ std::wstring g_szConsistSearchQuery = L"";
 std::wstring g_szStockSearchQuery = L"";
 std::wstring g_szBasePath = L"";
 
-static bool IsUnitBrokenOnDisk(const ConsistReader::UnitInfo& unit, const std::wstring& basePath)
+enum class UnitHealthStatus
 {
-    if (unit.uid.empty() || unit.parentDir.empty()) return true;
+    Healthy,
+    MissingStock,
+    MissingShape
+};
+
+static UnitHealthStatus GetUnitHealthOnDisk(const ConsistReader::UnitInfo& unit, const std::wstring& basePath)
+{
+    if (unit.uid.empty() || unit.parentDir.empty()) return UnitHealthStatus::MissingStock;
     std::wstring ext = unit.isEngine ? L".eng" : L".wag";
     std::wstring unitPath = basePath;
     if (!unitPath.empty() && unitPath.back() != L'\\') unitPath += L'\\';
     unitPath += L"TRAINS\\TRAINSET\\" + unit.parentDir + L"\\" + unit.uid + ext;
     DWORD attr = GetFileAttributesW(unitPath.c_str());
-    return (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY));
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        // Try alternate extension fallback (.wag / .eng)
+        std::wstring altExt = unit.isEngine ? L".wag" : L".eng";
+        std::wstring altPath = basePath;
+        if (!altPath.empty() && altPath.back() != L'\\') altPath += L'\\';
+        altPath += L"TRAINS\\TRAINSET\\" + unit.parentDir + L"\\" + unit.uid + altExt;
+        DWORD altAttr = GetFileAttributesW(altPath.c_str());
+        if (altAttr == INVALID_FILE_ATTRIBUTES || (altAttr & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            return UnitHealthStatus::MissingStock;
+        }
+        unitPath = altPath;
+    }
+
+    StockSpecReader::StockSpec spec = StockSpecReader::ReadFullSpec(unitPath, basePath);
+    if (!spec.mainShapeFile.empty() && !spec.shapeExistsOnDisk)
+    {
+        return UnitHealthStatus::MissingShape;
+    }
+
+    return UnitHealthStatus::Healthy;
+}
+
+static bool IsUnitBrokenOnDisk(const ConsistReader::UnitInfo& unit, const std::wstring& basePath, bool checkShape = true)
+{
+    UnitHealthStatus h = GetUnitHealthOnDisk(unit, basePath);
+    if (h == UnitHealthStatus::MissingStock) return true;
+    if (checkShape && h == UnitHealthStatus::MissingShape) return true;
+    return false;
 }
 
 static std::wstring BuildFullStockPath(const std::wstring& basePath, const std::wstring& folder, const std::wstring& fileName, const std::wstring& ext = L"")
@@ -193,15 +230,23 @@ static std::wstring EvaluateAndUpdateConsistStatus(
     const std::vector<ConsistReader::UnitInfo>& units,
     bool isSavedToDisk = false)
 {
-    bool isBroken = false;
+    bool hasMissingStock = false;
+    bool hasMissingShape = false;
     for (const auto& u : units)
     {
-        if (IsUnitBrokenOnDisk(u, g_szBasePath))
+        UnitHealthStatus h = GetUnitHealthOnDisk(u, g_szBasePath);
+        if (h == UnitHealthStatus::MissingStock)
         {
-            isBroken = true;
+            hasMissingStock = true;
             break;
         }
+        else if (h == UnitHealthStatus::MissingShape)
+        {
+            hasMissingShape = true;
+        }
     }
+
+    bool isBroken = (hasMissingStock || hasMissingShape);
 
     if (isSavedToDisk)
     {
@@ -224,8 +269,10 @@ static std::wstring EvaluateAndUpdateConsistStatus(
 
     bool isFixed = (!isBroken && !consistKey.empty() && g_SessionFixedConsists.count(consistKey) > 0);
     if (isFixed) return L"Fixed";
-    if (isBroken || (!consistKey.empty() && g_InitiallyBrokenConsists.count(consistKey) > 0 && !isSavedToDisk && g_SessionFixedConsists.count(consistKey) == 0))
-        return L"Broken";
+    if (hasMissingStock || (!consistKey.empty() && g_InitiallyBrokenConsists.count(consistKey) > 0 && !isSavedToDisk && g_SessionFixedConsists.count(consistKey) == 0))
+        return L"Missing Stock";
+    if (hasMissingShape)
+        return L"Missing Shape";
 
     return L"Healthy";
 }
@@ -234,16 +281,19 @@ HWND g_hSplitter1 = NULL;
 HWND g_hSplitter2 = NULL;
 HWND g_hSplitter3 = NULL;
 HWND g_hSplitter3Top = NULL;
-int g_wConsist = 600;       // Left Pane Total Width
-int g_hConsistSplit = 380;  // Top Deck (Consists List) Height
-int g_wCategorySplit = 130; // Default width of Category Tree panel (smaller default)
-HWND g_hRouteTree = NULL;    // Routes & Activities TreeView (Top Deck on Activity Tab)
+HWND g_hSplitterSection3 = NULL; // Horizontal Splitter between Section 2 and Section 3
+int g_wConsist = 600;            // Left Pane Total Width
+int g_hConsistSplit = 380;       // Top Deck (Consists List) Height
+int g_wCategorySplit = 130;      // Default width of Category Tree panel (smaller default)
+int g_hSection3Height = 220;     // Default height of Section 3 (3D Visual Consist View)
+HWND g_hRouteTree = NULL;         // Routes & Activities TreeView (Top Deck on Activity Tab)
 int g_ActiveTab = 0;
 
 enum SplitterType {
-    SPLITTER_VERTICAL_MAIN = 1, // Splitter 1: Left deck vs Right Workspace (IDC_SIZEWE)
-    SPLITTER_HORIZONTAL = 2,    // Splitter 2: Consist deck vs Stock deck (IDC_SIZENS)
-    SPLITTER_VERTICAL_SUB = 3   // Splitter 3: TreeView vs ListView (IDC_SIZEWE)
+    SPLITTER_VERTICAL_MAIN = 1,       // Splitter 1: Left deck vs Right Workspace (IDC_SIZEWE)
+    SPLITTER_HORIZONTAL = 2,          // Splitter 2: Consist deck vs Stock deck (IDC_SIZENS)
+    SPLITTER_VERTICAL_SUB = 3,        // Splitter 3: TreeView vs ListView (IDC_SIZEWE)
+    SPLITTER_HORIZONTAL_SECTION3 = 4  // Splitter 4: Section 2 Workspace vs Section 3 Visual Consist View (IDC_SIZENS)
 };
 
 static LRESULT CALLBACK SplitterWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -258,7 +308,7 @@ static LRESULT CALLBACK SplitterWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
     {
     case WM_SETCURSOR:
     {
-        if (type == SPLITTER_HORIZONTAL)
+        if (type == SPLITTER_HORIZONTAL || type == SPLITTER_HORIZONTAL_SECTION3)
         {
             SetCursor(LoadCursor(NULL, IDC_SIZENS));
         }
@@ -289,6 +339,11 @@ static LRESULT CALLBACK SplitterWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
         {
             s_initialVal = g_wCategorySplit;
             SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+        }
+        else if (type == SPLITTER_HORIZONTAL_SECTION3)
+        {
+            s_initialVal = g_hSection3Height;
+            SetCursor(LoadCursor(NULL, IDC_SIZENS));
         }
         return 0;
     }
@@ -334,6 +389,14 @@ static LRESULT CALLBACK SplitterWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
                 if (g_wCategorySplit > g_wConsist - 80) g_wCategorySplit = g_wConsist - 80;
                 SetCursor(LoadCursor(NULL, IDC_SIZEWE));
             }
+            else if (type == SPLITTER_HORIZONTAL_SECTION3)
+            {
+                int dy = ptNow.y - s_ptDragStart.y;
+                g_hSection3Height = s_initialVal - dy;
+                if (g_hSection3Height < 100) g_hSection3Height = 100;
+                if (g_hSection3Height > paneHeight - 250) g_hSection3Height = paneHeight - 250;
+                SetCursor(LoadCursor(NULL, IDC_SIZENS));
+            }
 
             // Trigger parent WM_SIZE recalculation and window refresh
             SendMessage(hParent, WM_SIZE, 0, MAKELPARAM(width, height));
@@ -345,7 +408,7 @@ static LRESULT CALLBACK SplitterWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
         }
         else
         {
-            if (type == SPLITTER_HORIZONTAL)
+            if (type == SPLITTER_HORIZONTAL || type == SPLITTER_HORIZONTAL_SECTION3)
             {
                 SetCursor(LoadCursor(NULL, IDC_SIZENS));
             }
@@ -389,7 +452,7 @@ static LRESULT CALLBACK SplitterWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
         HPEN hPen = CreatePen(PS_SOLID, 1, clrLine);
         HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
 
-        if (type == SPLITTER_HORIZONTAL)
+        if (type == SPLITTER_HORIZONTAL || type == SPLITTER_HORIZONTAL_SECTION3)
         {
             MoveToEx(hdc, 0, 0, NULL);
             LineTo(hdc, rc.right, 0);
@@ -429,9 +492,10 @@ static void RegisterSplitterClass(HINSTANCE hInstance)
 
 enum DragState {
     DRAG_NONE,
-    DRAG_SPLIT1, // Main vertical split between Left Pane and Right Workspace
-    DRAG_SPLIT2, // Horizontal split between Consists (top) and Stocks (bottom)
-    DRAG_SPLIT3  // Vertical split between Category Tree and Asset List in bottom deck
+    DRAG_SPLIT1,     // Main vertical split between Left Pane and Right Workspace
+    DRAG_SPLIT2,     // Horizontal split between Consists (top) and Stocks (bottom)
+    DRAG_SPLIT3,     // Vertical split between Category Tree and Asset List in bottom deck
+    DRAG_SPLIT_SEC3  // Horizontal split between Section 2 Workspace and Section 3 Visual Consist View
 };
 
 DragState g_DragState = DRAG_NONE;
@@ -582,6 +646,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     g_bDarkMode = TRUE;
     g_hbrDarkBackground = CreateSolidBrush(UITheme::DarkBackground);
 
+    LOG_INFO("===============================================================================");
+    LOG_INFO(" Train Sim Consist Builder v9.0.0 (Win32 Native C++) - Session Initialized");
+    LOG_INFO("===============================================================================");
+
     INITCOMMONCONTROLSEX icex;
     icex.dwSize = sizeof(INITCOMMONCONTROLSEX);
     icex.dwICC = ICC_TAB_CLASSES;
@@ -701,6 +769,18 @@ static DragState GetSplitterUnderMouse(int x, int y, int width, int height)
         if (g_ActiveTab == 1 && y >= (paneY + 28) && y < (paneY + g_hConsistSplit))
         {
             return DRAG_SPLIT3;
+        }
+    }
+
+    // Check Splitter Section 3 (horizontal separator bar between Section 2 Workspace and Section 3 Visual View)
+    bool isFloating = (g_hVisualConsistView != NULL && VisualConsistView_IsFloating(g_hVisualConsistView));
+    bool isCollapsed = (g_hVisualConsistView != NULL && VisualConsistView_IsCollapsed(g_hVisualConsistView));
+    if (!isFloating && !isCollapsed && x >= (g_wConsist + 9))
+    {
+        int sec3SplitY = paneY + paneHeight - g_hSection3Height - 9;
+        if (y >= (sec3SplitY - 6) && y <= (sec3SplitY + 15))
+        {
+            return DRAG_SPLIT_SEC3;
         }
     }
 
@@ -1371,7 +1451,11 @@ static void ResetConsistEditorWorkspace(HWND hWnd)
     if (g_hLabelMetricRatio)  ShowWindow(g_hLabelMetricRatio,  SW_HIDE);
     if (g_hEditMetricRatio)   ShowWindow(g_hEditMetricRatio,   SW_HIDE);
     if (g_hEditorUnitList)   ShowWindow(g_hEditorUnitList,   SW_HIDE);
-    if (g_hVisualConsistView) ShowWindow(g_hVisualConsistView, SW_HIDE);
+    if (g_hVisualConsistView)
+    {
+        VisualConsistView_SetUnits(g_hVisualConsistView, {}, g_szBasePath, L"", L"");
+        ShowWindow(g_hVisualConsistView, SW_SHOW);
+    }
 
     // Clear active loaded consist state
     g_LoadedConsistUnits.clear();
@@ -2077,13 +2161,13 @@ void ShowFilterPopup(HWND hWndList, int colIndex)
         {
             if (colIndex == 0) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
             else if (colIndex == 1) allOptions = { L"1-16", L"17-26", L"27-36", L"37-46", L"47-56", L"57-60+" };
-            else if (colIndex == 2) allOptions = { L"Healthy", L"Broken", L"Fixed" };
+            else if (colIndex == 2) allOptions = { L"Healthy", L"Missing Shape", L"Missing Stock", L"Fixed" };
         }
         else
         {
             if (colIndex == 0) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
             else if (colIndex == 1) allOptions = { L"1-16", L"17-26", L"27-36", L"37-46", L"47-56", L"57-60+" };
-            else if (colIndex == 2) allOptions = { L"Healthy", L"Broken", L"Fixed" };
+            else if (colIndex == 2) allOptions = { L"Healthy", L"Missing Shape", L"Missing Stock", L"Fixed" };
             else if (colIndex == 3) allOptions = { L"Today", L"Yesterday", L"Last week", L"Earlier this month", L"Last month", L"A long time ago" };
         }
     }
@@ -2127,7 +2211,7 @@ void ShowFilterPopup(HWND hWndList, int colIndex)
         if (colIndex == 0)      allOptions = { L"1-16", L"17-26", L"27-36", L"37-46", L"47-56", L"57-60+" };
         else if (colIndex == 1) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
         else if (colIndex == 2) allOptions = { L"Engine", L"Wagon" };
-        else if (colIndex == 3) allOptions = { L"Healthy", L"Broken", L"Fixed" };
+        else if (colIndex == 3) allOptions = { L"Healthy", L"Missing Shape", L"Missing Stock", L"Fixed" };
         else if (colIndex == 4) allOptions = { L"Normal", L"Flipped" };
         else if (colIndex == 5) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
     }
@@ -2571,7 +2655,7 @@ static void RefreshEditorUnitList(bool preserveSelection)
         std::wstring unitType = unit.isEngine ? L"Engine" : L"Wagon";
 
         // Perform dynamic disk check for this unit
-        bool isUnitBroken = IsUnitBrokenOnDisk(unit, g_szBasePath);
+        UnitHealthStatus health = GetUnitHealthOnDisk(unit, g_szBasePath);
         bool isFixedInSession = false;
         std::wstring activeConsistKey = GetCurrentActiveConsistKey();
         if (!activeConsistKey.empty())
@@ -2579,10 +2663,13 @@ static void RefreshEditorUnitList(bool preserveSelection)
             auto it = g_SessionFixedUnitsPerConsist.find(activeConsistKey);
             if (it != g_SessionFixedUnitsPerConsist.end())
             {
-                isFixedInSession = (!isUnitBroken && it->second.count((int)i) > 0);
+                isFixedInSession = (health == UnitHealthStatus::Healthy && it->second.count((int)i) > 0);
             }
         }
-        std::wstring unitStatus = isUnitBroken ? L"Broken" : (isFixedInSession ? L"Fixed" : L"Healthy");
+        std::wstring unitStatus = L"Healthy";
+        if (health == UnitHealthStatus::MissingStock) unitStatus = L"Missing Stock";
+        else if (health == UnitHealthStatus::MissingShape) unitStatus = L"Missing Shape";
+        else if (isFixedInSession) unitStatus = L"Fixed";
         std::wstring unitOrient = unit.isFlipped ? L"Flipped" : L"Normal";
 
         // 1. Filter by No.
@@ -2809,6 +2896,7 @@ static bool SaveConsistSessionToDisk(HWND hWnd, const std::wstring& filename)
     {
         it->second.isDirty = false;
         UpdateConsistManagerRow(filename);
+        LOG_INFO("Saved consist '%ls' to disk (%zu units).", filename.c_str(), it->second.units.size());
 
         for (int i = 0; i < g_ConsistList.GetItemCount(); ++i)
         {
@@ -4144,12 +4232,16 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
             g_EditorUnitList.SetScrollY(0);
         }
 
-        if (g_hVisualConsistView && !VisualConsistView_IsFloating(g_hVisualConsistView))
+        if (g_hVisualConsistView)
         {
-            ShowWindow(g_hVisualConsistView, SW_SHOW);
-            VisualConsistView_SetUnits(g_hVisualConsistView, g_LoadedConsistUnits, g_szBasePath);
+            if (!VisualConsistView_IsFloating(g_hVisualConsistView))
+            {
+                ShowWindow(g_hVisualConsistView, SW_SHOW);
+            }
+            VisualConsistView_SetUnits(g_hVisualConsistView, g_LoadedConsistUnits, g_szBasePath, trainCfg.name, filename);
         }
         UpdateConsistManagerRow(filename);
+        LOG_INFO("Loaded consist '%ls' with %zu units.", filename.c_str(), g_LoadedConsistUnits.size());
 
         InvalidateRect(hWnd, NULL, TRUE);
         UpdateWindow(hWnd);
@@ -4233,10 +4325,13 @@ static void LoadAndDisplayActivityConsist(HWND hWnd, int consistIndex)
         g_EditorUnitList.ClearSelection();
         g_EditorUnitList.SetScrollY(0);
 
-        if (g_hVisualConsistView && !VisualConsistView_IsFloating(g_hVisualConsistView))
+        if (g_hVisualConsistView)
         {
-            ShowWindow(g_hVisualConsistView, SW_SHOW);
-            VisualConsistView_SetUnits(g_hVisualConsistView, g_LoadedConsistUnits, g_szBasePath);
+            if (!VisualConsistView_IsFloating(g_hVisualConsistView))
+            {
+                ShowWindow(g_hVisualConsistView, SW_SHOW);
+            }
+            VisualConsistView_SetUnits(g_hVisualConsistView, g_LoadedConsistUnits, g_szBasePath, actCon.name, actCon.id);
         }
 
         InvalidateRect(hWnd, NULL, TRUE);
@@ -4323,6 +4418,7 @@ static void ActionCreateNewConsist(HWND hWnd)
     }
 
     LoadAndDisplayConsist(hWnd, candidateFile);
+    LOG_INFO("Created new consist '%ls'", candidateFile.c_str());
 
     if (g_hEditTrainName)
     {
@@ -4443,6 +4539,7 @@ static void ActionCloneConsist(HWND hWnd)
     }
 
     LoadAndDisplayConsist(hWnd, cloneFile);
+    LOG_INFO("Cloned consist '%ls' -> '%ls'", srcFile.c_str(), cloneFile.c_str());
 }
 
 static void ActionDeleteSelectedConsists(HWND hWnd)
@@ -4524,6 +4621,7 @@ static void ActionDeleteSelectedConsists(HWND hWnd)
             activeDeleted = true;
         }
     }
+    LOG_INFO("Deleted %zu consist file(s) from disk.", filesToDelete.size());
 
     if (activeDeleted)
     {
@@ -4588,6 +4686,7 @@ static void ActionReverseConsist(HWND hWnd)
         }
         UpdateConsistManagerRow(g_szCurrentConsistFile);
     }
+    LOG_INFO("Reversed sequence of consist '%ls' (%zu units).", g_szCurrentConsistFile.c_str(), g_LoadedConsistUnits.size());
 
     // 4. Refresh Editor Unit table and Visual Consist Track View
     RefreshEditorUnitList(false);
@@ -4935,11 +5034,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             ShowWindow(g_hEditorUnitList, SW_HIDE);
         }
 
-        // Visual Consist Track Preview (docked by default at bottom)
+        // Visual Consist Track Preview (docked by default in dedicated bottom workspace partition)
         g_hVisualConsistView = CreateVisualConsistView(hWnd, hInst, 0, 0, 0, 0, 8888);
         if (g_hVisualConsistView)
         {
-            ShowWindow(g_hVisualConsistView, SW_HIDE);
+            ShowWindow(g_hVisualConsistView, SW_SHOW);
         }
 
         // Create Dedicated Splitter Windows
@@ -4974,6 +5073,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             hWnd, NULL, hInst, NULL
         );
         if (g_hSplitter3Top) SetWindowLongPtrW(g_hSplitter3Top, GWLP_USERDATA, (LONG_PTR)SPLITTER_VERTICAL_SUB);
+
+        // Splitter between Section 2 (Editor Workspace) and Section 3 (3D Visual Consist View)
+        g_hSplitterSection3 = CreateWindowExW(
+            0, L"TSCBSplitter", L"",
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+            g_wConsist + 9, 600, 500, 9,
+            hWnd, NULL, hInst, NULL
+        );
+        if (g_hSplitterSection3) SetWindowLongPtrW(g_hSplitterSection3, GWLP_USERDATA, (LONG_PTR)SPLITTER_HORIZONTAL_SECTION3);
 
         // Bold/slightly larger font for section headers
         HFONT hSectionFont = NULL;
@@ -5138,6 +5246,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         int wmId = LOWORD(wParam);
         int wmEvent = HIWORD(wParam);
+
+        if (wmId == 8888 && wmEvent == LBN_SELCHANGE)
+        {
+            int clickedIndex = (int)(INT_PTR)lParam;
+            for (int r = 0; r < g_EditorUnitList.GetItemCount(); ++r)
+            {
+                int no = _wtoi(g_EditorUnitList.GetCellText(r, 0).c_str()) - 1;
+                if (no == clickedIndex)
+                {
+                    g_EditorUnitList.SetSelectedIndex(r);
+                    g_EditorUnitList.EnsureVisible(r);
+                    SyncPoolMutatorSelectionIfOpen();
+                    break;
+                }
+            }
+            return 0;
+        }
 
         if (wmEvent == EN_CHANGE)
         {
@@ -5365,6 +5490,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
 
             g_szBasePath = szPath;
+            LOG_INFO("Active Train Simulator base directory changed to: %ls", g_szBasePath.c_str());
             // Save to registry
             HKEY hKey = NULL;
             LSTATUS regStatus = RegCreateKeyExW(
@@ -5700,12 +5826,46 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
             break;
         }
-        // [DISABLED] Shape viewer removed — to be rebuilt from scratch
-        // case CMD_ACTION_SHAPE_VIEWER:
-        // {
-        //     ShowShapeViewerDialog(hWnd, L"", g_szBasePath);
-        //     break;
-        // }
+        case CMD_ACTION_SHAPE_VIEWER:
+        {
+            std::wstring targetUnitPath = L"";
+
+            int selConsistUnit = GetSelectedConsistUnitIndex();
+            if (selConsistUnit >= 0 && selConsistUnit < (int)g_LoadedConsistUnits.size())
+            {
+                const auto& u = g_LoadedConsistUnits[selConsistUnit];
+                targetUnitPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, u.isEngine ? L".eng" : L".wag");
+            }
+
+            if (targetUnitPath.empty())
+            {
+                std::vector<ConsistReader::UnitInfo> stockUnits = GetSelectedStockUnitsFromLibrary();
+                if (!stockUnits.empty())
+                {
+                    const auto& u = stockUnits[0];
+                    targetUnitPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, u.isEngine ? L".eng" : L".wag");
+                }
+            }
+
+            if (targetUnitPath.empty())
+            {
+                int selStock = g_AssetList.GetSelectedIndex();
+                EnterCriticalSection(&g_StockCacheCS);
+                if (selStock >= 0 && selStock < (int)g_FilteredStockIndices.size())
+                {
+                    size_t origIdx = g_FilteredStockIndices[selStock];
+                    if (origIdx < g_StockCache.size())
+                    {
+                        const auto& item = g_StockCache[origIdx];
+                        targetUnitPath = BuildFullStockPath(g_szBasePath, item.szFolder, item.szFileName, item.szExtension);
+                    }
+                }
+                LeaveCriticalSection(&g_StockCacheCS);
+            }
+
+            Show3DVisualStudioDialog(hWnd, targetUnitPath, g_szBasePath);
+            break;
+        }
         case CMD_ACTION_POOL_MANAGER:
             ShowPoolManagerDialog(hWnd);
             break;
@@ -5745,8 +5905,45 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
             break;
         case CMD_ACTION_ABOUT:
-            Updater::ShowAboutDialog(hWnd);
+        {
+            RECT rcBtn = CommandBar_GetButtonRect(g_hCommandBar, CMD_ACTION_ABOUT);
+            POINT pt = { rcBtn.left, rcBtn.bottom + 2 };
+            ClientToScreen(g_hCommandBar, &pt);
+
+            bool bLogging = AppLogging::AppLogger::IsEnabled();
+
+            std::vector<ContextMenuItem> aboutItems = {
+                ContextMenuItem::Action(1, bLogging ? L"\xE73E" : L"\xE739", bLogging ? L"Diagnostic Logging (Enabled)" : L"Diagnostic Logging (Disabled)", bLogging ? L"Active" : L"Off"),
+                ContextMenuItem::Action(2, L"\xE8A5", L"Open Session Log (AppLog.txt)"),
+                ContextMenuItem::Separator(),
+                ContextMenuItem::Action(3, L"\xE895", L"Check for Online Updates..."),
+                ContextMenuItem::Action(4, L"\xE946", L"About Train Sim Consist Builder", L"v9.0.0")
+            };
+
+            int cmd = ModernContextMenu::Show(hWnd, pt.x, pt.y, aboutItems, TRUE, 260);
+            if (cmd == 1)
+            {
+                bool newState = !bLogging;
+                AppLogging::AppLogger::SetEnabled(newState);
+                if (newState)
+                {
+                    LOG_INFO("Diagnostic logging enabled by user from CommandBar menu.");
+                }
+            }
+            else if (cmd == 2)
+            {
+                AppLogging::AppLogger::OpenLogInExplorer();
+            }
+            else if (cmd == 3)
+            {
+                Updater::CheckForUpdates(hWnd, false);
+            }
+            else if (cmd == 4)
+            {
+                Updater::ShowAboutDialog(hWnd);
+            }
             break;
+        }
         }
     }
     break;
@@ -5820,6 +6017,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 if (g_wCategorySplit < 80) g_wCategorySplit = 80;
                 if (g_wCategorySplit > g_wConsist - 80) g_wCategorySplit = g_wConsist - 80;
             }
+            else if (g_DragState == DRAG_SPLIT_SEC3)
+            {
+                int paneHeight = height - paneY;
+                g_hSection3Height = (paneY + paneHeight) - y;
+                if (g_hSection3Height < 100) g_hSection3Height = 100;
+                if (g_hSection3Height > paneHeight - 250) g_hSection3Height = paneHeight - 250;
+            }
 
             // Force recalculate child positions
             SendMessage(hWnd, WM_SIZE, 0, MAKELPARAM(width, height));
@@ -5836,7 +6040,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
                 SetCursor(LoadCursor(NULL, IDC_SIZEWE));
             }
-            else if (hover == DRAG_SPLIT2)
+            else if (hover == DRAG_SPLIT2 || hover == DRAG_SPLIT_SEC3)
             {
                 SetCursor(LoadCursor(NULL, IDC_SIZENS));
             }
@@ -5863,7 +6067,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
                 SetCursor(LoadCursor(NULL, IDC_SIZEWE));
             }
-            else if (hover == DRAG_SPLIT2)
+            else if (hover == DRAG_SPLIT2 || hover == DRAG_SPLIT_SEC3)
             {
                 SetCursor(LoadCursor(NULL, IDC_SIZENS));
             }
@@ -5897,7 +6101,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             SetCursor(LoadCursor(NULL, IDC_SIZEWE));
             return TRUE;
         }
-        else if (g_DragState == DRAG_SPLIT2)
+        else if (g_DragState == DRAG_SPLIT2 || g_DragState == DRAG_SPLIT_SEC3)
         {
             SetCursor(LoadCursor(NULL, IDC_SIZENS));
             return TRUE;
@@ -5917,7 +6121,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 SetCursor(LoadCursor(NULL, IDC_SIZEWE));
                 return TRUE;
             }
-            else if (hover == DRAG_SPLIT2)
+            else if (hover == DRAG_SPLIT2 || hover == DRAG_SPLIT_SEC3)
             {
                 SetCursor(LoadCursor(NULL, IDC_SIZENS));
                 return TRUE;
@@ -6061,32 +6265,74 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
         }
 
-        // Right Pane: Editor Workspace
+        // Right Pane: Editor Workspace & Dedicated Bottom Visual Preview (Section 3)
+        bool isFloating = (g_hVisualConsistView != NULL && VisualConsistView_IsFloating(g_hVisualConsistView));
+        bool isCollapsed = (g_hVisualConsistView != NULL && VisualConsistView_IsCollapsed(g_hVisualConsistView));
+
+        int visH = 0;
+        if (!isFloating)
+        {
+            if (isCollapsed)
+            {
+                visH = 28; // HEADER_HEIGHT
+            }
+            else
+            {
+                visH = g_hSection3Height;
+                if (visH < 100) visH = 100;
+                if (visH > paneHeight - 250) visH = paneHeight - 250;
+                g_hSection3Height = visH;
+            }
+        }
+
+        const int SPLIT_H  = 9;   // Splitter thickness
+        const int GUTTER   = 24;  // left/right margin for Section 2 inner cards
+        const int FIELD_H  = 32;  // edit box height (and label height)
+        const int ROW_GAP  = 12;  // vertical gap between rows
+        const int SEC_H    = 26;  // section header height
+        const int SEC_GAP  = 14;  // gap after section header
+        const int VPAD     = 8;   // 8 px top + bottom margin
+
+        int edX = wLeftPane + 9 + GUTTER;
+        int edW = wEditor - GUTTER * 2;
+        if (edW < 100) edW = 100;
+
+        int splitterSpace = (!isFloating && !isCollapsed) ? SPLIT_H : 0;
+        int topAreaHeight = paneHeight - visH - splitterSpace;
+        if (topAreaHeight < 100) topAreaHeight = 100;
+
+        // Position placeholder in the top region (Section 2)
         if (g_hEditorPane != NULL)
         {
-            SetWindowPos(g_hEditorPane, NULL, wLeftPane + 9, paneY, wEditor, paneHeight, SWP_NOZORDER);
+            SetWindowPos(g_hEditorPane, NULL, wLeftPane + 9, paneY, wEditor, topAreaHeight, SWP_NOZORDER);
+        }
 
-            // -------------------------------------------------------
-            // Modern inline layout (Label on left, Value on right)
-            // Split the workspace into left/right halves by a vertical separator line.
-            // All controls are constrained to the left half.
-            // -------------------------------------------------------
-            const int GUTTER   = 24;  // left/right margin
-            const int FIELD_H  = 32;  // edit box height (and label height)
-            const int ROW_GAP  = 12;  // vertical gap between rows
-            const int SEC_H    = 26;  // section header height
-            const int SEC_GAP  = 14;  // gap after section header
+        // Section 3 Horizontal Splitter & Docked Visual Consist View
+        if (g_hSplitterSection3 != NULL)
+        {
+            if (!isFloating && !isCollapsed)
+            {
+                int splitY = paneY + paneHeight - visH - SPLIT_H;
+                SetWindowPos(g_hSplitterSection3, NULL, wLeftPane + 9, splitY, wEditor, SPLIT_H, SWP_NOZORDER | SWP_SHOWWINDOW);
+            }
+            else
+            {
+                ShowWindow(g_hSplitterSection3, SW_HIDE);
+            }
+        }
 
-            // Inner vertical padding for EM_SETRECT centering
-            const int VPAD = 8;   // 8 px top + bottom margin
-
-            int wLeftPane = g_wConsist;
-            int wEditor = width - wLeftPane - 9;
-            if (wEditor < 100) wEditor = 100;
-
-            int edX = wLeftPane + 9 + GUTTER;
-            int edW = wEditor - GUTTER * 2;
-            if (edW < 100) edW = 100;
+        if (g_hVisualConsistView)
+        {
+            if (isFloating)
+            {
+                ShowWindow(g_hVisualConsistView, SW_HIDE);
+            }
+            else
+            {
+                int visY = paneY + paneHeight - visH;
+                SetWindowPos(g_hVisualConsistView, NULL, wLeftPane + 9, visY, wEditor, visH, SWP_NOZORDER | SWP_SHOWWINDOW);
+            }
+        }
 
             // Dual card layout: split into 2 equal-width cards with a 24px gap
             const int CARD_GAP = 24;
@@ -6215,25 +6461,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (g_hSectionUnits)
                 SetWindowPos(g_hSectionUnits, NULL, edX, curY, edW, SEC_H_UNITS, SWP_NOZORDER);
 
-            // Unit list and Visual Consist Track View layout
-            int visH = VisualConsistView_GetDesiredHeight(g_hVisualConsistView);
-            int availableH = paneY + paneHeight - curY - GUTTER;
-            int tableHeight = availableH - SEC_H_UNITS;
-            if (visH > 0 && g_hVisualConsistView && !VisualConsistView_IsFloating(g_hVisualConsistView))
-            {
-                tableHeight -= (visH + 12); // 12px clean gap between the two framed cards
-            }
+            // Unit list vertical sizing (fills space between section header and Section 3 splitter / window bottom)
+            int bottomLimit = paneY + topAreaHeight - 12;
+            int tableHeight = bottomLimit - (curY + SEC_H_UNITS);
             if (tableHeight < 50) tableHeight = 50;
 
             if (g_hEditorUnitList)
                 SetWindowPos(g_hEditorUnitList, NULL, edX, curY + SEC_H_UNITS, edW, tableHeight, SWP_NOZORDER);
-
-            int visY = curY + SEC_H_UNITS + tableHeight + 12;
-            if (g_hVisualConsistView && !VisualConsistView_IsFloating(g_hVisualConsistView))
-            {
-                BOOL bShow = (g_hSectionUnits && IsWindowVisible(g_hSectionUnits));
-                SetWindowPos(g_hVisualConsistView, NULL, edX, visY, edW, visH, SWP_NOZORDER | (bShow ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
-            }
 
             // Stretch the last column (Parent Directory, index 5) of Unit List to fill remaining width
             int wListUnit  = g_EditorUnitList.GetUsableWidth();
@@ -6246,8 +6480,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (wLastUnit < 60) wLastUnit = 60;
             g_EditorUnitList.SetColumnWidth(5, wLastUnit);
         }
-    }
-    break;
+        break;
 
     case WM_PAINT:
     {
@@ -6282,6 +6515,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             RECT rcSplitTop = { g_wCategorySplit, paneY + 28, g_wCategorySplit + 9, paneY + g_hConsistSplit };
             FillRect(hdc, &rcSplitTop, hbrSplit);
+        }
+
+        // Draw Section 3 Horizontal Splitter Gutter when docked & expanded
+        bool isFloating = (g_hVisualConsistView != NULL && VisualConsistView_IsFloating(g_hVisualConsistView));
+        bool isCollapsed = (g_hVisualConsistView != NULL && VisualConsistView_IsCollapsed(g_hVisualConsistView));
+        if (g_hSplitterSection3 && !isFloating && !isCollapsed)
+        {
+            int splitY = paneY + (rc.bottom - paneY) - g_hSection3Height - 9;
+            RECT rcSplitSec3 = { wLeftPane + 9, splitY, rc.right, splitY + 9 };
+            FillRect(hdc, &rcSplitSec3, hbrSplit);
         }
 
         DeleteObject(hbrSplit);
@@ -6612,7 +6855,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 menuItems.push_back(ContextMenuItem::Action(12, L"\xE75C", L"Clear Clipboard", L"", canInsertUnits));
                 menuItems.push_back(ContextMenuItem::Separator());
                 menuItems.push_back(ContextMenuItem::Action(17, L"\xE946", L"Inspect Unit Specifications (Stock Info)...", L"", hasSelection));
-                // [DISABLED] menuItems.push_back(ContextMenuItem::Action(18, L"\xE7B7", L"View 3D Model in Shape Viewer...", L"", hasSelection));  // Shape viewer removed
+                menuItems.push_back(ContextMenuItem::Action(19, L"\xE7F4", L"Inspect in 3D Visual Studio (Stock Inspector)...", L"", hasSelection));
+                menuItems.push_back(ContextMenuItem::Action(18, L"\xE7B7", L"View 3D Model in Shape Viewer...", L"", hasSelection));
                 menuItems.push_back(ContextMenuItem::Separator());
                 menuItems.push_back(ContextMenuItem::Action(7, L"\xE7A7", L"Undo", L"Ctrl+Z", canUndo));
                 menuItems.push_back(ContextMenuItem::Action(8, L"\xE7A6", L"Redo", L"Ctrl+Y", canRedo));
@@ -6635,7 +6879,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             case 2: ExecuteConsistReplacement(hWnd, SCOPE_SELECTED_ROWS); break;
             case 3: ExecuteConsistReplacement(hWnd, SCOPE_ALL_MATCHING); break;
             case 17: SendMessage(hWnd, WM_COMMANDBAR_ACTION, CMD_ACTION_STOCK_INFO, 0); break;
-            // case 18: SendMessage(hWnd, WM_COMMANDBAR_ACTION, CMD_ACTION_SHAPE_VIEWER, 0); break;  // [DISABLED]
+            case 18: SendMessage(hWnd, WM_COMMANDBAR_ACTION, CMD_ACTION_SHAPE_VIEWER, 0); break;
+            case 19:
+            {
+                std::wstring targetPath = L"";
+                int selConsistUnit = GetSelectedConsistUnitIndex();
+                if (selConsistUnit >= 0 && selConsistUnit < (int)g_LoadedConsistUnits.size())
+                {
+                    const auto& u = g_LoadedConsistUnits[selConsistUnit];
+                    targetPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, u.isEngine ? L".eng" : L".wag");
+                }
+                Show3DVisualStudioDialog(hWnd, targetPath, g_szBasePath);
+                break;
+            }
             case 14:
             {
                 if (g_ActiveTab == 1)
@@ -6820,7 +7076,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 ContextMenuItem::Action(12, L"\xE75C", L"Clear Clipboard", L"", canInsertUnits),
                 ContextMenuItem::Separator(),
                 ContextMenuItem::Action(17, L"\xE946", L"Inspect Stock Specifications (Stock Info)...", L"", hasStockSel),
-                // [DISABLED] ContextMenuItem::Action(18, L"\xE7B7", L"View 3D Model in Shape Viewer...", L"", hasStockSel)  // Shape viewer removed
+                ContextMenuItem::Action(19, L"\xE7F4", L"Inspect in 3D Visual Studio (Stock Inspector)...", L"", hasStockSel),
+                ContextMenuItem::Action(18, L"\xE7B7", L"View 3D Model in Shape Viewer...", L"", hasStockSel)
             };
 
             int cmd = ModernContextMenu::Show(hWnd, screenX, screenY, menuItems, TRUE);
@@ -6835,7 +7092,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             case 11: ShowClipboardContents(hWnd); break;
             case 12: ClearClipboard(hWnd); break;
             case 17: SendMessage(hWnd, WM_COMMANDBAR_ACTION, CMD_ACTION_STOCK_INFO, 0); break;
-            // case 18: SendMessage(hWnd, WM_COMMANDBAR_ACTION, CMD_ACTION_SHAPE_VIEWER, 0); break;  // [DISABLED]
+            case 18: SendMessage(hWnd, WM_COMMANDBAR_ACTION, CMD_ACTION_SHAPE_VIEWER, 0); break;
+            case 19:
+            {
+                std::wstring targetPath = L"";
+                if (hasStockSel)
+                {
+                    const auto& u = selectedStock[0];
+                    targetPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, u.isEngine ? L".eng" : L".wag");
+                }
+                Show3DVisualStudioDialog(hWnd, targetPath, g_szBasePath);
+                break;
+            }
             }
             return 0;
         }
@@ -6967,6 +7235,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                             PushUndoState(L"Toggle Orientation");
                             g_LoadedConsistUnits[originalIndex].isFlipped = !g_LoadedConsistUnits[originalIndex].isFlipped;
                             RefreshEditorUnitList();
+                            if (g_hVisualConsistView)
+                            {
+                                VisualConsistView_SetUnits(g_hVisualConsistView, g_LoadedConsistUnits, g_szBasePath);
+                            }
                             SaveCurrentConsist(hWnd);
                         }
                     }
@@ -7116,6 +7388,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_hWatcherThread = NULL;
         }
 
+        LOG_INFO("Train Sim Consist Builder session terminated gracefully.");
         PostQuitMessage(0);
         break;
 

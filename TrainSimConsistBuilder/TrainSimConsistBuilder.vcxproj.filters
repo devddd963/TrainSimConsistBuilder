@@ -96,7 +96,10 @@
     <ClInclude Include="UI\StockInfoDlg.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="SRC\ShapeDecoder.h">
+    <ClInclude Include="SRC\TextureLoader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SRC\ShapeReader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UI\3D-VisualStudio.h">
@@ -209,7 +212,10 @@
     <ClCompile Include="UI\StockInfoDlg.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="SRC\ShapeDecoder.cpp">
+    <ClCompile Include="SRC\TextureLoader.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SRC\ShapeReader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UI\3D-VisualStudio.cpp">

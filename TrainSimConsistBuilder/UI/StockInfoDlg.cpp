@@ -1,5 +1,6 @@
 #include "StockInfoDlg.h"
 #include "CustomScrollBar.h"
+#include "CustomTitleBar.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <sstream>
@@ -50,6 +51,7 @@ struct StockInfoDialogState
 {
     HWND hWnd = NULL;
     HWND hParent = NULL;
+    HWND hTitleBar = NULL;
     StockSpecReader::StockSpec spec;
     std::wstring basePath;
     std::vector<SectionCard> cards;
@@ -73,13 +75,10 @@ struct StockInfoDialogState
     // Buttons
     RECT rcBtnCopy = { 0 };
     RECT rcBtnClose = { 0 };
-    RECT rcBtnTopClose = { 0 };
     bool isHoverCopy = false;
     bool isPressCopy = false;
     bool isHoverClose = false;
     bool isPressClose = false;
-    bool isHoverTopClose = false;
-    bool isPressTopClose = false;
 
     // Interactive Row Hover & Toast Tooltip
     std::wstring hoveredLabel;
@@ -90,10 +89,6 @@ struct StockInfoDialogState
     // Active Toast message
     std::wstring toastMessage;
     DWORD toastExpireTick = 0;
-
-    bool isDraggingWindow = false;
-    POINT dragStartCursor = { 0 };
-    POINT dragStartWindow = { 0 };
 };
 
 static HFONT CreateDpiFont(int pointSize, int weight, const wchar_t* faceName)
@@ -405,13 +400,15 @@ static bool HitTestRow(StockInfoDialogState* pState, int clientW, int clientH, P
 {
     if (!pState) return false;
     int dpi = GetDpiForSystem();
-    int headerH = MulDiv(58, dpi, 96);
+    int ribbonY = 66;
+    int ribbonH = MulDiv(46, dpi, 96);
+    int topOffset = ribbonY + ribbonH;
     int footerH = MulDiv(52, dpi, 96);
     int padX = MulDiv(18, dpi, 96);
 
-    if (pt.y <= headerH || pt.y >= clientH - footerH) return false;
+    if (pt.y <= topOffset || pt.y >= clientH - footerH) return false;
 
-    int contentY = headerH + MulDiv(14, dpi, 96) - pState->scrollOffsetY;
+    int contentY = topOffset + MulDiv(14, dpi, 96) - pState->scrollOffsetY;
     int cardMarginY = MulDiv(12, dpi, 96);
     int cardWidth = clientW - padX * 2 - (pState->scrollBar.IsVisible() ? MulDiv(14, dpi, 96) : 0);
     int rowH = MulDiv(22, dpi, 96);
@@ -422,7 +419,7 @@ static bool HitTestRow(StockInfoDialogState* pState, int clientW, int clientH, P
         int rowsH = (int)card.rows.size() * rowH + MulDiv(14, dpi, 96);
         int cardH = cardHeaderH + rowsH;
 
-        if (contentY + cardH >= headerH && contentY <= clientH - footerH)
+        if (contentY + cardH >= topOffset && contentY <= clientH - footerH)
         {
             int rowY = contentY + cardHeaderH + MulDiv(8, dpi, 96);
             for (const auto& row : card.rows)
@@ -604,6 +601,41 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
 
     switch (uMsg)
     {
+    case WM_NCHITTEST:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ScreenToClient(hWnd, &pt);
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+
+        if (!IsZoomed(hWnd))
+        {
+            int b = 6;
+            if (pt.y < b && pt.x < b) return HTTOPLEFT;
+            if (pt.y < b && pt.x >= rcClient.right - b) return HTTOPRIGHT;
+            if (pt.y >= rcClient.bottom - b && pt.x < b) return HTBOTTOMLEFT;
+            if (pt.y >= rcClient.bottom - b && pt.x >= rcClient.right - b) return HTBOTTOMRIGHT;
+            if (pt.y < b) return HTTOP;
+            if (pt.y >= rcClient.bottom - b) return HTBOTTOM;
+            if (pt.x < b) return HTLEFT;
+            if (pt.x >= rcClient.right - b) return HTRIGHT;
+        }
+
+        if (pt.y >= 0 && pt.y < 66)
+        {
+            if (pState && pState->hTitleBar && IsWindow(pState->hTitleBar))
+            {
+                LRESULT hit = SendMessageW(pState->hTitleBar, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y));
+                if (hit == HTTRANSPARENT)
+                {
+                    return HTCAPTION;
+                }
+            }
+        }
+
+        return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    }
+
     case WM_NCCALCSIZE:
         if (wParam) return 0;
         break;
@@ -644,8 +676,53 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         pState->scrollBar.SetThumbColor(RGB(80, 80, 80), RGB(120, 120, 120), RGB(160, 160, 160));
         pState->scrollBar.SetGutterColor(StockInfoTheme::Background);
 
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+        int w = rcClient.right > 0 ? rcClient.right : 880;
+
+        std::vector<TitleBarTabItem> stockTabs = {
+            { L"\xE946", L"STOCK INFO" }
+        };
+
+        pState->hTitleBar = CreateCustomTitleBarEx(
+            hWnd,
+            GetModuleHandleW(NULL),
+            0, 0, w, 66,
+            10001,
+            L"Stock Specification Inspector - TrainSim Consist Builder",
+            stockTabs
+        );
+
+        if (pState->hTitleBar)
+        {
+            CustomTitleBar_SetDarkMode(pState->hTitleBar, TRUE);
+            CustomTitleBar_SetCloseOnly(pState->hTitleBar, TRUE);
+            CustomTitleBar_SetActiveTab(pState->hTitleBar, 0);
+            SendMessage(pState->hTitleBar, WM_SIZE, SIZE_RESTORED, MAKELPARAM(w, 66));
+            RedrawWindow(pState->hTitleBar, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+        }
+
         return 0;
     }
+
+    case WM_SIZE:
+    {
+        if (pState)
+        {
+            int w = LOWORD(lParam);
+            int h = HIWORD(lParam);
+            if (pState->hTitleBar && IsWindow(pState->hTitleBar))
+            {
+                SetWindowPos(pState->hTitleBar, NULL, 0, 0, w, 66, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOCOPYBITS);
+                InvalidateRect(pState->hTitleBar, NULL, FALSE);
+                UpdateWindow(pState->hTitleBar);
+            }
+            InvalidateRect(hWnd, NULL, FALSE);
+            UpdateWindow(hWnd);
+        }
+        return 0;
+    }
+
     case WM_ERASEBKGND:
         return TRUE;
 
@@ -672,88 +749,108 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         SetBkMode(hMemDC, TRANSPARENT);
 
         int dpi = GetDpiForSystem();
-        int headerH = MulDiv(58, dpi, 96);
+        int ribbonY = 66;
+        int ribbonH = MulDiv(46, dpi, 96);
+        int topOffset = ribbonY + ribbonH;
         int footerH = MulDiv(52, dpi, 96);
         int padX = MulDiv(18, dpi, 96);
 
-        // 2. Top Header Bar
-        RECT rcHeader = { 0, 0, w, headerH };
-        HBRUSH hbrHead = CreateSolidBrush(StockInfoTheme::HeaderBackground);
-        FillRect(hMemDC, &rcHeader, hbrHead);
-        DeleteObject(hbrHead);
+        // 2. Sub-Header Toolbar Ribbon (Y = 66 to topOffset) - Seamlessly merges with the active tab
+        RECT rcRibbon = { 0, ribbonY, w, topOffset };
+        COLORREF tbBg = RGB(52, 22, 27); // Matching active tab color
+        HBRUSH hbrTb = CreateSolidBrush(tbBg);
+        FillRect(hMemDC, &rcRibbon, hbrTb);
+        DeleteObject(hbrTb);
 
-        HPEN hPenHead = CreatePen(PS_SOLID, 1, StockInfoTheme::BorderLine);
-        HPEN hOldPen = (HPEN)SelectObject(hMemDC, hPenHead);
-        MoveToEx(hMemDC, 0, headerH, NULL);
-        LineTo(hMemDC, w, headerH);
-        SelectObject(hMemDC, hOldPen);
-        DeleteObject(hPenHead);
+        // Divider Line Below Toolbar at Y = topOffset (matching tab highlight border)
+        HPEN hPenLine = CreatePen(PS_SOLID, 1, RGB(78, 32, 38));
+        HPEN holdPen = (HPEN)SelectObject(hMemDC, hPenLine);
+        MoveToEx(hMemDC, 0, topOffset, NULL);
+        LineTo(hMemDC, w, topOffset);
+        SelectObject(hMemDC, holdPen);
+        DeleteObject(hPenLine);
 
-        // Header Icon
-        if (pState->hFontIcon)
+        // Unit Display Name & Sub-details in Ribbon
+        if (pState->hFontBold)
         {
-            HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontIcon);
-            SetTextColor(hMemDC, RGB(96, 205, 255));
-            RECT rcIcon = { padX, 0, padX + 28, headerH };
-            DrawTextW(hMemDC, L"\xE946", -1, &rcIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(hMemDC, hOldF);
-        }
-
-        // Header Title & Subtitle
-        if (pState->hFontTitle)
-        {
-            HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontTitle);
+            HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontBold);
             SetTextColor(hMemDC, RGB(255, 255, 255));
-            RECT rcTitle = { padX + 32, MulDiv(10, dpi, 96), w - 80, MulDiv(30, dpi, 96) };
-            DrawTextW(hMemDC, L"Stock Unit Specifications & Diagnostics", -1, &rcTitle, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            std::wstring mainTitle = pState->spec.displayName.empty() ? pState->spec.fileName : pState->spec.displayName;
+            RECT rcName = { padX, ribbonY + MulDiv(4, dpi, 96), w - MulDiv(170, dpi, 96), ribbonY + MulDiv(24, dpi, 96) };
+            DrawTextW(hMemDC, mainTitle.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_PATH_ELLIPSIS);
             SelectObject(hMemDC, hOldF);
         }
 
         if (pState->hFontSubTitle)
         {
             HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontSubTitle);
-            SetTextColor(hMemDC, StockInfoTheme::TextSecondary);
+            SetTextColor(hMemDC, RGB(210, 185, 190));
             std::wstring subStr = pState->spec.fileName + L"  •  " + pState->spec.folderName + L"  •  " + pState->spec.category;
-            RECT rcSub = { padX + 32, MulDiv(32, dpi, 96), w - 80, MulDiv(50, dpi, 96) };
-            DrawTextW(hMemDC, subStr.c_str(), -1, &rcSub, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            RECT rcSub = { padX, ribbonY + MulDiv(22, dpi, 96), w - MulDiv(170, dpi, 96), ribbonY + MulDiv(42, dpi, 96) };
+            DrawTextW(hMemDC, subStr.c_str(), -1, &rcSub, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_PATH_ELLIPSIS);
             SelectObject(hMemDC, hOldF);
         }
 
-        // Top Close X Button (Fluent styled with margins and rounded rect)
-        int closeBtnSize = MulDiv(30, dpi, 96);
-        int closeMarginRight = MulDiv(14, dpi, 96);
-        int closeTop = (headerH - closeBtnSize) / 2;
-        pState->rcBtnTopClose = { w - closeMarginRight - closeBtnSize, closeTop, w - closeMarginRight, closeTop + closeBtnSize };
+        // Status Badge Pill on Right of Ribbon
+        int badgeW = MulDiv(130, dpi, 96);
+        int badgeH = MulDiv(24, dpi, 96);
+        int badgeY = ribbonY + (ribbonH - badgeH) / 2;
+        RECT rcBadge = { w - padX - badgeW, badgeY, w - padX, badgeY + badgeH };
+        bool isValid = pState->spec.fileExistsOnDisk && pState->spec.shapeExistsOnDisk;
+        COLORREF badgeBg = isValid ? RGB(32, 54, 38) : RGB(64, 28, 28);
+        COLORREF badgeBorder = isValid ? RGB(60, 140, 80) : RGB(180, 50, 50);
+        COLORREF badgeText = isValid ? RGB(120, 240, 150) : RGB(255, 120, 120);
 
-        if (pState->isHoverTopClose)
-        {
-            COLORREF bgClose = pState->isPressTopClose ? RGB(160, 30, 30) : RGB(196, 43, 28);
-            HBRUSH hbrClose = CreateSolidBrush(bgClose);
-            HPEN hPenClose = CreatePen(PS_SOLID, 1, bgClose);
-            HBRUSH hOldB = (HBRUSH)SelectObject(hMemDC, hbrClose);
-            HPEN hOldP = (HPEN)SelectObject(hMemDC, hPenClose);
-            RoundRect(hMemDC, pState->rcBtnTopClose.left, pState->rcBtnTopClose.top, pState->rcBtnTopClose.right, pState->rcBtnTopClose.bottom, 6, 6);
-            SelectObject(hMemDC, hOldB);
-            SelectObject(hMemDC, hOldP);
-            DeleteObject(hbrClose);
-            DeleteObject(hPenClose);
-        }
+        HBRUSH hbrBadge = CreateSolidBrush(badgeBg);
+        HPEN hPenBadge = CreatePen(PS_SOLID, 1, badgeBorder);
+        HBRUSH hOldB2 = (HBRUSH)SelectObject(hMemDC, hbrBadge);
+        HPEN hOldP2 = (HPEN)SelectObject(hMemDC, hPenBadge);
+        RoundRect(hMemDC, rcBadge.left, rcBadge.top, rcBadge.right, rcBadge.bottom, 6, 6);
+        SelectObject(hMemDC, hOldB2);
+        SelectObject(hMemDC, hOldP2);
+        DeleteObject(hbrBadge);
+        DeleteObject(hPenBadge);
 
-        if (pState->hFontIconSmall)
+        if (pState->hFontMain)
         {
-            HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontIconSmall);
-            SetTextColor(hMemDC, pState->isHoverTopClose ? RGB(255, 255, 255) : StockInfoTheme::TextSecondary);
-            DrawTextW(hMemDC, L"\xE711", -1, &pState->rcBtnTopClose, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontMain);
+            SetTextColor(hMemDC, badgeText);
+
+            const wchar_t* badgeTextStr = isValid ? L"READY / VALID" : L"MISSING ASSET";
+            SIZE textSz = { 0 };
+            GetTextExtentPoint32W(hMemDC, badgeTextStr, (int)wcslen(badgeTextStr), &textSz);
+
+            int dotRadius = MulDiv(3, dpi, 96);
+            int dotGap = MulDiv(6, dpi, 96);
+            int totalContentW = (dotRadius * 2) + dotGap + textSz.cx;
+            int startX = rcBadge.left + (badgeW - totalContentW) / 2;
+            int centerY = (rcBadge.top + rcBadge.bottom) / 2;
+
+            // Draw status dot
+            HBRUSH hDotBr = CreateSolidBrush(badgeText);
+            HPEN hDotPen = CreatePen(PS_SOLID, 1, badgeText);
+            HBRUSH hOldB3 = (HBRUSH)SelectObject(hMemDC, hDotBr);
+            HPEN hOldP3 = (HPEN)SelectObject(hMemDC, hDotPen);
+            int dotCX = startX + dotRadius;
+            Ellipse(hMemDC, dotCX - dotRadius, centerY - dotRadius, dotCX + dotRadius + 1, centerY + dotRadius + 1);
+            SelectObject(hMemDC, hOldB3);
+            SelectObject(hMemDC, hOldP3);
+            DeleteObject(hDotBr);
+            DeleteObject(hDotPen);
+
+            // Draw text
+            RECT rcText = { startX + (dotRadius * 2) + dotGap, rcBadge.top, rcBadge.right, rcBadge.bottom };
+            DrawTextW(hMemDC, badgeTextStr, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject(hMemDC, hOldF);
         }
 
         // 3. Scrollable Cards Body
-        int contentY = headerH + MulDiv(14, dpi, 96) - pState->scrollOffsetY;
+        int contentY = topOffset + MulDiv(14, dpi, 96) - pState->scrollOffsetY;
         int cardMarginY = MulDiv(12, dpi, 96);
         int cardWidth = w - padX * 2 - (pState->scrollBar.IsVisible() ? MulDiv(14, dpi, 96) : 0);
 
         // Clip Content Area between Header and Footer
-        HRGN hRgnClip = CreateRectRgn(0, headerH + 1, w, h - footerH);
+        HRGN hRgnClip = CreateRectRgn(0, topOffset + 1, w, h - footerH);
         SelectClipRgn(hMemDC, hRgnClip);
 
         int totalCalcH = MulDiv(14, dpi, 96);
@@ -766,7 +863,7 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             card.calculatedHeight = cardH;
 
             RECT rcCard = { padX, contentY, padX + cardWidth, contentY + cardH };
-            if (rcCard.bottom >= headerH && rcCard.top <= h - footerH)
+            if (rcCard.bottom >= topOffset && rcCard.top <= h - footerH)
             {
                 DrawCard(hMemDC, rcCard, card, pState);
             }
@@ -782,8 +879,8 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         DeleteObject(hRgnClip);
 
         // 4. Custom Scrollbar
-        int viewAreaH = h - headerH - footerH;
-        RECT rcScrollBounds = { w - MulDiv(12, dpi, 96), headerH + 1, w - 2, h - footerH };
+        int viewAreaH = h - topOffset - footerH;
+        RECT rcScrollBounds = { w - MulDiv(12, dpi, 96), topOffset + 1, w - 2, h - footerH };
         pState->scrollBar.SetBounds(rcScrollBounds);
         pState->scrollBar.SetRange(0, pState->totalContentHeight, viewAreaH);
         pState->scrollBar.SetVisible(pState->totalContentHeight > viewAreaH);
@@ -917,16 +1014,6 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         int y = GET_Y_LPARAM(lParam);
         POINT pt = { x, y };
 
-        if (pState->isDraggingWindow)
-        {
-            POINT ptScreen;
-            GetCursorPos(&ptScreen);
-            int newX = pState->dragStartWindow.x + (ptScreen.x - pState->dragStartCursor.x);
-            int newY = pState->dragStartWindow.y + (ptScreen.y - pState->dragStartCursor.y);
-            SetWindowPos(hWnd, NULL, newX, newY, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
-            return 0;
-        }
-
         bool needRedraw = false;
 
         // Custom Scrollbar hover & drag
@@ -941,13 +1028,11 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
 
         bool hCopy = PtInRect(&pState->rcBtnCopy, pt);
         bool hClose = PtInRect(&pState->rcBtnClose, pt);
-        bool hTopClose = PtInRect(&pState->rcBtnTopClose, pt);
 
-        if (hCopy != pState->isHoverCopy || hClose != pState->isHoverClose || hTopClose != pState->isHoverTopClose)
+        if (hCopy != pState->isHoverCopy || hClose != pState->isHoverClose)
         {
             pState->isHoverCopy = hCopy;
             pState->isHoverClose = hClose;
-            pState->isHoverTopClose = hTopClose;
             needRedraw = true;
         }
 
@@ -980,7 +1065,6 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         {
             pState->isHoverCopy = false;
             pState->isHoverClose = false;
-            pState->isHoverTopClose = false;
             pState->isHoveringAnyRow = false;
             pState->isHoveringTruncatedRow = false;
             pState->hoveredValue.clear();
@@ -1018,13 +1102,6 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
-        if (PtInRect(&pState->rcBtnTopClose, pt))
-        {
-            pState->isPressTopClose = true;
-            SetCapture(hWnd);
-            InvalidateRect(hWnd, NULL, FALSE);
-            return 0;
-        }
 
         // Clicking a row copies its full text
         RECT rcClient;
@@ -1055,18 +1132,6 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             return 0;
         }
 
-        // Click on Header area initiates window dragging (excluding close button)
-        int dpi = GetDpiForSystem();
-        int headerH = MulDiv(58, dpi, 96);
-        if (y < headerH && !PtInRect(&pState->rcBtnTopClose, pt))
-        {
-            pState->isDraggingWindow = true;
-            GetCursorPos(&pState->dragStartCursor);
-            RECT rcWnd;
-            GetWindowRect(hWnd, &rcWnd);
-            pState->dragStartWindow = { rcWnd.left, rcWnd.top };
-            SetCapture(hWnd);
-        }
         return 0;
     }
     case WM_LBUTTONUP:
@@ -1075,13 +1140,6 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         int x = GET_X_LPARAM(lParam);
         int y = GET_Y_LPARAM(lParam);
         POINT pt = { x, y };
-
-        if (pState->isDraggingWindow)
-        {
-            pState->isDraggingWindow = false;
-            ReleaseCapture();
-            return 0;
-        }
 
         if (pState->scrollBar.IsVisible() && pState->scrollBar.OnLButtonUp(pt, hWnd))
         {
@@ -1123,20 +1181,6 @@ static LRESULT CALLBACK StockInfoWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             pState->isPressClose = false;
             ReleaseCapture();
             if (PtInRect(&pState->rcBtnClose, pt))
-            {
-                RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
-                DestroyWindow(hWnd);
-                return 0;
-            }
-            InvalidateRect(hWnd, NULL, FALSE);
-            return 0;
-        }
-
-        if (pState->isPressTopClose)
-        {
-            pState->isPressTopClose = false;
-            ReleaseCapture();
-            if (PtInRect(&pState->rcBtnTopClose, pt))
             {
                 RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
                 DestroyWindow(hWnd);
@@ -1232,7 +1276,7 @@ void ShowStockInfoDialog(HWND hWndParent, const std::wstring& filePath, const st
     if (!s_ClassRegistered)
     {
         WNDCLASSEXW wcex = { sizeof(WNDCLASSEXW) };
-        wcex.style = CS_HREDRAW | CS_VREDRAW;
+        wcex.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
         wcex.lpfnWndProc = StockInfoWndProc;
         wcex.hInstance = hInstance;
         wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
@@ -1264,10 +1308,10 @@ void ShowStockInfoDialog(HWND hWndParent, const std::wstring& filePath, const st
     int y = rcParent.top + (rcParent.bottom - rcParent.top - height) / 2;
 
     HWND hWnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        0,
         L"StockInfoDialogClass",
-        L"Stock Specification Inspector",
-        WS_POPUP | WS_CLIPCHILDREN,
+        L"Stock Specification Inspector - TrainSim Consist Builder",
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, width, height,
         hWndParent, NULL, hInstance, pState);
 
@@ -1287,6 +1331,9 @@ void ShowStockInfoDialog(HWND hWndParent, const std::wstring& filePath, const st
 
         MARGINS margins = { 0, 0, 0, 0 };
         DwmExtendFrameIntoClientArea(hWnd, &margins);
+
+        SetWindowPos(hWnd, NULL, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
         if (hWndParent && IsWindow(hWndParent))
         {

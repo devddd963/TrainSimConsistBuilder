@@ -214,12 +214,14 @@ namespace
         bool isTab0 = (g_State.activeTab == 0);
         bool isTab1 = (g_State.activeTab == 1);
 
+        int colSplitX = (w - 60) / 2 + 30;
+
         // Custom count edit box (Tab 0: Mutate Consist mode)
         if (g_State.hEditCustomCount)
         {
             if (isTab0 && g_State.countMode == PoolMutator::CountMode::CustomUnitCount)
             {
-                SetWindowPos(g_State.hEditCustomCount, NULL, 238, 301, 54, 18, SWP_NOZORDER | SWP_SHOWWINDOW);
+                SetWindowPos(g_State.hEditCustomCount, NULL, 238, 301, 54, 18, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
             }
             else
             {
@@ -232,7 +234,7 @@ namespace
         {
             if (isTab1)
             {
-                SetWindowPos(g_State.hEditInsertCount, NULL, 148, 222, 54, 18, SWP_NOZORDER | SWP_SHOWWINDOW);
+                SetWindowPos(g_State.hEditInsertCount, NULL, 148, 222, 54, 18, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
             }
             else
             {
@@ -245,7 +247,8 @@ namespace
         {
             if (isTab1 && g_State.posMode == PoolMutator::PositionMode::SpecificIndex)
             {
-                SetWindowPos(g_State.hEditPositionIndex, NULL, 472, 332, 120, 18, SWP_NOZORDER | SWP_SHOWWINDOW);
+                int posX = (std::max)(colSplitX + 10 + 205, 472);
+                SetWindowPos(g_State.hEditPositionIndex, NULL, posX, 332, 110, 18, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
             }
             else
             {
@@ -256,10 +259,10 @@ namespace
         // Clone suffix edit box
         if (g_State.hEditCloneSuffix)
         {
-            SetWindowPos(g_State.hEditCloneSuffix, NULL, 128, h - 89, 154, 18, SWP_NOZORDER | SWP_SHOWWINDOW);
+            SetWindowPos(g_State.hEditCloneSuffix, NULL, 128, h - 89, 154, 18, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
         }
 
-        InvalidateRect(hWnd, NULL, TRUE);
+        InvalidateRect(hWnd, NULL, FALSE);
     }
 
     static void ShowGroupDropdown(HWND hWnd)
@@ -296,7 +299,8 @@ namespace
                     g_State.selectedGroupIndices.push_back((int)k - 1);
                 }
             }
-            InvalidateRect(hWnd, NULL, TRUE);
+            InvalidateRect(hWnd, NULL, FALSE);
+            UpdateWindow(hWnd);
         });
     }
 
@@ -337,7 +341,8 @@ namespace
                     g_State.selectedPresetIndices.push_back((int)k - 1);
                 }
             }
-            InvalidateRect(hWnd, NULL, TRUE);
+            InvalidateRect(hWnd, NULL, FALSE);
+            UpdateWindow(hWnd);
         });
     }
 
@@ -371,7 +376,8 @@ namespace
                     g_State.selectedPoolIndices.push_back((int)i);
                 }
             }
-            InvalidateRect(hWnd, NULL, TRUE);
+            InvalidateRect(hWnd, NULL, FALSE);
+            UpdateWindow(hWnd);
         }
     }
 
@@ -407,7 +413,8 @@ namespace
                     g_State.selectedPoolIndices.push_back((int)k - 1);
                 }
             }
-            InvalidateRect(hWnd, NULL, TRUE);
+            InvalidateRect(hWnd, NULL, FALSE);
+            UpdateWindow(hWnd);
         });
     }
 
@@ -726,11 +733,13 @@ namespace
             int h = HIWORD(lParam);
             if (g_State.hTitleBar && IsWindow(g_State.hTitleBar))
             {
-                SetWindowPos(g_State.hTitleBar, NULL, 0, 0, w, 66, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-                InvalidateRect(g_State.hTitleBar, NULL, TRUE);
+                SetWindowPos(g_State.hTitleBar, NULL, 0, 0, w, 66, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOCOPYBITS);
+                InvalidateRect(g_State.hTitleBar, NULL, FALSE);
+                UpdateWindow(g_State.hTitleBar);
             }
             UpdateControlPositions(hWnd);
             InvalidateRect(hWnd, NULL, FALSE);
+            UpdateWindow(hWnd);
             return 0;
         }
 
@@ -1174,24 +1183,29 @@ namespace
                 }
             }
 
-            int statusW = 340;
             SelectObject(hmemDC, g_State.hFontBold);
+            SIZE sumSz = { 0 };
+            GetTextExtentPoint32W(hmemDC, targetSummary.c_str(), (int)targetSummary.length(), &sumSz);
+            int statusW = (std::max)(180, (int)sumSz.cx + 10);
+            if (statusW > rcClient.right - 180) statusW = rcClient.right - 180;
+
+            RECT rcStatus = { rcClient.right - statusW - 20, toolbarY, rcClient.right - 20, toolbarY + toolbarH };
+            RECT rcTitle = { 46, toolbarY + 5, rcStatus.left - 12, toolbarY + 24 };
+            RECT rcSub = { 46, toolbarY + 24, rcStatus.left - 12, toolbarY + 42 };
+
             SetTextColor(hmemDC, textPrimary);
-            RECT rcTitle = { 46, toolbarY + 5, rcClient.right - statusW - 20, toolbarY + 24 };
             const wchar_t* tabTitle = (g_State.activeTab == 0) ? L"Whole Consist Pool Overhaul / Mutation" : L"Position-Based Unit Injection";
-            DrawTextW(hmemDC, tabTitle, -1, &rcTitle, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(hmemDC, tabTitle, -1, &rcTitle, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             SelectObject(hmemDC, g_State.hFontSmall);
             SetTextColor(hmemDC, textSecondary);
-            RECT rcSub = { 46, toolbarY + 24, rcClient.right - statusW - 20, toolbarY + 42 };
             const wchar_t* tabSub = (g_State.activeTab == 0) ? L"Regenerate and vary entire consist file(s) drawn from selected Pool Preset" : L"Inject new units into consist file(s) at Head, Behind Locos, Tail, or Specific Index";
-            DrawTextW(hmemDC, tabSub, -1, &rcSub, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(hmemDC, tabSub, -1, &rcSub, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             // Right-aligned status: Target context summary
             SelectObject(hmemDC, g_State.hFontBold);
             SetTextColor(hmemDC, accentCol);
-            RECT rcStatus = { rcClient.right - statusW - 20, toolbarY, rcClient.right - 20, toolbarY + toolbarH };
-            DrawTextW(hmemDC, targetSummary.c_str(), -1, &rcStatus, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(hmemDC, targetSummary.c_str(), -1, &rcStatus, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             // =========================================================================
             // TAB 0: MUTATE CONSIST
@@ -1320,8 +1334,10 @@ namespace
                 RECT rcHeaderCount = { 30, 226, rcClient.right - 30, 246 };
                 DrawTextW(hmemDC, L"Unit Count Mode for Consist Overhaul:", -1, &rcHeaderCount, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
 
+                int colSplitX = (rcClient.right - 60) / 2 + 30;
+
                 // Count 0: Keep Original
-                g_State.rcRadioCount0 = { 30, 254, 250, 282 };
+                g_State.rcRadioCount0 = { 30, 254, colSplitX - 10, 282 };
                 bool isC0 = (g_State.countMode == PoolMutator::CountMode::KeepOriginalCount);
                 RECT rcCCount0 = { 34, 260, 48, 274 };
                 HBRUSH hbrC0 = CreateSolidBrush(cardBgCol);
@@ -1332,13 +1348,13 @@ namespace
                 if (isC0) { HBRUSH hbrDot = CreateSolidBrush(accentCol); SelectObject(hmemDC, hbrDot); Ellipse(hmemDC, rcCCount0.left + 3, rcCCount0.top + 3, rcCCount0.right - 3, rcCCount0.bottom - 3); DeleteObject(hbrDot); }
                 SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP); DeleteObject(hbrC0); DeleteObject(hpenC0);
                 SelectObject(hmemDC, g_State.hFontMain);
-                RECT rcCText0 = { 56, 254, 250, 282 };
+                RECT rcCText0 = { 56, 254, colSplitX - 10, 282 };
                 DrawTextW(hmemDC, L"Keep Original Unit Count", -1, &rcCText0, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                 // Count 1: Dynamic Pool Rules
-                g_State.rcRadioCount1 = { 260, 254, 520, 282 };
+                g_State.rcRadioCount1 = { colSplitX + 10, 254, rcClient.right - 30, 282 };
                 bool isC1 = (g_State.countMode == PoolMutator::CountMode::DynamicPoolRules);
-                RECT rcCCount1 = { 264, 260, 278, 274 };
+                RECT rcCCount1 = { colSplitX + 14, 260, colSplitX + 28, 274 };
                 HBRUSH hbrC1 = CreateSolidBrush(cardBgCol);
                 HPEN hpenC1 = CreatePen(PS_SOLID, 1, isC1 ? accentCol : borderCol);
                 hOldB = (HBRUSH)SelectObject(hmemDC, hbrC1);
@@ -1346,7 +1362,7 @@ namespace
                 Ellipse(hmemDC, rcCCount1.left, rcCCount1.top, rcCCount1.right, rcCCount1.bottom);
                 if (isC1) { HBRUSH hbrDot = CreateSolidBrush(accentCol); SelectObject(hmemDC, hbrDot); Ellipse(hmemDC, rcCCount1.left + 3, rcCCount1.top + 3, rcCCount1.right - 3, rcCCount1.bottom - 3); DeleteObject(hbrDot); }
                 SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP); DeleteObject(hbrC1); DeleteObject(hpenC1);
-                RECT rcCText1 = { 286, 254, 520, 282 };
+                RECT rcCText1 = { colSplitX + 36, 254, rcClient.right - 30, 282 };
                 DrawTextW(hmemDC, L"Dynamic (Use Pool Min/Max Rules)", -1, &rcCText1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                 // Count 2: Custom Count
@@ -1381,6 +1397,8 @@ namespace
             // =========================================================================
             else
             {
+                int colSplitX = (rcClient.right - 60) / 2 + 30;
+
                 SelectObject(hmemDC, g_State.hFontBold);
                 SetTextColor(hmemDC, textPrimary);
 
@@ -1388,7 +1406,7 @@ namespace
                 DrawTextW(hmemDC, L"Select Insertion Source:", -1, &rcHeaderSrc, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
 
                 // Source Radios: Favourite Group vs Pool Preset
-                g_State.rcRadioInsertSrc0 = { 30, 148, 240, 174 };
+                g_State.rcRadioInsertSrc0 = { 30, 148, colSplitX - 10, 174 };
                 bool isSrc0 = (g_State.insertSource == PoolMutator::InsertSource::FavouriteGroup);
                 RECT rcCSrc0 = { 34, 154, 48, 168 };
                 HBRUSH hbrSrc0 = CreateSolidBrush(cardBgCol);
@@ -1399,12 +1417,12 @@ namespace
                 if (isSrc0) { HBRUSH hbrDot = CreateSolidBrush(accentCol); SelectObject(hmemDC, hbrDot); Ellipse(hmemDC, rcCSrc0.left + 3, rcCSrc0.top + 3, rcCSrc0.right - 3, rcCSrc0.bottom - 3); DeleteObject(hbrDot); }
                 SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP); DeleteObject(hbrSrc0); DeleteObject(hpenSrc0);
                 SelectObject(hmemDC, g_State.hFontMain);
-                RECT rcSText0 = { 56, 148, 240, 174 };
+                RECT rcSText0 = { 56, 148, colSplitX - 10, 174 };
                 DrawTextW(hmemDC, L"Favourite Unit Group", -1, &rcSText0, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-                g_State.rcRadioInsertSrc1 = { 250, 148, 480, 174 };
+                g_State.rcRadioInsertSrc1 = { colSplitX + 10, 148, rcClient.right - 30, 174 };
                 bool isSrc1 = (g_State.insertSource == PoolMutator::InsertSource::PoolPreset);
-                RECT rcCSrc1 = { 254, 154, 268, 168 };
+                RECT rcCSrc1 = { colSplitX + 14, 154, colSplitX + 28, 168 };
                 HBRUSH hbrSrc1 = CreateSolidBrush(cardBgCol);
                 HPEN hpenSrc1 = CreatePen(PS_SOLID, 1, isSrc1 ? accentCol : borderCol);
                 hOldB = (HBRUSH)SelectObject(hmemDC, hbrSrc1);
@@ -1412,7 +1430,7 @@ namespace
                 Ellipse(hmemDC, rcCSrc1.left, rcCSrc1.top, rcCSrc1.right, rcCSrc1.bottom);
                 if (isSrc1) { HBRUSH hbrDot = CreateSolidBrush(accentCol); SelectObject(hmemDC, hbrDot); Ellipse(hmemDC, rcCSrc1.left + 3, rcCSrc1.top + 3, rcCSrc1.right - 3, rcCSrc1.bottom - 3); DeleteObject(hbrDot); }
                 SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP); DeleteObject(hbrSrc1); DeleteObject(hpenSrc1);
-                RECT rcSText1 = { 276, 148, 480, 174 };
+                RECT rcSText1 = { colSplitX + 36, 148, rcClient.right - 30, 174 };
                 DrawTextW(hmemDC, L"Pool Preset Rules", -1, &rcSText1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                 // Dropdown Row
@@ -1587,7 +1605,7 @@ namespace
                 DrawTextW(hmemDC, L"Select Insertion Position:", -1, &rcHeaderPos, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
 
                 // Pos 0: Head
-                g_State.rcRadioPos0 = { 30, 290, 250, 318 };
+                g_State.rcRadioPos0 = { 30, 290, colSplitX - 10, 318 };
                 bool isP0 = (g_State.posMode == PoolMutator::PositionMode::HeadPosition);
                 RECT rcCPos0 = { 34, 296, 48, 310 };
                 HBRUSH hbrP0 = CreateSolidBrush(cardBgCol);
@@ -1598,13 +1616,13 @@ namespace
                 if (isP0) { HBRUSH hbrDot = CreateSolidBrush(accentCol); SelectObject(hmemDC, hbrDot); Ellipse(hmemDC, rcCPos0.left + 3, rcCPos0.top + 3, rcCPos0.right - 3, rcCPos0.bottom - 3); DeleteObject(hbrDot); }
                 SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP); DeleteObject(hbrP0); DeleteObject(hpenP0);
                 SelectObject(hmemDC, g_State.hFontMain);
-                RECT rcPText0 = { 56, 290, 250, 318 };
+                RECT rcPText0 = { 56, 290, colSplitX - 10, 318 };
                 DrawTextW(hmemDC, L"Head (Front of Consist)", -1, &rcPText0, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                 // Pos 1: Behind Engines
-                g_State.rcRadioPos1 = { 260, 290, 530, 318 };
+                g_State.rcRadioPos1 = { colSplitX + 10, 290, rcClient.right - 30, 318 };
                 bool isP1 = (g_State.posMode == PoolMutator::PositionMode::BehindEngines);
-                RECT rcCPos1 = { 264, 296, 278, 310 };
+                RECT rcCPos1 = { colSplitX + 14, 296, colSplitX + 28, 310 };
                 HBRUSH hbrP1 = CreateSolidBrush(cardBgCol);
                 HPEN hpenP1 = CreatePen(PS_SOLID, 1, isP1 ? accentCol : borderCol);
                 hOldB = (HBRUSH)SelectObject(hmemDC, hbrP1);
@@ -1612,11 +1630,11 @@ namespace
                 Ellipse(hmemDC, rcCPos1.left, rcCPos1.top, rcCPos1.right, rcCPos1.bottom);
                 if (isP1) { HBRUSH hbrDot = CreateSolidBrush(accentCol); SelectObject(hmemDC, hbrDot); Ellipse(hmemDC, rcCPos1.left + 3, rcCPos1.top + 3, rcCPos1.right - 3, rcCPos1.bottom - 3); DeleteObject(hbrDot); }
                 SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP); DeleteObject(hbrP1); DeleteObject(hpenP1);
-                RECT rcPText1 = { 286, 290, 530, 318 };
+                RECT rcPText1 = { colSplitX + 36, 290, rcClient.right - 30, 318 };
                 DrawTextW(hmemDC, L"Behind Lead Locomotives", -1, &rcPText1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                 // Pos 3: Tail
-                g_State.rcRadioPos3 = { 30, 326, 250, 354 };
+                g_State.rcRadioPos3 = { 30, 326, colSplitX - 10, 354 };
                 bool isP3 = (g_State.posMode == PoolMutator::PositionMode::TailPosition);
                 RECT rcCPos3 = { 34, 332, 48, 346 };
                 HBRUSH hbrP3 = CreateSolidBrush(cardBgCol);
@@ -1626,13 +1644,14 @@ namespace
                 Ellipse(hmemDC, rcCPos3.left, rcCPos3.top, rcCPos3.right, rcCPos3.bottom);
                 if (isP3) { HBRUSH hbrDot = CreateSolidBrush(accentCol); SelectObject(hmemDC, hbrDot); Ellipse(hmemDC, rcCPos3.left + 3, rcCPos3.top + 3, rcCPos3.right - 3, rcCPos3.bottom - 3); DeleteObject(hbrDot); }
                 SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP); DeleteObject(hbrP3); DeleteObject(hpenP3);
-                RECT rcPText3 = { 56, 326, 250, 354 };
+                RECT rcPText3 = { 56, 326, colSplitX - 10, 354 };
                 DrawTextW(hmemDC, L"Tail (End of Consist)", -1, &rcPText3, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                 // Pos 2: Specific Index
-                g_State.rcRadioPos2 = { 260, 326, 465, 354 };
+                int posBoxX = (std::max)(colSplitX + 10 + 205, 472);
+                g_State.rcRadioPos2 = { colSplitX + 10, 326, posBoxX + 115, 354 };
                 bool isP2 = (g_State.posMode == PoolMutator::PositionMode::SpecificIndex);
-                RECT rcCPos2 = { 264, 332, 278, 346 };
+                RECT rcCPos2 = { colSplitX + 14, 332, colSplitX + 28, 346 };
                 HBRUSH hbrP2 = CreateSolidBrush(cardBgCol);
                 HPEN hpenP2 = CreatePen(PS_SOLID, 1, isP2 ? accentCol : borderCol);
                 hOldB = (HBRUSH)SelectObject(hmemDC, hbrP2);
@@ -1640,7 +1659,7 @@ namespace
                 Ellipse(hmemDC, rcCPos2.left, rcCPos2.top, rcCPos2.right, rcCPos2.bottom);
                 if (isP2) { HBRUSH hbrDot = CreateSolidBrush(accentCol); SelectObject(hmemDC, hbrDot); Ellipse(hmemDC, rcCPos2.left + 3, rcCPos2.top + 3, rcCPos2.right - 3, rcCPos2.bottom - 3); DeleteObject(hbrDot); }
                 SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP); DeleteObject(hbrP2); DeleteObject(hpenP2);
-                RECT rcPText2 = { 286, 326, 465, 354 };
+                RECT rcPText2 = { colSplitX + 36, 326, colSplitX + 210, 354 };
                 DrawTextW(hmemDC, L"At Specific Index / Indices:", -1, &rcPText2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                 if (isP2)
@@ -1649,7 +1668,7 @@ namespace
                     HPEN hPosPen = CreatePen(PS_SOLID, 1, borderCol);
                     HBRUSH holdBPos = (HBRUSH)SelectObject(hmemDC, hPosBg);
                     HPEN holdPosP = (HPEN)SelectObject(hmemDC, hPosPen);
-                    RoundRect(hmemDC, 469, 328, 595, 354, 4, 4);
+                    RoundRect(hmemDC, posBoxX - 3, 328, posBoxX + 115, 354, 4, 4);
                     SelectObject(hmemDC, holdBPos);
                     SelectObject(hmemDC, holdPosP);
                     DeleteObject(hPosBg);
@@ -1657,7 +1676,7 @@ namespace
 
                     SelectObject(hmemDC, g_State.hFontSmall);
                     SetTextColor(hmemDC, textSecondary);
-                    RECT rcHintIdx = { 605, 326, rcClient.right - 30, 354 };
+                    RECT rcHintIdx = { posBoxX + 122, 326, rcClient.right - 30, 354 };
                     DrawTextW(hmemDC, L"(e.g. 1; 5; 10)", -1, &rcHintIdx, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
                 }
             }
@@ -1858,11 +1877,11 @@ void ShowPoolMutatorDialog(
     const wchar_t* szClassName = L"PoolMutatorDlgClass";
     WNDCLASSEXW wcex = { 0 };
     wcex.cbSize = sizeof(WNDCLASSEX);
-    wcex.style = CS_HREDRAW | CS_VREDRAW;
+    wcex.style = CS_DBLCLKS;
     wcex.lpfnWndProc = PoolMutatorDlgProc;
     wcex.hInstance = GetModuleHandle(NULL);
     wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wcex.hbrBackground = CreateSolidBrush(PoolTheme::GutterBackground);
+    wcex.hbrBackground = NULL;
     wcex.lpszClassName = szClassName;
 
     RegisterClassExW(&wcex);
@@ -1921,9 +1940,9 @@ void ShowPoolMutatorDialog(
     if (g_State.hTitleBar && IsWindow(g_State.hTitleBar))
     {
         SetWindowPos(g_State.hTitleBar, NULL, 0, 0, clientW, 66, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        RedrawWindow(g_State.hTitleBar, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
+        RedrawWindow(g_State.hTitleBar, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     }
 
-    RedrawWindow(hDlg, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ERASE | RDW_ALLCHILDREN);
+    RedrawWindow(hDlg, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     UpdateWindow(hDlg);
 }

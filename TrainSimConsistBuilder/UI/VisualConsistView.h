@@ -9,7 +9,7 @@
 #define WM_VISUAL_DOCK_CHANGED  (WM_USER + 403)
 
 HWND CreateVisualConsistView(HWND hParent, HINSTANCE hInstance, int x, int y, int w, int h, int id);
-void VisualConsistView_SetUnits(HWND hWnd, const std::vector<ConsistReader::UnitInfo>& units, const std::wstring& basePath);
+void VisualConsistView_SetUnits(HWND hWnd, const std::vector<ConsistReader::UnitInfo>& units, const std::wstring& basePath, const std::wstring& consistName = L"", const std::wstring& fileName = L"");
 void VisualConsistView_SetSelected(HWND hWnd, int index);
 void VisualConsistView_SetDarkMode(HWND hWnd, BOOL bDark);
 bool VisualConsistView_IsFloating(HWND hWnd);

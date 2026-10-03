@@ -1,5 +1,6 @@
 #include "PoolManager.h"
 #include "TrainSimConsistBuilder.h"
+#include "AppLogging.h"
 #include <fstream>
 #include <shlwapi.h>
 #include <algorithm>
@@ -107,6 +108,7 @@ namespace PoolManager
         }
 
         CloseHandle(hFile);
+        LOG_INFO("Saved %zu pool presets to disk.", presets.size());
         return true;
     }
 

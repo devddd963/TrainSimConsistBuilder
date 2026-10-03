@@ -1,5 +1,6 @@
 #include "BatchConsistGenerator.h"
 #include "ConsistWriter.h"
+#include "AppLogging.h"
 #include <random>
 #include <algorithm>
 #include <shlwapi.h>
@@ -324,6 +325,7 @@ namespace BatchConsistGenerator
             return false;
         }
 
+        LOG_INFO("Batch Consist Generation completed: %zu file(s) generated.", outCreatedFiles.size());
         return true;
     }
 }

@@ -650,6 +650,23 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 
     switch (uMsg)
     {
+    case WM_NCHITTEST:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        HWND hParent = GetParent(hWnd);
+        if (hParent && !IsZoomed(hParent))
+        {
+            RECT rcParent;
+            GetWindowRect(hParent, &rcParent);
+            int b = 8;
+            if (pt.x < rcParent.left + b || pt.x >= rcParent.right - b)
+            {
+                return HTTRANSPARENT;
+            }
+        }
+        return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+    }
+
     case WM_NCCREATE:
     {
         pState = new NavToolbarState();

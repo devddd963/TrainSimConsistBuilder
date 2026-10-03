@@ -336,8 +336,8 @@ namespace StockSpecReader
                     continue;
                 }
 
-                // Line comment starting with # or //
-                if (c == '#' || (c == '/' && m_Pos + 1 < m_Content.size() && m_Content[m_Pos + 1] == '/'))
+                // Line comment starting with # or ;
+                if (c == '#' || c == ';')
                 {
                     while (m_Pos < m_Content.size() && m_Content[m_Pos] != '\n') m_Pos++;
                     continue;
@@ -808,8 +808,11 @@ namespace StockSpecReader
                 {
                     int faDepth = 1;
                     STFToken fTok;
-                    bool firstTokenInBlock = true;
                     bool isClassicMSTS = (lowerTok == "freightanim");
+                    bool firstParamInClassic = true;
+                    StockFreightAnim currentSubFa;
+                    bool inSubBlock = false;
+                    int subBlockDepth = 0;
 
                     while (lexer.GetNextToken(fTok))
                     {
@@ -821,13 +824,75 @@ namespace StockSpecReader
                         if (fTok.isClosing)
                         {
                             faDepth--;
+                            if (inSubBlock && faDepth < subBlockDepth)
+                            {
+                                if (!currentSubFa.shapePath.empty())
+                                {
+                                    spec.freightAnims.push_back(currentSubFa);
+                                }
+                                currentSubFa = StockFreightAnim();
+                                inSubBlock = false;
+                            }
                             if (faDepth <= 0) break;
                             continue;
                         }
 
                         std::string fLow = ToLowerAscii(fTok.text);
 
-                        // 1. If we encounter Shape keyword inside any sub-block (Open Rails style)
+                        // ORTS MSTSFreightAnimEnabled ( 0 / 1 )
+                        if (fLow == "mstsfreightanimenabled")
+                        {
+                            STFToken vTok;
+                            if (lexer.GetNextToken(vTok))
+                            {
+                                if (vTok.isOpening) {
+                                    STFToken innerTok;
+                                    if (lexer.GetNextToken(innerTok)) spec.mstsFreightAnimEnabled = (innerTok.text != "0");
+                                    lexer.SkipBlock();
+                                } else {
+                                    spec.mstsFreightAnimEnabled = (vTok.text != "0");
+                                }
+                            }
+                            continue;
+                        }
+
+                        // ORTS Sub-block headers
+                        if (fLow == "freightanimstatic" || fLow == "freightanimcontinuous" ||
+                            fLow == "freightanimdriver" || fLow == "freightanimaddedboiler" ||
+                            fLow == "mstsfreightanim")
+                        {
+                            if (inSubBlock && !currentSubFa.shapePath.empty())
+                            {
+                                spec.freightAnims.push_back(currentSubFa);
+                            }
+                            currentSubFa = StockFreightAnim();
+                            inSubBlock = true;
+                            subBlockDepth = faDepth + 1;
+                            currentSubFa.isStatic = (fLow == "freightanimstatic");
+                            currentSubFa.isContinuous = (fLow == "freightanimcontinuous");
+                            currentSubFa.isDriver = (fLow == "freightanimdriver");
+                            currentSubFa.isAddedBoiler = (fLow == "freightanimaddedboiler");
+                            currentSubFa.isMSTS = (fLow == "mstsfreightanim");
+                            continue;
+                        }
+
+                        // Inside sub-block or direct attributes
+                        if (fLow == "subtype")
+                        {
+                            STFToken sTok;
+                            if (lexer.GetNextToken(sTok))
+                            {
+                                if (sTok.isOpening) {
+                                    STFToken valTok;
+                                    if (lexer.GetNextToken(valTok)) currentSubFa.subType = ToWide(valTok.text);
+                                    lexer.SkipBlock();
+                                } else {
+                                    currentSubFa.subType = ToWide(sTok.text);
+                                }
+                            }
+                            continue;
+                        }
+
                         if (fLow == "shape")
                         {
                             STFToken shapeTok;
@@ -837,10 +902,7 @@ namespace StockSpecReader
                                 if (shapeTok.isOpening)
                                 {
                                     STFToken valTok;
-                                    if (lexer.GetNextToken(valTok))
-                                    {
-                                        shapePathStr = valTok.text;
-                                    }
+                                    if (lexer.GetNextToken(valTok)) shapePathStr = valTok.text;
                                     lexer.SkipBlock();
                                 }
                                 else
@@ -850,37 +912,94 @@ namespace StockSpecReader
 
                                 if (!shapePathStr.empty())
                                 {
-                                    StockFreightAnim fa;
-                                    fa.shapePath = ToWide(shapePathStr);
-                                    spec.freightAnims.push_back(fa);
-                                }
-                            }
-                            firstTokenInBlock = false;
-                        }
-                        // 2. Classic MSTS format where the first parameter directly inside FreightAnim ( ... ) is the shape name
-                        else if (isClassicMSTS && faDepth == 1 && firstTokenInBlock)
-                        {
-                            // Verify it's not a keyword for nested ORTS block
-                            if (fLow != "freightanimstatic" && fLow != "freightanimcontinuous" &&
-                                fLow != "mstsfreightanim" && fLow != "freightanimadded" && fLow != "freightanimdriver")
-                            {
-                                std::string shapeName = fTok.text;
-                                if (shapeName.length() < 2 || shapeName.rfind(".s") != shapeName.length() - 2)
-                                {
-                                    // If author omitted .s extension, ensure .s is included
-                                    if (shapeName.find('.') == std::string::npos)
+                                    currentSubFa.shapePath = ToWide(shapePathStr);
+                                    if (!inSubBlock)
                                     {
-                                        shapeName += ".s";
+                                        spec.freightAnims.push_back(currentSubFa);
+                                        currentSubFa = StockFreightAnim();
                                     }
                                 }
-                                StockFreightAnim fa;
-                                fa.shapePath = ToWide(shapeName);
-                                spec.freightAnims.push_back(fa);
                             }
-                            firstTokenInBlock = false;
+                            continue;
                         }
-                        // 3. Fallback: Any token ending in .s or containing slashes inside any block
-                        else if (fLow.length() > 2 && (fLow.rfind(".s") == fLow.length() - 2 || fLow.find('/') != std::string::npos || fLow.find('\\') != std::string::npos))
+
+                        if (fLow == "offset")
+                        {
+                            STFToken openTok;
+                            if (lexer.GetNextToken(openTok) && openTok.isOpening)
+                            {
+                                STFToken xTok, yTok, zTok;
+                                if (lexer.GetNextToken(xTok) && !xTok.isClosing)
+                                    currentSubFa.offsetX = ParseDistanceUnit(xTok.text, 0.0f);
+                                if (lexer.GetNextToken(yTok) && !yTok.isClosing)
+                                    currentSubFa.offsetY = ParseDistanceUnit(yTok.text, 0.0f);
+                                if (lexer.GetNextToken(zTok) && !zTok.isClosing)
+                                    currentSubFa.offsetZ = ParseDistanceUnit(zTok.text, 0.0f);
+                                lexer.SkipBlock();
+                            }
+                            continue;
+                        }
+
+                        if (fLow == "rotation")
+                        {
+                            STFToken openTok;
+                            if (lexer.GetNextToken(openTok) && openTok.isOpening)
+                            {
+                                STFToken rxTok, ryTok, rzTok;
+                                try {
+                                    if (lexer.GetNextToken(rxTok) && !rxTok.isClosing)
+                                        currentSubFa.rotX = std::stof(rxTok.text);
+                                    if (lexer.GetNextToken(ryTok) && !ryTok.isClosing)
+                                        currentSubFa.rotY = std::stof(ryTok.text);
+                                    if (lexer.GetNextToken(rzTok) && !rzTok.isClosing)
+                                        currentSubFa.rotZ = std::stof(rzTok.text);
+                                } catch (...) {}
+                                lexer.SkipBlock();
+                            }
+                            continue;
+                        }
+
+                        if (fLow == "visibility")
+                        {
+                            STFToken vTok;
+                            if (lexer.GetNextToken(vTok))
+                            {
+                                if (vTok.isOpening) {
+                                    STFToken valTok;
+                                    if (lexer.GetNextToken(valTok)) currentSubFa.visibility = ToWide(valTok.text);
+                                    lexer.SkipBlock();
+                                } else {
+                                    currentSubFa.visibility = ToWide(vTok.text);
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Classic MSTS format: FreightAnim ( ShapeName.s MaxWeight Flag )
+                        if (isClassicMSTS && faDepth == 1 && firstParamInClassic)
+                        {
+                            if (fLow != "freightanimstatic" && fLow != "freightanimcontinuous" &&
+                                fLow != "mstsfreightanim" && fLow != "freightanimadded" && fLow != "freightanimdriver" && fLow != "shape")
+                            {
+                                std::string shapeName = fTok.text;
+                                if (shapeName.find('.') == std::string::npos) shapeName += ".s";
+                                currentSubFa.shapePath = ToWide(shapeName);
+                                currentSubFa.isMSTS = true;
+                                currentSubFa.offsetX = 0.0f;
+                                currentSubFa.offsetY = 0.0f;
+                                currentSubFa.offsetZ = 0.0f;
+
+                                // Note: In MSTS specification, 2nd and 3rd parameters are MaxWeight and Flag, NOT height offsets.
+                                // Open Rails and TSRE5 attach classic FreightAnim at (0, 0, 0).
+                                spec.freightAnims.push_back(currentSubFa);
+                                currentSubFa = StockFreightAnim();
+                            }
+                            firstParamInClassic = false;
+                            continue;
+                        }
+
+                        // Fallback shape token (.s extension or path separator)
+                        if (!inSubBlock && fLow.length() > 2 && (fLow.rfind(".s") == fLow.length() - 2 || fLow.find('/') != std::string::npos || fLow.find('\\') != std::string::npos))
                         {
                             std::wstring wideShape = ToWide(fTok.text);
                             bool exists = false;
@@ -894,12 +1013,12 @@ namespace StockSpecReader
                                 fa.shapePath = wideShape;
                                 spec.freightAnims.push_back(fa);
                             }
-                            firstTokenInBlock = false;
                         }
-                        else
-                        {
-                            firstTokenInBlock = false;
-                        }
+                    }
+
+                    if (inSubBlock && !currentSubFa.shapePath.empty())
+                    {
+                        spec.freightAnims.push_back(currentSubFa);
                     }
                 }
                 continue;

@@ -6,6 +6,7 @@
 #include "PassengerParser.h"
 #include "FreightParser.h"
 #include "TenderParser.h"
+#include "AppLogging.h"
 #include <sstream>
 #include <algorithm>
 
@@ -772,10 +773,12 @@ DWORD WINAPI StockScannerThreadProc(LPVOID lpParam)
     uint64_t currentSig = GetTrainsetSignature(basePath);
     if (LoadStockCache(basePath, currentSig))
     {
+        LOG_INFO("Loaded %zu rolling stock items from fast disk cache.", g_StockCache.size());
         PostMessageW(hWndParent, WM_STOCK_SCAN_COMPLETE, 0, 0);
         return 0;
     }
 
+    LOG_INFO("Scanning rolling stock library in '%ls'...", basePath.c_str());
     std::wstring trainsetPath = basePath + L"TRAINS\\TRAINSET";
 
     EnterCriticalSection(&g_StockCacheCS);
@@ -791,10 +794,12 @@ DWORD WINAPI StockScannerThreadProc(LPVOID lpParam)
         std::sort(g_StockCache.begin(), g_StockCache.end(), [](const StockItem& a, const StockItem& b) {
             return _wcsicmp(a.szFileName.c_str(), b.szFileName.c_str()) < 0;
         });
+        size_t totalScanned = g_StockCache.size();
         LeaveCriticalSection(&g_StockCacheCS);
 
         // Save to cache file for next run
         SaveStockCache(basePath, currentSig);
+        LOG_INFO("Stock Library scan complete: %zu rolling stock items parsed.", totalScanned);
 
         PostMessageW(hWndParent, WM_STOCK_SCAN_COMPLETE, 0, 0);
     }

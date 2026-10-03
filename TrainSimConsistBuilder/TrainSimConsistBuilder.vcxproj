@@ -71,10 +71,10 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Platform)'=='Win32'">
-    <TargetName>TrainSimConsistBuilder_v6.0.0_x32</TargetName>
+    <TargetName>TrainSimConsistBuilder_v9.0.0_x32</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Platform)'=='x64'">
-    <TargetName>TrainSimConsistBuilder_v6.0.0_x64</TargetName>
+    <TargetName>TrainSimConsistBuilder_v9.0.0_x64</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <OutDir>$(ProjectDir)..\BUILDS\DEBUG\</OutDir>
@@ -204,9 +204,14 @@
     <ClInclude Include="UI\StockInfoDlg.h" />
     <ClInclude Include="UI\3D-VisualStudio.h" />
     <ClInclude Include="UI\CustomDropDownMenu.h" />
+    <ClInclude Include="SRC\TextureLoader.h" />
+    <ClInclude Include="SRC\ShapeReader.h" />
+    <ClInclude Include="SRC\ShapeAnimator.h" />
+    <ClInclude Include="SRC\CompositeStockLoader.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SRC\TrainSimConsistBuilder.cpp" />
+    <ClCompile Include="SRC\AppLogging.cpp" />
     <ClCompile Include="UI\NavToolbar.cpp" />
     <ClCompile Include="UI\CommandBar.cpp" />
     <ClCompile Include="SRC\ConsistReader.cpp" />
@@ -241,7 +246,12 @@
     <ClCompile Include="SRC\Updater.cpp" />
     <ClCompile Include="SRC\StockSpecReader.cpp" />
     <ClCompile Include="UI\StockInfoDlg.cpp" />
+    <ClCompile Include="UI\3D-VisualStudio.cpp" />
     <ClCompile Include="UI\CustomDropDownMenu.cpp" />
+    <ClCompile Include="SRC\TextureLoader.cpp" />
+    <ClCompile Include="SRC\ShapeReader.cpp" />
+    <ClCompile Include="SRC\ShapeAnimator.cpp" />
+    <ClCompile Include="SRC\CompositeStockLoader.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="TrainSimConsistBuilder.rc" />

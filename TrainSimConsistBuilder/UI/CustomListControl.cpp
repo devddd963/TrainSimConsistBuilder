@@ -696,9 +696,14 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             for (size_t c_chk = 0; c_chk < m_columns.size(); ++c_chk)
             {
                 std::wstring chkText = GetCellText(r, (int)c_chk);
-                if (chkText == L"Broken")
+                if (chkText == L"Missing Stock" || chkText == L"Broken")
                 {
                     rowTextCol = RGB(255, 100, 100);
+                    break;
+                }
+                else if (chkText == L"Missing Shape")
+                {
+                    rowTextCol = RGB(255, 175, 50);
                     break;
                 }
                 else if (chkText == L"Fixed")

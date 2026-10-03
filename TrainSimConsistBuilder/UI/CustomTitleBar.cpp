@@ -31,6 +31,7 @@ struct TitleBarState
     int hoverTab = -1;
 
     // Caption button rects & hover state (0: Min, 1: Max/Restore, 2: Close)
+    BOOL bCloseOnly = FALSE;
     RECT rcBtnMin = { 0 };
     RECT rcBtnMax = { 0 };
     RECT rcBtnClose = { 0 };
@@ -124,15 +125,28 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
     case WM_NCHITTEST:
     {
         if (!pState) return HTCLIENT;
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        POINT ptScreen = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        POINT pt = ptScreen;
         ScreenToClient(hWnd, &pt);
 
-        // Top caption buttons handle client clicks
-        if (PtInRect(&pState->rcBtnMin, pt) ||
-            PtInRect(&pState->rcBtnMax, pt) ||
+        // Top caption buttons handle client clicks (minimize, maximize, close)
+        if ((!pState->bCloseOnly && (PtInRect(&pState->rcBtnMin, pt) || PtInRect(&pState->rcBtnMax, pt))) ||
             PtInRect(&pState->rcBtnClose, pt))
         {
             return HTCLIENT;
+        }
+
+        // Check if mouse is on outer left/right/top border of parent
+        HWND hParent = GetParent(hWnd);
+        if (hParent && !IsZoomed(hParent))
+        {
+            RECT rcParent;
+            GetWindowRect(hParent, &rcParent);
+            int b = 8;
+            if (ptScreen.x < rcParent.left + b || ptScreen.x >= rcParent.right - b || ptScreen.y < rcParent.top + b)
+            {
+                return HTTRANSPARENT;
+            }
         }
 
         // Tabs in Row 2 handle client clicks
@@ -157,8 +171,8 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
         int newHoverBtn = -1;
-        if (PtInRect(&pState->rcBtnMin, pt))        newHoverBtn = 0;
-        else if (PtInRect(&pState->rcBtnMax, pt))   newHoverBtn = 1;
+        if (!pState->bCloseOnly && PtInRect(&pState->rcBtnMin, pt))        newHoverBtn = 0;
+        else if (!pState->bCloseOnly && PtInRect(&pState->rcBtnMax, pt))   newHoverBtn = 1;
         else if (PtInRect(&pState->rcBtnClose, pt)) newHoverBtn = 2;
 
         int newHoverTab = -1;
@@ -202,14 +216,14 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         if (!pState) break;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-        if (PtInRect(&pState->rcBtnMin, pt))
+        if (!pState->bCloseOnly && PtInRect(&pState->rcBtnMin, pt))
         {
             pState->pressedBtn = 0;
             SetCapture(hWnd);
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
-        if (PtInRect(&pState->rcBtnMax, pt))
+        if (!pState->bCloseOnly && PtInRect(&pState->rcBtnMax, pt))
         {
             pState->pressedBtn = 1;
             SetCapture(hWnd);
@@ -251,12 +265,12 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         pState->pressedBtn = -1;
         InvalidateRect(hWnd, NULL, FALSE);
 
-        if (releasedBtn == 0 && PtInRect(&pState->rcBtnMin, pt))
+        if (!pState->bCloseOnly && releasedBtn == 0 && PtInRect(&pState->rcBtnMin, pt))
         {
             ShowWindow(hMainWnd, SW_MINIMIZE);
             return 0;
         }
-        if (releasedBtn == 1 && PtInRect(&pState->rcBtnMax, pt))
+        if (!pState->bCloseOnly && releasedBtn == 1 && PtInRect(&pState->rcBtnMax, pt))
         {
             if (IsZoomed(hMainWnd))
                 ShowWindow(hMainWnd, SW_RESTORE);
@@ -294,7 +308,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
     {
         if (!pState) break;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        if (pt.y < 30 && !PtInRect(&pState->rcBtnMin, pt) && !PtInRect(&pState->rcBtnMax, pt) && !PtInRect(&pState->rcBtnClose, pt))
+        if (!pState->bCloseOnly && pt.y < 30 && !PtInRect(&pState->rcBtnMin, pt) && !PtInRect(&pState->rcBtnMax, pt) && !PtInRect(&pState->rcBtnClose, pt))
         {
             if (IsZoomed(hMainWnd))
                 ShowWindow(hMainWnd, SW_RESTORE);
@@ -348,32 +362,42 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
 
         // Caption Buttons (Flush to top-right corner, 46px x 30px)
         int btnW = 46;
-        pState->rcBtnClose = { w - btnW, 0, w, row1H };
-        pState->rcBtnMax   = { w - (btnW * 2), 0, w - btnW, row1H };
-        pState->rcBtnMin   = { w - (btnW * 3), 0, w - (btnW * 2), row1H };
-
-        // Minimize Button
-        if (pState->hoverBtn == 0)
-        {
-            COLORREF hovMin = (pState->pressedBtn == 0 ? RGB(48, 18, 24) : RGB(38, 14, 18));
-            HBRUSH hbrMin = CreateSolidBrush(hovMin);
-            FillRect(memDC, &pState->rcBtnMin, hbrMin);
-            DeleteObject(hbrMin);
-        }
         SelectObject(memDC, pState->hFontIcons);
-        SetTextColor(memDC, RGB(200, 200, 205));
-        DrawTextW(memDC, L"\xE921", -1, &pState->rcBtnMin, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-        // Maximize / Restore Button
-        if (pState->hoverBtn == 1)
+        pState->rcBtnClose = { w - btnW, 0, w, row1H };
+        if (pState->bCloseOnly)
         {
-            COLORREF hovMax = (pState->pressedBtn == 1 ? RGB(48, 18, 24) : RGB(38, 14, 18));
-            HBRUSH hbrMax = CreateSolidBrush(hovMax);
-            FillRect(memDC, &pState->rcBtnMax, hbrMax);
-            DeleteObject(hbrMax);
+            pState->rcBtnMax = { 0, 0, 0, 0 };
+            pState->rcBtnMin = { 0, 0, 0, 0 };
         }
-        bool isMax = IsZoomed(hMainWnd) != FALSE;
-        DrawTextW(memDC, isMax ? L"\xE923" : L"\xE922", -1, &pState->rcBtnMax, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        else
+        {
+            pState->rcBtnMax   = { w - (btnW * 2), 0, w - btnW, row1H };
+            pState->rcBtnMin   = { w - (btnW * 3), 0, w - (btnW * 2), row1H };
+
+            // Minimize Button
+            if (pState->hoverBtn == 0)
+            {
+                COLORREF hovMin = (pState->pressedBtn == 0 ? RGB(48, 18, 24) : RGB(38, 14, 18));
+                HBRUSH hbrMin = CreateSolidBrush(hovMin);
+                FillRect(memDC, &pState->rcBtnMin, hbrMin);
+                DeleteObject(hbrMin);
+            }
+            SetTextColor(memDC, RGB(200, 200, 205));
+            DrawTextW(memDC, L"\xE921", -1, &pState->rcBtnMin, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            // Maximize / Restore Button
+            if (pState->hoverBtn == 1)
+            {
+                COLORREF hovMax = (pState->pressedBtn == 1 ? RGB(48, 18, 24) : RGB(38, 14, 18));
+                HBRUSH hbrMax = CreateSolidBrush(hovMax);
+                FillRect(memDC, &pState->rcBtnMax, hbrMax);
+                DeleteObject(hbrMax);
+            }
+            bool isMax = IsZoomed(hMainWnd) != FALSE;
+            SetTextColor(memDC, RGB(200, 200, 205));
+            DrawTextW(memDC, isMax ? L"\xE923" : L"\xE922", -1, &pState->rcBtnMax, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
 
         // Close Button
         if (pState->hoverBtn == 2)
@@ -658,3 +682,17 @@ void CustomTitleBar_SetTabs(HWND hTitleBar, const std::vector<TitleBarTabItem>& 
         }
     }
 }
+
+void CustomTitleBar_SetCloseOnly(HWND hTitleBar, BOOL bCloseOnly)
+{
+    if (hTitleBar && IsWindow(hTitleBar))
+    {
+        TitleBarState* pState = (TitleBarState*)GetWindowLongPtrW(hTitleBar, GWLP_USERDATA);
+        if (pState)
+        {
+            pState->bCloseOnly = bCloseOnly;
+            InvalidateRect(hTitleBar, NULL, FALSE);
+        }
+    }
+}
+
