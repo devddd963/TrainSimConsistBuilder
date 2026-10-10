@@ -35,28 +35,39 @@ CustomTreeView::~CustomTreeView()
     }
 }
 
+bool CustomTreeView::Register(HINSTANCE hInstance)
+{
+    if (s_isClassRegistered) return true;
+
+    WNDCLASSEXW wc = { 0 };
+    wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS | CS_GLOBALCLASS;
+    wc.lpfnWndProc = CustomTreeView::WndProc;
+    wc.cbClsExtra = 0;
+    wc.cbWndExtra = sizeof(CustomTreeView*);
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = NULL;
+    wc.lpszMenuName = NULL;
+    wc.lpszClassName = CUSTOM_TREEVIEW_CLASS;
+    
+    if (RegisterClassExW(&wc) != 0 || GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
+    {
+        s_isClassRegistered = true;
+    }
+    return s_isClassRegistered;
+}
+
 HWND CustomTreeView::Create(HWND hParent, int x, int y, int w, int h, int id)
 {
     m_hParent = hParent;
     m_controlId = id;
     HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(hParent, GWLP_HINSTANCE);
+    if (!hInst) hInst = GetModuleHandleW(L"TSCBCore64.dll");
+    if (!hInst) hInst = GetModuleHandleW(L"TSCBCore32.dll");
+    if (!hInst) hInst = GetModuleHandleW(NULL);
 
-    if (!s_isClassRegistered)
-    {
-        WNDCLASSEXW wc = { 0 };
-        wc.cbSize = sizeof(WNDCLASSEXW);
-        wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
-        wc.lpfnWndProc = CustomTreeView::WndProc;
-        wc.cbClsExtra = 0;
-        wc.cbWndExtra = 0;
-        wc.hInstance = hInst;
-        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = NULL;
-        wc.lpszMenuName = NULL;
-        wc.lpszClassName = CUSTOM_TREEVIEW_CLASS;
-        RegisterClassExW(&wc);
-        s_isClassRegistered = true;
-    }
+    Register(hInst);
 
     m_hWnd = CreateWindowExW(
         0,
@@ -661,9 +672,25 @@ LRESULT CALLBACK CustomTreeView::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         return 0;
     }
 
+    case WM_SETFOCUS:
+    {
+        NMHDR nmhdr = { 0 };
+        nmhdr.hwndFrom = hWnd;
+        nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(hWnd, GWLP_ID);
+        nmhdr.code     = NM_SETFOCUS;
+        SendMessageW(GetParent(hWnd), WM_NOTIFY, (WPARAM)nmhdr.idFrom, (LPARAM)&nmhdr);
+        pThis->Invalidate();
+        return 0;
+    }
+
     case WM_LBUTTONDOWN:
     {
         SetFocus(hWnd);
+        NMHDR nmhdr = { 0 };
+        nmhdr.hwndFrom = hWnd;
+        nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(hWnd, GWLP_ID);
+        nmhdr.code     = NM_CLICK;
+        SendMessageW(GetParent(hWnd), WM_NOTIFY, (WPARAM)nmhdr.idFrom, (LPARAM)&nmhdr);
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
         // Scrollbar check

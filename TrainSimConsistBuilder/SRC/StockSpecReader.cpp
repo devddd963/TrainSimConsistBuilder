@@ -1,5 +1,6 @@
 #include "StockSpecReader.h"
 #include "AssetsParser.h"
+#include "AppLogging.h"
 #include <algorithm>
 #include <sstream>
 #include <cctype>
@@ -1380,6 +1381,7 @@ namespace StockSpecReader
         }
         else
         {
+            LOG_WARN_W(L"[StockSpecReader] Stock file does not exist on disk: %ls", filePath.c_str());
             spec.isValid = false;
             spec.missingIncludes.push_back(filePath);
         }
@@ -1447,6 +1449,10 @@ namespace StockSpecReader
         if (!spec.mainShapeFile.empty())
         {
             spec.fullShapePath = FindExistingStockPath(folderDir, spec.mainShapeFile, trainsetBasePath, spec.folderName, spec.shapeExistsOnDisk);
+            if (!spec.shapeExistsOnDisk)
+            {
+                LOG_WARN_W(L"[StockSpecReader] Primary shape '%ls' referenced in '%ls' not found on disk", spec.mainShapeFile.c_str(), spec.fileName.c_str());
+            }
         }
 
         // Locate Freight Animation Shapes on Disk (supports ./, //, ../, subfolders, trainset shared folders)
@@ -1454,6 +1460,10 @@ namespace StockSpecReader
         {
             if (fa.shapePath.empty()) continue;
             fa.fullPath = FindExistingStockPath(folderDir, fa.shapePath, trainsetBasePath, spec.folderName, fa.existsOnDisk);
+            if (!fa.existsOnDisk)
+            {
+                LOG_WARN_W(L"[StockSpecReader] FreightAnim shape '%ls' referenced in '%ls' not found on disk", fa.shapePath.c_str(), spec.fileName.c_str());
+            }
         }
 
         spec.isValid = true;

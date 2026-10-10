@@ -1,4 +1,5 @@
 #include "CompositeStockLoader.h"
+#include "AppLogging.h"
 #include <future>
 #include <filesystem>
 #include <algorithm>
@@ -19,61 +20,106 @@ namespace CompositeStockLoader
     bool LoadCompositeStockCPU(
         const std::wstring& stockFilePath,
         const std::wstring& trainsetBasePath,
-        CompositeStockUnit& outUnit
+        CompositeStockUnit& outUnit,
+        const std::atomic<bool>* pCancelToken
     )
     {
+        if (pCancelToken && *pCancelToken) return false;
+
         outUnit.isValid = false;
         outUnit.stockFilePath = stockFilePath;
         outUnit.stockFileName = std::filesystem::path(stockFilePath).filename().wstring();
         outUnit.stockFolderName = std::filesystem::path(stockFilePath).parent_path().filename().wstring();
         outUnit.subShapes.clear();
 
-        // 1. Parse .wag or .eng specifications
-        outUnit.spec = StockSpecReader::ReadFullSpec(stockFilePath, trainsetBasePath);
-        if (!outUnit.spec.isValid && outUnit.spec.mainShapeFile.empty() && outUnit.spec.freightAnims.empty())
-        {
-            return false;
-        }
+        LOG_INFO_W(L"[CompositeStockLoader] Loading composite rolling stock: %ls", stockFilePath.c_str());
 
         std::wstring stockDir = GetDirectoryFromPath(stockFilePath);
 
-        // 2. Primary Root Shape
-        if (!outUnit.spec.fullShapePath.empty() && outUnit.spec.shapeExistsOnDisk)
+        // If file directly ends with .s, load as a standalone shape
+        std::wstring lowerPath = stockFilePath;
+        for (wchar_t& c : lowerPath) c = towlower(c);
+        if (lowerPath.size() >= 2 && lowerPath.substr(lowerPath.size() - 2) == L".s")
         {
             auto primarySub = std::make_shared<SubShapeInstance>();
             primarySub->isPrimary = true;
-            primarySub->shapePath = outUnit.spec.mainShapeFile;
-            primarySub->fullPath = outUnit.spec.fullShapePath;
-            primarySub->folderDir = GetDirectoryFromPath(outUnit.spec.fullShapePath);
-            if (primarySub->folderDir.empty()) primarySub->folderDir = stockDir;
+            primarySub->shapePath = std::filesystem::path(stockFilePath).filename().wstring();
+            primarySub->fullPath = stockFilePath;
+            primarySub->folderDir = stockDir;
             outUnit.subShapes.push_back(primarySub);
+            LOG_INFO_W(L"[CompositeStockLoader] Standalone .s shape loaded: %ls", stockFilePath.c_str());
         }
-
-        // 3. Freight Animations / ORTS Sub-Shapes
-        for (const auto& fa : outUnit.spec.freightAnims)
+        else
         {
-            if (fa.fullPath.empty() || !fa.existsOnDisk) continue;
+            // 1. Parse .wag or .eng specifications
+            outUnit.spec = StockSpecReader::ReadFullSpec(stockFilePath, trainsetBasePath);
+            if (pCancelToken && *pCancelToken) return false;
 
-            auto sub = std::make_shared<SubShapeInstance>();
-            sub->isPrimary = false;
-            sub->shapePath = fa.shapePath;
-            sub->fullPath = fa.fullPath;
-            sub->folderDir = GetDirectoryFromPath(fa.fullPath);
-            if (sub->folderDir.empty()) sub->folderDir = stockDir;
+            if (!outUnit.spec.isValid && outUnit.spec.mainShapeFile.empty() && outUnit.spec.freightAnims.empty())
+            {
+                LOG_STOCK_ERROR_W(L"[CompositeStockLoader] Failed to read spec for: %ls", stockFilePath.c_str());
+                return false;
+            }
 
-            sub->offset = DirectX::XMFLOAT3(fa.offsetX, fa.offsetY, fa.offsetZ);
-            sub->rotation = DirectX::XMFLOAT3(fa.rotX, fa.rotY, fa.rotZ);
-            sub->isDriver = fa.isDriver;
-            sub->isContinuous = fa.isContinuous;
-            sub->isStatic = fa.isStatic;
-            sub->isAddedBoiler = fa.isAddedBoiler;
-            sub->isMSTS = fa.isMSTS;
+            LOG_STOCK_W(L"--------------------------------------------------------------------------------");
+            LOG_STOCK_W(L"Spec Parsed: Name='%ls', Category='%ls', PrimaryShape='%ls' (ExistsOnDisk: %ls), FreightAnims=%zu",
+                outUnit.spec.displayName.c_str(), outUnit.spec.category.c_str(),
+                outUnit.spec.mainShapeFile.c_str(), outUnit.spec.shapeExistsOnDisk ? L"YES" : L"NO",
+                outUnit.spec.freightAnims.size());
 
-            outUnit.subShapes.push_back(sub);
+            // 2. Primary Root Shape
+            if (!outUnit.spec.fullShapePath.empty() && outUnit.spec.shapeExistsOnDisk)
+            {
+                auto primarySub = std::make_shared<SubShapeInstance>();
+                primarySub->isPrimary = true;
+                primarySub->shapePath = outUnit.spec.mainShapeFile;
+                primarySub->fullPath = outUnit.spec.fullShapePath;
+                primarySub->folderDir = GetDirectoryFromPath(outUnit.spec.fullShapePath);
+                if (primarySub->folderDir.empty()) primarySub->folderDir = stockDir;
+                outUnit.subShapes.push_back(primarySub);
+                LOG_STOCK_W(L"  -> Primary shape resolved: %ls", primarySub->fullPath.c_str());
+            }
+            else if (!outUnit.spec.mainShapeFile.empty())
+            {
+                LOG_STOCK_WARN_W(L"  [WARN] Primary shape '%ls' not found on disk for '%ls'",
+                    outUnit.spec.mainShapeFile.c_str(), stockFilePath.c_str());
+            }
+
+            // 3. Freight Animations / ORTS Sub-Shapes
+            for (const auto& fa : outUnit.spec.freightAnims)
+            {
+                if (fa.fullPath.empty() || !fa.existsOnDisk)
+                {
+                    LOG_STOCK_WARN_W(L"  [WARN] FreightAnim shape '%ls' not found on disk", fa.shapePath.c_str());
+                    continue;
+                }
+
+                auto sub = std::make_shared<SubShapeInstance>();
+                sub->isPrimary = false;
+                sub->shapePath = fa.shapePath;
+                sub->fullPath = fa.fullPath;
+                sub->folderDir = GetDirectoryFromPath(fa.fullPath);
+                if (sub->folderDir.empty()) sub->folderDir = stockDir;
+
+                sub->offset = DirectX::XMFLOAT3(fa.offsetX, fa.offsetY, fa.offsetZ);
+                sub->rotation = DirectX::XMFLOAT3(fa.rotX, fa.rotY, fa.rotZ);
+                sub->isDriver = fa.isDriver;
+                sub->isContinuous = fa.isContinuous;
+                sub->isStatic = fa.isStatic;
+                sub->isAddedBoiler = fa.isAddedBoiler;
+                sub->isMSTS = fa.isMSTS;
+
+                outUnit.subShapes.push_back(sub);
+                LOG_STOCK_W(L"  -> FreightAnim attached: '%ls' -> Offset=[%.2f, %.2f, %.2f], Rot=[%.1f, %.1f, %.1f]",
+                    sub->shapePath.c_str(), sub->offset.x, sub->offset.y, sub->offset.z, sub->rotation.x, sub->rotation.y, sub->rotation.z);
+            }
         }
+
+        if (pCancelToken && *pCancelToken) return false;
 
         if (outUnit.subShapes.empty())
         {
+            LOG_STOCK_ERROR_W(L"[CompositeStockLoader] No valid sub-shapes found for vehicle: %ls", stockFilePath.c_str());
             return false;
         }
 
@@ -81,31 +127,40 @@ namespace CompositeStockLoader
         std::vector<std::future<bool>> parseFutures;
         for (auto& sub : outUnit.subShapes)
         {
+            if (pCancelToken && *pCancelToken) return false;
             std::wstring fPath = sub->fullPath;
             ParsedShape* pShape = &sub->shape;
-            parseFutures.push_back(std::async(std::launch::async, [fPath, pShape]() {
-                return ShapeReader::ParseShapeFile(fPath, *pShape);
+            parseFutures.push_back(std::async(std::launch::async, [fPath, pShape, pCancelToken]() {
+                return ShapeReader::ParseShapeFile(fPath, *pShape, pCancelToken);
             }));
         }
 
         for (size_t i = 0; i < parseFutures.size(); ++i)
         {
+            if (pCancelToken && *pCancelToken) return false;
             bool ok = parseFutures[i].get();
             outUnit.subShapes[i]->isLoaded = ok && outUnit.subShapes[i]->shape.isValid;
         }
 
+        if (pCancelToken && *pCancelToken) return false;
+
+        LOG_INFO_W(L"[CompositeStockLoader] Parsed %zu sub-shape(s) for '%ls'", outUnit.subShapes.size(), outUnit.stockFileName.c_str());
+
         // 5. Asynchronously pre-decode all referenced textures into CPU memory cache (100% on background worker thread)
         for (const auto& sub : outUnit.subShapes)
         {
+            if (pCancelToken && *pCancelToken) return false;
             if (sub && sub->isLoaded && !sub->shape.rawImageNames.empty())
             {
-                TextureLoader::PredecodeTexturesCPU(sub->folderDir, sub->shape.rawImageNames);
+                TextureLoader::PredecodeTexturesCPU(sub->folderDir, sub->shape.rawImageNames, pCancelToken);
                 if (sub->folderDir != stockDir && !stockDir.empty())
                 {
-                    TextureLoader::PredecodeTexturesCPU(stockDir, sub->shape.rawImageNames);
+                    TextureLoader::PredecodeTexturesCPU(stockDir, sub->shape.rawImageNames, pCancelToken);
                 }
             }
         }
+
+        if (pCancelToken && *pCancelToken) return false;
 
         return true;
     }
@@ -200,40 +255,15 @@ namespace CompositeStockLoader
                         }
                     }
 
-                    // Open Rails pipeline:
-                    // 1. If texture has NO real alpha (e.g. body textures, chassis, bogies, trainboards),
-                    //    it is strictly OPAQUE (Pass 1). This ensures locomotive body, roofs, and cabs render solid.
-                    // 2. If texture has alpha cutout (e.g. couplers, grilles, pantographs, signs, springs),
-                    //    it is ALPHA-TEST (Pass 2, depth write enabled).
-                    // 3. Only genuine glass/window textures (e.g. Glass.ace) or translucent materials
-                    //    render in Pass 3 (Translucent Glass Blend, depth read-only).
                     bool hasTexAlpha = pTL->HasAlpha(sub->folderDir, rawName);
+                    bool hasSmoothAlpha = pTL->HasSmoothAlpha(sub->folderDir, rawName);
                     if (!hasTexAlpha && sub->folderDir != stockDir && !stockDir.empty())
                     {
                         hasTexAlpha = pTL->HasAlpha(stockDir, rawName);
+                        hasSmoothAlpha = pTL->HasSmoothAlpha(stockDir, rawName);
                     }
-                    
-                    std::wstring lowerTex = rawName;
-                    for (wchar_t& c : lowerTex) c = towlower(c);
-                    bool isGlassTex = (lowerTex.find(L"glass") != std::wstring::npos ||
-                                       lowerTex.find(L"window") != std::wstring::npos ||
-                                       lowerTex.find(L"mirror") != std::wstring::npos);
 
-                    if (!hasTexAlpha)
-                    {
-                        sm.isTransparent = false;
-                        sm.isAlphaTest = false;
-                    }
-                    else if (!isGlassTex)
-                    {
-                        sm.isTransparent = true;
-                        sm.isAlphaTest = true;
-                    }
-                    else
-                    {
-                        sm.isTransparent = true;
-                        sm.isAlphaTest = false;
-                    }
+                    ShapeReader::ClassifySubMeshMaterial(sm, hasTexAlpha, hasSmoothAlpha, rawName);
                 }
             }
 
@@ -323,9 +353,44 @@ namespace CompositeStockLoader
             if (unit.radius < 2.0f) unit.radius = 2.0f;
 
             unit.isValid = true;
+
+            LOG_INFO_W(L"[CompositeStockLoader] Finalized GPU Model '%ls': SubShapes=%zu, Vertices=%llu, Triangles=%llu, SubMeshes=%llu, Textures=%llu, Bounds=[(%.2f, %.2f, %.2f) to (%.2f, %.2f, %.2f)], Radius=%.2fm, Animated=%ls",
+                unit.stockFileName.c_str(), unit.subShapes.size(),
+                (unsigned long long)unit.totalVertices, (unsigned long long)unit.totalTriangles,
+                (unsigned long long)unit.totalSubMeshes, (unsigned long long)unit.totalTextures,
+                unit.boundsMin.x, unit.boundsMin.y, unit.boundsMin.z,
+                unit.boundsMax.x, unit.boundsMax.y, unit.boundsMax.z,
+                unit.radius, unit.hasAnimation ? L"YES" : L"NO");
+
+            LOG_SHAPE_W(L"=== Composite Stock GPU Pipeline Audit: '%ls' (SubShapes: %zu) ===", unit.stockFileName.c_str(), unit.subShapes.size());
+            for (size_t sIdx = 0; sIdx < unit.subShapes.size(); ++sIdx)
+            {
+                const auto& sub = unit.subShapes[sIdx];
+                if (!sub || !sub->isLoaded || !sub->shape.isValid) continue;
+                LOG_SHAPE_W(L" -> SubShape #%zu: '%ls' (SubMeshes: %zu, Vertices: %zu, Indices: %zu)",
+                    sIdx, sub->shapePath.c_str(), sub->shape.subMeshes.size(), sub->shape.vertices.size(), sub->shape.indices.size());
+                for (size_t smIdx = 0; smIdx < sub->shape.subMeshes.size(); ++smIdx)
+                {
+                    const auto& sm = sub->shape.subMeshes[smIdx];
+                    const wchar_t* passName = L"Pass 1 [Opaque Solid]";
+                    if (sm.isTransparent && sm.isAlphaTest) passName = L"Pass 2 [AlphaTest Cutout]";
+                    else if (sm.isTransparent && !sm.isAlphaTest) passName = L"Pass 3 [Smooth Glass Blend]";
+
+                    std::wstring wShader(sm.shaderName.begin(), sm.shaderName.end());
+                    LOG_SHAPE_W(L"    [SubMesh #%02zu] Indices: %5u (Start: %5u) | Shader: '%-14ls' | Texture: '%-28ls' | Applied: %-26ls | SRV: %ls",
+                        smIdx, sm.indexCount, sm.startIndex,
+                        wShader.empty() ? L"(None)" : wShader.c_str(),
+                        sm.textureName.empty() ? L"(Untextured)" : sm.textureName.c_str(),
+                        passName,
+                        sm.pSRV ? L"Allocated" : L"Default");
+                }
+            }
+            LOG_SHAPE_W(L"--------------------------------------------------------------------------------");
+
             return true;
         }
 
+        LOG_ERROR_W(L"[CompositeStockLoader] GPU finalization failed for '%ls' - no valid subshapes", unit.stockFileName.c_str());
         return false;
     }
 
@@ -389,32 +454,14 @@ namespace CompositeStockLoader
                     if (srv) sm.pSRV = srv;
 
                     bool hasTexAlpha = pTL->HasAlpha(sub->folderDir, rawName);
+                    bool hasSmoothAlpha = pTL->HasSmoothAlpha(sub->folderDir, rawName);
                     if (!hasTexAlpha && sub->folderDir != stockDir && !stockDir.empty())
                     {
                         hasTexAlpha = pTL->HasAlpha(stockDir, rawName);
+                        hasSmoothAlpha = pTL->HasSmoothAlpha(stockDir, rawName);
                     }
 
-                    std::wstring lowerTex = rawName;
-                    for (wchar_t& c : lowerTex) c = towlower(c);
-                    bool isGlass = (lowerTex.find(L"glass") != std::wstring::npos ||
-                                    lowerTex.find(L"window") != std::wstring::npos ||
-                                    lowerTex.find(L"mirror") != std::wstring::npos);
-
-                    if (!hasTexAlpha)
-                    {
-                        sm.isTransparent = false;
-                        sm.isAlphaTest = false;
-                    }
-                    else if (!isGlass)
-                    {
-                        sm.isTransparent = true;
-                        sm.isAlphaTest = true;
-                    }
-                    else
-                    {
-                        sm.isTransparent = true;
-                        sm.isAlphaTest = false;
-                    }
+                    ShapeReader::ClassifySubMeshMaterial(sm, hasTexAlpha, hasSmoothAlpha, rawName);
                 }
             }
         }

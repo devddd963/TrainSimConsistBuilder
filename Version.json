@@ -1,7 +1,6 @@
 {
-  "version": "9.0.0",
-  "build": 90600,
-  "changelog": "Fixed Minor Bug in Updater.",
-  "download_x64": "https://github.com/devddd963/TrainSimConsistBuilder/releases/download/v9.0.0/TrainSimConsistBuilder_v9.0.0_x64.exe",
-  "download_x32": "https://github.com/devddd963/TrainSimConsistBuilder/releases/download/v9.0.0/TrainSimConsistBuilder_v9.0.0_x32.exe"
+  "version": "9.3.0",
+  "build": 93000,
+  "changelog": "SQLite Master Database Migration, Multi-threading Performance, Zero-Registry Portability & Auto-Zip Updater.",
+  "download_url": "https://github.com/devddd963/TrainSimConsistBuilder/releases/latest/download/TrainSimConsistBuilder.zip"
 }

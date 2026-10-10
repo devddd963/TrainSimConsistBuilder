@@ -12,6 +12,7 @@
 #include "../SRC/TextureLoader.h"
 #include "../SRC/CompositeStockLoader.h"
 #include "../SRC/StockSpecReader.h"
+#include "../SRC/DatabaseManager.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -329,26 +330,12 @@ static const int EXPANDED_HEIGHT = 180;
 // Registry Helper
 static bool ReadCollapseOnStartupRegistry()
 {
-    HKEY hKey;
-    DWORD dwVal = 0;
-    DWORD dwSize = sizeof(dwVal);
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        RegQueryValueExW(hKey, L"VisualPreviewCollapsedOnStartup", NULL, NULL, (LPBYTE)&dwVal, &dwSize);
-        RegCloseKey(hKey);
-    }
-    return (dwVal != 0);
+    return DatabaseManager::GetSettingInt(L"VisualPreviewCollapsedOnStartup", 0) != 0;
 }
 
 static void WriteCollapseOnStartupRegistry(bool bCollapsed)
 {
-    HKEY hKey;
-    DWORD dwVal = bCollapsed ? 1 : 0;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS)
-    {
-        RegSetValueExW(hKey, L"VisualPreviewCollapsedOnStartup", 0, REG_DWORD, (const BYTE*)&dwVal, sizeof(dwVal));
-        RegCloseKey(hKey);
-    }
+    DatabaseManager::SetSettingInt(L"VisualPreviewCollapsedOnStartup", bCollapsed ? 1 : 0);
 }
 
 // -------------------------------------------------------------
@@ -476,12 +463,13 @@ static bool InitD3D11(VisualConsistState* pState, HWND hWndViewport, int width, 
     bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
     pState->pD3DDevice->CreateBlendState(&bd, &pState->pBlendStateAlpha);
 
-    // Sampler State
+    // Sampler State (16x Anisotropic Filtering)
     D3D11_SAMPLER_DESC sampDesc = {};
-    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampDesc.Filter = D3D11_FILTER_ANISOTROPIC;
     sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
     sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
     sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.MaxAnisotropy = 16;
     sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
     sampDesc.MinLOD = 0;
     sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
@@ -788,19 +776,19 @@ static void Render3DConsist(VisualConsistState* pState)
         }
         else if (passMode == 1)
         {
-            // PASS 2: Alpha Test & Decals (DepthWrite = ON, DepthBias = -50)
-            pState->pD3DContext->RSSetState(pState->bWireframe ? pState->pRasterStateWireframe : pState->pRasterStateDecal);
+            // PASS 2: Alpha Test & Decals (Open Rails: DepthWrite = ON, BlendState = Alpha, ReferenceAlpha = 10/255)
+            pState->pD3DContext->RSSetState(pState->bWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
             pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateWrite, 0);
-            pState->pD3DContext->OMSetBlendState(pState->pBlendStateOpaque, NULL, 0xFFFFFFFF);
-            cb.AlphaCutoff = 0.5f;
+            pState->pD3DContext->OMSetBlendState(pState->pBlendStateAlpha, NULL, 0xFFFFFFFF);
+            cb.AlphaCutoff = 0.0392f;
         }
         else if (passMode == 2)
         {
-            // PASS 3: Translucent Glass (DepthWrite = OFF, Blend = Alpha)
+            // PASS 3: Translucent Decals, Glass & Details (DepthWrite = OFF, Blend = Alpha)
             pState->pD3DContext->RSSetState(pState->bWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
             pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateReadOnly, 0);
             pState->pD3DContext->OMSetBlendState(pState->pBlendStateAlpha, NULL, 0xFFFFFFFF);
-            cb.AlphaCutoff = 0.001f;
+            cb.AlphaCutoff = 0.005f;
         }
 
         for (size_t uIdx = 0; uIdx < pState->units.size(); ++uIdx)
@@ -1877,6 +1865,12 @@ static LRESULT CALLBACK ViewportWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
         if (!pState) break;
         SetCapture(hWnd);
         SetFocus(hWnd);
+
+        NMHDR nmhdr = { 0 };
+        nmhdr.hwndFrom = hWnd;
+        nmhdr.idFrom   = (UINT_PTR)pState->controlId;
+        nmhdr.code     = NM_SETFOCUS;
+        SendMessageW(pState->hParent, WM_NOTIFY, (WPARAM)nmhdr.idFrom, (LPARAM)&nmhdr);
 
         int x = GET_X_LPARAM(lParam);
         int y = GET_Y_LPARAM(lParam);

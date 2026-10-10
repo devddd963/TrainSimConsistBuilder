@@ -1,5 +1,7 @@
 #include "Updater.h"
+#include "DatabaseManager.h"
 #include <windows.h>
+#include <shlwapi.h>
 #include <wininet.h>
 #include <shellapi.h>
 #include <string>
@@ -13,6 +15,7 @@
 
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "shlwapi.lib")
 
 namespace Updater
 {
@@ -20,40 +23,12 @@ namespace Updater
 
     int GetCurrentBuildNumber()
     {
-        int buildNum = APP_BUILD_NUMBER;
-        HKEY hKey = NULL;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder\\Settings", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-        {
-            DWORD dwType = 0;
-            DWORD dwVal = 0;
-            DWORD dwSize = sizeof(dwVal);
-            if (RegQueryValueExW(hKey, L"InstalledBuild", NULL, &dwType, (LPBYTE)&dwVal, &dwSize) == ERROR_SUCCESS)
-            {
-                if (dwVal > (DWORD)buildNum)
-                    buildNum = (int)dwVal;
-            }
-            RegCloseKey(hKey);
-        }
-        return buildNum;
+        return APP_BUILD_NUMBER;
     }
 
     std::wstring GetCurrentVersion()
     {
-        std::wstring ver = APP_VERSION;
-        HKEY hKey = NULL;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder\\Settings", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-        {
-            wchar_t szBuf[64] = { 0 };
-            DWORD dwSize = sizeof(szBuf);
-            DWORD dwType = 0;
-            if (RegQueryValueExW(hKey, L"InstalledVersion", NULL, &dwType, (LPBYTE)szBuf, &dwSize) == ERROR_SUCCESS)
-            {
-                if (szBuf[0] != L'\0')
-                    ver = szBuf;
-            }
-            RegCloseKey(hKey);
-        }
-        return ver;
+        return APP_VERSION;
     }
 
     static std::wstring ToWide(const std::string& str)
@@ -171,11 +146,11 @@ namespace Updater
         int build = ExtractJsonInt(json, "build");
         std::string changelog = ExtractJsonString(json, "changelog");
 
-#if defined(_WIN64)
-        std::string downloadUrl = ExtractJsonString(json, "download_x64");
-#else
-        std::string downloadUrl = ExtractJsonString(json, "download_x32");
-#endif
+        std::string downloadUrl = ExtractJsonString(json, "download_url");
+        if (downloadUrl.empty()) downloadUrl = ExtractJsonString(json, "download");
+        if (downloadUrl.empty()) downloadUrl = ExtractJsonString(json, "download_zip");
+        if (downloadUrl.empty()) downloadUrl = ExtractJsonString(json, "download_x64");
+        if (downloadUrl.empty()) downloadUrl = ExtractJsonString(json, "download_x32");
 
         if (version.empty() && build == 0) return false;
 
@@ -190,9 +165,9 @@ namespace Updater
         }
         else
         {
-            // Default fallback
+            // Default fallback to unified release zip
             outInfo.downloadUrl = L"https://github.com/devddd963/TrainSimConsistBuilder/releases/download/v" +
-                outInfo.remoteVersion + L"/" + APP_TARGET_EXE_NAME;
+                outInfo.remoteVersion + L"/" + APP_UPDATE_ZIP_NAME;
         }
 
         if (outInfo.remoteBuild > GetCurrentBuildNumber())
@@ -211,6 +186,18 @@ namespace Updater
             std::wstring exePath = szExePath;
             size_t lastSlash = exePath.find_last_of(L"\\/");
             std::wstring dir = (lastSlash != std::wstring::npos) ? exePath.substr(0, lastSlash + 1) : L"";
+
+            std::wstring appData = dir + L"AppData\\";
+            DeleteFileW((appData + L"TrainSimConsistBuilder_Update.zip").c_str());
+            DeleteFileW((appData + L"ApplyUpdate.cmd").c_str());
+
+            // Remove leftover staging directory if exists
+            std::wstring staging = appData + L"UpdateStaging";
+            if (PathFileExistsW(staging.c_str()))
+            {
+                std::wstring cmd = L"/c rmdir /s /q \"" + staging + L"\"";
+                ShellExecuteW(NULL, L"open", L"cmd.exe", cmd.c_str(), NULL, SW_HIDE);
+            }
 
             DeleteFileW((exePath + L".old").c_str());
             DeleteFileW((exePath + L".new").c_str());
@@ -241,6 +228,51 @@ namespace Updater
         }
     }
 
+    static bool ExtractZipArchive(const std::wstring& zipPath, const std::wstring& destDir)
+    {
+        CreateDirectoryW(destDir.c_str(), NULL);
+
+        // 1. Try native tar.exe (included in Windows 10 build 17063+ & Windows 11)
+        std::wstring tarCmd = L"/c tar.exe -xf \"" + zipPath + L"\" -C \"" + destDir + L"\"";
+        SHELLEXECUTEINFOW sei = { sizeof(sei) };
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"open";
+        sei.lpFile = L"cmd.exe";
+        sei.lpParameters = tarCmd.c_str();
+        sei.nShow = SW_HIDE;
+
+        if (ShellExecuteExW(&sei) && sei.hProcess)
+        {
+            WaitForSingleObject(sei.hProcess, 30000);
+            DWORD exitCode = 1;
+            GetExitCodeProcess(sei.hProcess, &exitCode);
+            CloseHandle(sei.hProcess);
+            if (exitCode == 0) return true;
+        }
+
+        // 2. Fallback to PowerShell Expand-Archive
+        std::wstring psCmd = L"-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '" +
+            zipPath + L"' -DestinationPath '" + destDir + L"' -Force\"";
+
+        sei = { sizeof(sei) };
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"open";
+        sei.lpFile = L"powershell.exe";
+        sei.lpParameters = psCmd.c_str();
+        sei.nShow = SW_HIDE;
+
+        if (ShellExecuteExW(&sei) && sei.hProcess)
+        {
+            WaitForSingleObject(sei.hProcess, 60000);
+            DWORD exitCode = 1;
+            GetExitCodeProcess(sei.hProcess, &exitCode);
+            CloseHandle(sei.hProcess);
+            return (exitCode == 0);
+        }
+
+        return false;
+    }
+
     bool DownloadAndApplyUpdate(HWND hWndParent, const UpdateInfo& info)
     {
         if (info.downloadUrl.empty()) return false;
@@ -256,36 +288,18 @@ namespace Updater
             exeDir = currentExeStr.substr(0, lastSlash + 1);
         }
 
-        // Determine target executable filename from the download URL
-        std::wstring targetFileName = L"";
-        size_t lastUrlSlash = info.downloadUrl.find_last_of(L"/\\");
-        if (lastUrlSlash != std::wstring::npos)
-        {
-            targetFileName = info.downloadUrl.substr(lastUrlSlash + 1);
-        }
-        size_t queryPos = targetFileName.find(L'?');
-        if (queryPos != std::wstring::npos)
-        {
-            targetFileName = targetFileName.substr(0, queryPos);
-        }
+        std::wstring appDataDir = exeDir + L"AppData";
+        CreateDirectoryW(appDataDir.c_str(), NULL);
 
-        if (targetFileName.empty() || targetFileName.length() < 5 || _wcsicmp(targetFileName.substr(targetFileName.length() - 4).c_str(), L".exe") != 0)
-        {
-#if defined(_WIN64)
-            targetFileName = L"TrainSimConsistBuilder_v" + info.remoteVersion + L"_x64.exe";
-#else
-            targetFileName = L"TrainSimConsistBuilder_v" + info.remoteVersion + L"_x32.exe";
-#endif
-        }
+        std::wstring szZipDownload = appDataDir + L"\\TrainSimConsistBuilder_Update.zip";
+        std::wstring szStagingDir = appDataDir + L"\\UpdateStaging";
+        std::wstring szHelperCmd = appDataDir + L"\\ApplyUpdate.cmd";
 
-        std::wstring szTargetExe = exeDir + targetFileName;
-        std::wstring szTempDownload = szTargetExe + L".tmp";
-        std::wstring szOldExe = currentExeStr + L".old";
+        DeleteFileW(szZipDownload.c_str());
+        DeleteFileW(szHelperCmd.c_str());
 
-        DeleteFileW(szTempDownload.c_str());
-
-        LOG_INFO("Downloading update from: %ls", info.downloadUrl.c_str());
-        LOG_INFO("Target executable file path: %ls", szTargetExe.c_str());
+        LOG_INFO("Downloading update package from: %ls", info.downloadUrl.c_str());
+        LOG_INFO("Destination zip package: %ls", szZipDownload.c_str());
 
         HINTERNET hInternet = InternetOpenW(L"TrainSimConsistBuilder-Downloader/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
         if (!hInternet) return false;
@@ -299,7 +313,7 @@ namespace Updater
             return false;
         }
 
-        HANDLE hFile = CreateFileW(szTempDownload.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        HANDLE hFile = CreateFileW(szZipDownload.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE)
         {
             InternetCloseHandle(hUrl);
@@ -328,65 +342,66 @@ namespace Updater
         InternetCloseHandle(hUrl);
         InternetCloseHandle(hInternet);
 
-        if (!downloadSuccess || totalBytes < 100000)
+        if (!downloadSuccess || totalBytes < 10000)
         {
-            DeleteFileW(szTempDownload.c_str());
+            DeleteFileW(szZipDownload.c_str());
             ShowModernMessageBox(hWndParent, L"Downloaded file is incomplete or corrupted. Update aborted.", L"Update Failed", MB_OK | MB_ICONERROR);
             return false;
         }
 
-        // Verify PE Header ('MZ')
-        HANDLE hCheck = CreateFileW(szTempDownload.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        // Verify ZIP header signature ('PK' -> 0x04034B50 or 0x06054B50)
+        HANDLE hCheck = CreateFileW(szZipDownload.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
         if (hCheck != INVALID_HANDLE_VALUE)
         {
-            WORD mzHeader = 0;
+            DWORD zipHeader = 0;
             DWORD read = 0;
-            ReadFile(hCheck, &mzHeader, 2, &read, NULL);
+            ReadFile(hCheck, &zipHeader, 4, &read, NULL);
             CloseHandle(hCheck);
-            if (mzHeader != 0x5A4D) // 'MZ'
+            if ((zipHeader & 0xFFFF) != 0x4B50) // 'PK'
             {
-                DeleteFileW(szTempDownload.c_str());
-                ShowModernMessageBox(hWndParent, L"Downloaded file signature check failed. Update aborted.", L"Security Check", MB_OK | MB_ICONERROR);
+                DeleteFileW(szZipDownload.c_str());
+                ShowModernMessageBox(hWndParent, L"Downloaded file is not a valid update archive. Update aborted.", L"Security Check", MB_OK | MB_ICONERROR);
                 return false;
             }
         }
 
-        // Save installed build and version to registry before restart
-        HKEY hKey = NULL;
-        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder\\Settings", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS)
+        // Extract ZIP archive into staging folder
+        LOG_INFO("Extracting update archive into staging directory: %ls", szStagingDir.c_str());
+        if (!ExtractZipArchive(szZipDownload, szStagingDir))
         {
-            DWORD dwBuild = (DWORD)info.remoteBuild;
-            RegSetValueExW(hKey, L"InstalledBuild", 0, REG_DWORD, (const BYTE*)&dwBuild, sizeof(dwBuild));
-            if (!info.remoteVersion.empty())
-            {
-                DWORD dwBytes = (DWORD)((info.remoteVersion.length() + 1) * sizeof(wchar_t));
-                RegSetValueExW(hKey, L"InstalledVersion", 0, REG_SZ, (const BYTE*)info.remoteVersion.c_str(), dwBytes);
-            }
-            RegCloseKey(hKey);
-        }
-
-        // Atomic replacement and rename
-        DeleteFileW(szOldExe.c_str());
-        if (!MoveFileExW(szCurrentExe, szOldExe.c_str(), MOVEFILE_REPLACE_EXISTING))
-        {
-            DeleteFileW(szTempDownload.c_str());
-            ShowModernMessageBox(hWndParent, L"Could not prepare current executable for replacement.", L"Update Error", MB_OK | MB_ICONERROR);
+            DeleteFileW(szZipDownload.c_str());
+            ShowModernMessageBox(hWndParent, L"Failed to extract update files from downloaded archive.", L"Extraction Error", MB_OK | MB_ICONERROR);
             return false;
         }
 
-        // Move downloaded .tmp to new target filename
-        if (!MoveFileExW(szTempDownload.c_str(), szTargetExe.c_str(), MOVEFILE_REPLACE_EXISTING))
+        // Save installed build and version to database before restart
+        DatabaseManager::SetSettingInt(L"InstalledBuild", info.remoteBuild);
+        if (!info.remoteVersion.empty())
         {
-            // Rollback original exe
-            MoveFileExW(szOldExe.c_str(), szCurrentExe, MOVEFILE_REPLACE_EXISTING);
-            ShowModernMessageBox(hWndParent, L"Could not place updated application executable.", L"Update Error", MB_OK | MB_ICONERROR);
+            DatabaseManager::SetSetting(L"InstalledVersion", info.remoteVersion);
+        }
+
+        // Create atomic update batch script
+        std::ofstream cmdFile(szHelperCmd, std::ios::out | std::ios::trunc);
+        if (!cmdFile.is_open())
+        {
+            ShowModernMessageBox(hWndParent, L"Could not prepare update script.", L"Update Error", MB_OK | MB_ICONERROR);
             return false;
         }
 
-        LOG_INFO("Update installed successfully. Launching '%ls'...", szTargetExe.c_str());
+        cmdFile << "@echo off\r\n";
+        cmdFile << "timeout /t 1 /nobreak >nul\r\n";
+        cmdFile << "xcopy /s /e /y /q \"%~dp0UpdateStaging\\*\" \"%~dp0..\\\" >nul\r\n";
+        cmdFile << "rmdir /s /q \"%~dp0UpdateStaging\" >nul 2>&1\r\n";
+        cmdFile << "del /f /q \"%~dp0TrainSimConsistBuilder_Update.zip\" >nul 2>&1\r\n";
+        cmdFile << "start \"\" \"%~dp0..\\TrainSimConsistBuilder.exe\"\r\n";
+        cmdFile << "(goto) 2>nul & del \"%~f0\"\r\n";
+        cmdFile.close();
 
-        // Launch newly updated application with its new filename
-        ShellExecuteW(NULL, L"open", szTargetExe.c_str(), NULL, NULL, SW_SHOWNORMAL);
+        LOG_INFO("Update package ready. Executing '%ls' and restarting...", szHelperCmd.c_str());
+
+        // Launch update script hidden and exit immediately to release DLL file locks
+        ShellExecuteW(NULL, L"open", szHelperCmd.c_str(), NULL, NULL, SW_HIDE);
         ExitProcess(0);
         return true;
     }
@@ -418,8 +433,7 @@ namespace Updater
                 std::wstring msg = L"A new update is available!\n\n"
                     L"Current Version: " + currentVer + L" (Build " + std::to_wstring(currentBuild) + L")\n"
                     L"Latest Version: " + (info.remoteVersion.empty() ? currentVer : info.remoteVersion) +
-                    L" (Build " + std::to_wstring(info.remoteBuild) + L")\n"
-                    L"Architecture: " + std::wstring(APP_ARCH) + L"\n\n";
+                    L" (Build " + std::to_wstring(info.remoteBuild) + L")\n\n";
 
                 if (!info.releaseNotes.empty())
                 {

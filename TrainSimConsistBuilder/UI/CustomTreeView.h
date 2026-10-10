@@ -32,6 +32,7 @@ public:
     CustomTreeView();
     ~CustomTreeView();
 
+    static bool Register(HINSTANCE hInstance);
     HWND Create(HWND hParent, int x, int y, int w, int h, int id);
     HWND GetHWND() const { return m_hWnd; }
 

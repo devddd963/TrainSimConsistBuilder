@@ -1,4 +1,5 @@
 #include "TextureLoader.h"
+#include "AppLogging.h"
 #include <shlwapi.h>
 #include <algorithm>
 #include <future>
@@ -404,6 +405,7 @@ static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& 
     {
         if (!FastZlib::DecompressZlib(pData + 16, dataLen - 16, decompBuffer))
         {
+            LOG_ERROR_W(L"[TextureLoader] FastZlib decompression failed for ACE texture: %ls", filePath.c_str());
             UnmapViewOfFile(pRaw);
             CloseHandle(hMap);
             CloseHandle(hFile);
@@ -420,6 +422,7 @@ static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& 
 
     if (dataLen < 148)
     {
+        LOG_WARN_W(L"[TextureLoader] Truncated ACE texture data (%llu bytes): %ls", (unsigned long long)dataLen, filePath.c_str());
         UnmapViewOfFile(pRaw);
         CloseHandle(hMap);
         CloseHandle(hFile);
@@ -429,6 +432,7 @@ static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& 
     uint32_t signature = *(const uint32_t*)pData;
     if (signature != 1)
     {
+        LOG_WARN_W(L"[TextureLoader] Unexpected ACE signature (0x%08X): %ls", signature, filePath.c_str());
         UnmapViewOfFile(pRaw);
         CloseHandle(hMap);
         CloseHandle(hFile);
@@ -443,6 +447,7 @@ static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& 
 
     if (width == 0 || height == 0 || width > 8192 || height > 8192)
     {
+        LOG_WARN_W(L"[TextureLoader] Invalid ACE dimensions %ux%u in: %ls", width, height, filePath.c_str());
         UnmapViewOfFile(pRaw);
         CloseHandle(hMap);
         CloseHandle(hFile);
@@ -454,6 +459,8 @@ static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& 
     int mipCount = 1 + (hasMipMaps ? (int)(std::log2((std::max)(width, height))) : 0);
     if (mipCount < 1) mipCount = 1;
 
+    // ACE Header is 148 bytes after SIMISA prefix:
+    // (6 uint32s header fields (24) + 64 bytes creator + 60 bytes comment = 148 bytes)
     size_t curOffset = 148;
     std::vector<AceChannelDesc> channels;
     bool hasAlpha = false;
@@ -488,7 +495,8 @@ static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& 
         case 0x12:
             dxgiFormat = DXGI_FORMAT_BC1_UNORM;
             blockSize = 8;
-            outData.hasAlpha = false;
+            // DXT1 / BC1 supports 1-bit alpha mask when channelCount is 4 or mask/alpha channel is present
+            outData.hasAlpha = (hasAlpha || hasMask || channelCount >= 4);
             outData.hasSmoothAlpha = false;
             break;
         case 0x14:
@@ -506,7 +514,7 @@ static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& 
         default:
             dxgiFormat = DXGI_FORMAT_BC1_UNORM;
             blockSize = 8;
-            outData.hasAlpha = false;
+            outData.hasAlpha = (hasAlpha || hasMask || channelCount >= 4);
             outData.hasSmoothAlpha = false;
             break;
         }
@@ -1088,49 +1096,65 @@ std::wstring TextureLoader::ResolveTexturePath(const std::wstring& shapeDir, con
         cleanRel.erase(0, 1);
     }
 
-    // 2. Combine with shapeDir and canonicalize relative hops (../ and ./)
-    wchar_t szCombined[MAX_PATH] = { 0 };
-    wchar_t szCanonical[MAX_PATH] = { 0 };
-    PathCombineW(szCombined, shapeDir.c_str(), cleanRel.c_str());
-    PathCanonicalizeW(szCanonical, szCombined);
-    std::wstring targetPath = szCanonical;
-
-    // 3. Smart Extension Priority & Fallback Logic
-    const wchar_t* pExt = PathFindExtensionW(targetPath.c_str());
-    if (pExt && _wcsicmp(pExt, L".dds") == 0)
-    {
-        DWORD dwAttr = GetFileAttributesW(targetPath.c_str());
+    // Helper to test if file exists (.ace or .dds fallback) with arbitrary length paths
+    auto TestPath = [](const std::wstring& candidate) -> std::wstring {
+        if (candidate.empty()) return L"";
+        DWORD dwAttr = GetFileAttributesW(candidate.c_str());
         if (dwAttr != INVALID_FILE_ATTRIBUTES && !(dwAttr & FILE_ATTRIBUTE_DIRECTORY))
         {
-            return targetPath;
+            return candidate;
+        }
+        // Try DDS fallback if candidate was ACE (arbitrary path length safe)
+        size_t dotPos = candidate.find_last_of(L'.');
+        if (dotPos != std::wstring::npos)
+        {
+            std::wstring ddsCandidate = candidate.substr(0, dotPos) + L".dds";
+            DWORD dwAttrDds = GetFileAttributesW(ddsCandidate.c_str());
+            if (dwAttrDds != INVALID_FILE_ATTRIBUTES && !(dwAttrDds & FILE_ATTRIBUTE_DIRECTORY))
+            {
+                return ddsCandidate;
+            }
         }
         return L"";
-    }
-    else
+    };
+
+    // 2. Candidate 1: Direct in shapeDir
+    std::wstring directPath = shapeDir + (shapeDir.empty() || shapeDir.back() == L'\\' ? L"" : L"\\") + cleanRel;
+    std::wstring match = TestPath(directPath);
+    if (!match.empty())
     {
-        // Priority 1: Exact .ace match
-        DWORD dwAttr = GetFileAttributesW(targetPath.c_str());
-        if (dwAttr != INVALID_FILE_ATTRIBUTES && !(dwAttr & FILE_ATTRIBUTE_DIRECTORY))
-        {
-            return targetPath;
-        }
-
-        // Priority 2: Smart fallback to .dds with same base name at the same resolved path
-        wchar_t szDdsPath[MAX_PATH] = { 0 };
-        wcscpy_s(szDdsPath, targetPath.c_str());
-        PathRenameExtensionW(szDdsPath, L".dds");
-
-        DWORD dwAttrDds = GetFileAttributesW(szDdsPath);
-        if (dwAttrDds != INVALID_FILE_ATTRIBUTES && !(dwAttrDds & FILE_ATTRIBUTE_DIRECTORY))
-        {
-            return szDdsPath;
-        }
+        return match;
     }
 
+    // 3. Candidate 2: In shapeDir TEXTURES subfolder
+    std::wstring texturesSub = shapeDir + (shapeDir.empty() || shapeDir.back() == L'\\' ? L"" : L"\\") + L"TEXTURES\\" + cleanRel;
+    match = TestPath(texturesSub);
+    if (!match.empty())
+    {
+        return match;
+    }
+
+    // 4. Candidate 3: In parent TRAINSET COMMON.TEXTURES folder
+    std::wstring commonTex1 = shapeDir + (shapeDir.empty() || shapeDir.back() == L'\\' ? L"" : L"\\") + L"..\\COMMON.TEXTURES\\" + cleanRel;
+    match = TestPath(commonTex1);
+    if (!match.empty())
+    {
+        return match;
+    }
+
+    // 5. Candidate 4: In 2-level parent COMMON.TEXTURES folder
+    std::wstring commonTex2 = shapeDir + (shapeDir.empty() || shapeDir.back() == L'\\' ? L"" : L"\\") + L"..\\..\\COMMON.TEXTURES\\" + cleanRel;
+    match = TestPath(commonTex2);
+    if (!match.empty())
+    {
+        return match;
+    }
+
+    LOG_TEXTURE_WARN_W(L"[MISSING_TEXTURE] Could not resolve texture '%ls' in shapeDir '%ls'", rawImageName.c_str(), shapeDir.c_str());
     return L"";
 }
 
-static std::unordered_map<std::wstring, DecodedTextureData> s_cpuDecodedCache;
+static std::unordered_map<std::wstring, std::shared_ptr<DecodedTextureData>> s_cpuDecodedCache;
 static std::mutex s_cpuCacheMutex;
 
 void TextureLoader::ClearGlobalCPUCache()
@@ -1139,14 +1163,16 @@ void TextureLoader::ClearGlobalCPUCache()
     s_cpuDecodedCache.clear();
 }
 
-void TextureLoader::PredecodeTexturesCPU(const std::wstring& shapeDir, const std::vector<std::wstring>& imageNames)
+void TextureLoader::PredecodeTexturesCPU(const std::wstring& shapeDir, const std::vector<std::wstring>& imageNames, const std::atomic<bool>* pCancelToken)
 {
     if (shapeDir.empty() || imageNames.empty()) return;
+    if (pCancelToken && *pCancelToken) return;
 
     std::vector<std::pair<std::wstring, std::wstring>> toLoad; // {resolvedPath, key}
 
     for (const auto& rawName : imageNames)
     {
+        if (pCancelToken && *pCancelToken) return;
         std::wstring resolved = ResolveTexturePath(shapeDir, rawName);
         if (resolved.empty()) continue;
 
@@ -1164,39 +1190,49 @@ void TextureLoader::PredecodeTexturesCPU(const std::wstring& shapeDir, const std
         toLoad.push_back({ resolved, key });
     }
 
-    if (toLoad.empty()) return;
+    if (toLoad.empty() || (pCancelToken && *pCancelToken)) return;
 
     // Decode in parallel across worker tasks
-    std::vector<std::future<DecodedTextureData>> futures;
+    std::vector<std::future<std::shared_ptr<DecodedTextureData>>> futures;
     futures.reserve(toLoad.size());
 
     for (const auto& item : toLoad)
     {
-        futures.push_back(std::async(std::launch::async, [item]() -> DecodedTextureData {
-            DecodedTextureData dec = {};
-            dec.resolvedPath = item.first;
-            dec.key = item.second;
+        if (pCancelToken && *pCancelToken) return;
+        futures.push_back(std::async(std::launch::async, [item, pCancelToken]() -> std::shared_ptr<DecodedTextureData> {
+            if (pCancelToken && *pCancelToken) return nullptr;
+            auto pDec = std::make_shared<DecodedTextureData>();
+            pDec->resolvedPath = item.first;
+            pDec->key = item.second;
 
-            const wchar_t* pExt = PathFindExtensionW(dec.resolvedPath.c_str());
+            const wchar_t* pExt = PathFindExtensionW(pDec->resolvedPath.c_str());
             if (pExt && _wcsicmp(pExt, L".dds") == 0)
             {
-                DecodeDdsToMemory(dec.resolvedPath, dec);
+                DecodeDdsToMemory(pDec->resolvedPath, *pDec);
             }
             else
             {
-                DecodeAceToMemory(dec.resolvedPath, dec);
+                DecodeAceToMemory(pDec->resolvedPath, *pDec);
             }
-            return dec;
+            return pDec;
         }));
     }
 
     for (auto& fut : futures)
     {
-        DecodedTextureData dec = fut.get();
-        if (dec.isValid && !dec.mips.empty())
+        auto pDec = fut.get();
+        if (pCancelToken && *pCancelToken) return;
+        if (pDec && pDec->isValid && !pDec->mips.empty())
         {
+            LOG_TEXTURE_W(L"[Predecode CPU] Texture Decoded: '%ls' -> %ux%u, Mips=%u, Format=0x%x (Alpha: %ls, SmoothAlpha: %ls)",
+                pDec->resolvedPath.c_str(), pDec->width, pDec->height, pDec->mipLevels, (uint32_t)pDec->format,
+                pDec->hasAlpha ? L"YES" : L"NO", pDec->hasSmoothAlpha ? L"YES" : L"NO");
             std::lock_guard<std::mutex> lock(s_cpuCacheMutex);
-            s_cpuDecodedCache[dec.key] = std::move(dec);
+            s_cpuDecodedCache[pDec->key] = pDec;
+        }
+        else if (pDec && !pDec->resolvedPath.empty())
+        {
+            LOG_TEXTURE_WARN_W(L"[Predecode CPU] Failed to decode texture: '%ls'", pDec->resolvedPath.c_str());
         }
     }
 }
@@ -1232,7 +1268,8 @@ void TextureLoader::PreloadTextures(const std::wstring& shapeDir, const std::vec
     if (toLoad.empty()) return;
 
     // 1. First check CPU decoded memory cache
-    std::vector<DecodedTextureData> readyDecoded;
+    std::vector<std::shared_ptr<DecodedTextureData>> readyDecoded;
+    readyDecoded.reserve(toLoad.size());
     std::vector<std::pair<std::wstring, std::wstring>> needDecode;
 
     {
@@ -1240,9 +1277,9 @@ void TextureLoader::PreloadTextures(const std::wstring& shapeDir, const std::vec
         for (const auto& item : toLoad)
         {
             auto it = s_cpuDecodedCache.find(item.second);
-            if (it != s_cpuDecodedCache.end() && it->second.isValid && !it->second.mips.empty())
+            if (it != s_cpuDecodedCache.end() && it->second && it->second->isValid && !it->second->mips.empty())
             {
-                readyDecoded.push_back(it->second);
+                readyDecoded.push_back(it->second); // Zero allocation pointer copy!
             }
             else
             {
@@ -1254,60 +1291,73 @@ void TextureLoader::PreloadTextures(const std::wstring& shapeDir, const std::vec
     // 2. Decode any missing textures in parallel worker threads
     if (!needDecode.empty())
     {
-        std::vector<std::future<DecodedTextureData>> futures;
+        std::vector<std::future<std::shared_ptr<DecodedTextureData>>> futures;
         futures.reserve(needDecode.size());
 
         for (const auto& item : needDecode)
         {
-            futures.push_back(std::async(std::launch::async, [item]() -> DecodedTextureData {
-                DecodedTextureData dec = {};
-                dec.resolvedPath = item.first;
-                dec.key = item.second;
+            futures.push_back(std::async(std::launch::async, [item]() -> std::shared_ptr<DecodedTextureData> {
+                auto pDec = std::make_shared<DecodedTextureData>();
+                pDec->resolvedPath = item.first;
+                pDec->key = item.second;
 
-                const wchar_t* pExt = PathFindExtensionW(dec.resolvedPath.c_str());
+                const wchar_t* pExt = PathFindExtensionW(pDec->resolvedPath.c_str());
                 if (pExt && _wcsicmp(pExt, L".dds") == 0)
                 {
-                    DecodeDdsToMemory(dec.resolvedPath, dec);
+                    DecodeDdsToMemory(pDec->resolvedPath, *pDec);
                 }
                 else
                 {
-                    DecodeAceToMemory(dec.resolvedPath, dec);
+                    DecodeAceToMemory(pDec->resolvedPath, *pDec);
                 }
-                return dec;
+                return pDec;
             }));
         }
 
         for (auto& fut : futures)
         {
-            DecodedTextureData dec = fut.get();
-            if (dec.isValid && !dec.mips.empty())
+            auto pDec = fut.get();
+            if (pDec && pDec->isValid && !pDec->mips.empty())
             {
-                readyDecoded.push_back(dec);
+                LOG_TEXTURE_W(L"[Preload Worker] Texture Decoded: '%ls' -> %ux%u, Mips=%u, Format=0x%x (Alpha: %ls, SmoothAlpha: %ls)",
+                    pDec->resolvedPath.c_str(), pDec->width, pDec->height, pDec->mipLevels, (uint32_t)pDec->format,
+                    pDec->hasAlpha ? L"YES" : L"NO", pDec->hasSmoothAlpha ? L"YES" : L"NO");
+                readyDecoded.push_back(pDec);
                 std::lock_guard<std::mutex> lock(s_cpuCacheMutex);
-                s_cpuDecodedCache[dec.key] = dec;
+                s_cpuDecodedCache[pDec->key] = pDec;
+            }
+            else if (pDec && !pDec->resolvedPath.empty())
+            {
+                LOG_TEXTURE_WARN_W(L"[Preload Worker] Failed to decode texture: '%ls'", pDec->resolvedPath.c_str());
             }
         }
     }
 
     // 3. Main thread: Instant D3D11 resource creation from memory buffers (< 0.01 ms)
-    for (const auto& dec : readyDecoded)
+    for (const auto& pDec : readyDecoded)
     {
-        if (!dec.isValid || dec.mips.empty()) continue;
+        if (!pDec || !pDec->isValid || pDec->mips.empty()) continue;
 
-        std::vector<D3D11_SUBRESOURCE_DATA> subData(dec.mips.size());
-        for (size_t i = 0; i < dec.mips.size(); ++i)
+        if (m_cache.find(pDec->key) != m_cache.end())
         {
-            subData[i].pSysMem = dec.mips[i].data.data();
-            subData[i].SysMemPitch = dec.mips[i].sysMemPitch;
-            subData[i].SysMemSlicePitch = dec.mips[i].sysMemSlicePitch;
+            TouchLRU(pDec->key);
+            continue;
+        }
+
+        std::vector<D3D11_SUBRESOURCE_DATA> subData(pDec->mips.size());
+        for (size_t i = 0; i < pDec->mips.size(); ++i)
+        {
+            subData[i].pSysMem = pDec->mips[i].data.data();
+            subData[i].SysMemPitch = pDec->mips[i].sysMemPitch;
+            subData[i].SysMemSlicePitch = pDec->mips[i].sysMemSlicePitch;
         }
 
         D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = dec.width;
-        desc.Height = dec.height;
-        desc.MipLevels = dec.mipLevels;
+        desc.Width = pDec->width;
+        desc.Height = pDec->height;
+        desc.MipLevels = pDec->mipLevels;
         desc.ArraySize = 1;
-        desc.Format = dec.format;
+        desc.Format = pDec->format;
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_IMMUTABLE;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -1317,17 +1367,25 @@ void TextureLoader::PreloadTextures(const std::wstring& shapeDir, const std::vec
         {
             if (SUCCEEDED(m_pDevice->CreateShaderResourceView(loaded.pTexture, NULL, &loaded.pSRV)))
             {
-                loaded.width = dec.width;
-                loaded.height = dec.height;
-                loaded.hasAlpha = dec.hasAlpha;
-                loaded.hasSmoothAlpha = dec.hasSmoothAlpha;
-                InsertCache(dec.key, loaded);
+                loaded.width = pDec->width;
+                loaded.height = pDec->height;
+                loaded.hasAlpha = pDec->hasAlpha;
+                loaded.hasSmoothAlpha = pDec->hasSmoothAlpha;
+                InsertCache(pDec->key, loaded);
+                LOG_TEXTURE_W(L"[GPU Upload] Texture Uploaded to D3D11: '%ls' -> %ux%u, Mips=%u, Format=0x%x (Alpha: %ls, SmoothAlpha: %ls)",
+                    pDec->resolvedPath.c_str(), loaded.width, loaded.height, desc.MipLevels, (uint32_t)desc.Format,
+                    loaded.hasAlpha ? L"YES" : L"NO", loaded.hasSmoothAlpha ? L"YES" : L"NO");
             }
             else
             {
                 loaded.pTexture->Release();
                 loaded.pTexture = nullptr;
+                LOG_TEXTURE_ERROR_W(L"[GPU Upload] CreateShaderResourceView failed for: '%ls'", pDec->resolvedPath.c_str());
             }
+        }
+        else
+        {
+            LOG_TEXTURE_ERROR_W(L"[GPU Upload] CreateTexture2D failed for: '%ls'", pDec->resolvedPath.c_str());
         }
     }
 }
@@ -1353,54 +1411,58 @@ ID3D11ShaderResourceView* TextureLoader::LoadTexture(const std::wstring& shapeDi
     }
 
     // Check CPU decoded memory cache
-    DecodedTextureData dec = {};
-    bool haveDec = false;
+    std::shared_ptr<DecodedTextureData> pDec;
     {
         std::lock_guard<std::mutex> lock(s_cpuCacheMutex);
         auto cit = s_cpuDecodedCache.find(key);
-        if (cit != s_cpuDecodedCache.end() && cit->second.isValid && !cit->second.mips.empty())
+        if (cit != s_cpuDecodedCache.end() && cit->second && cit->second->isValid && !cit->second->mips.empty())
         {
-            dec = cit->second;
-            haveDec = true;
+            pDec = cit->second;
         }
     }
 
-    if (!haveDec)
+    if (!pDec)
     {
-        dec.resolvedPath = resolvedPath;
-        dec.key = key;
+        pDec = std::make_shared<DecodedTextureData>();
+        pDec->resolvedPath = resolvedPath;
+        pDec->key = key;
         const wchar_t* pExt = PathFindExtensionW(resolvedPath.c_str());
+        bool haveDec = false;
         if (pExt && _wcsicmp(pExt, L".dds") == 0)
         {
-            haveDec = DecodeDdsToMemory(resolvedPath, dec);
+            haveDec = DecodeDdsToMemory(resolvedPath, *pDec);
         }
         else
         {
-            haveDec = DecodeAceToMemory(resolvedPath, dec);
+            haveDec = DecodeAceToMemory(resolvedPath, *pDec);
         }
-        if (haveDec && !dec.mips.empty())
+        if (haveDec && !pDec->mips.empty())
         {
             std::lock_guard<std::mutex> lock(s_cpuCacheMutex);
-            s_cpuDecodedCache[key] = dec;
+            s_cpuDecodedCache[key] = pDec;
+        }
+        else
+        {
+            pDec = nullptr;
         }
     }
 
-    if (haveDec && !dec.mips.empty())
+    if (pDec && !pDec->mips.empty())
     {
-        std::vector<D3D11_SUBRESOURCE_DATA> subData(dec.mips.size());
-        for (size_t i = 0; i < dec.mips.size(); ++i)
+        std::vector<D3D11_SUBRESOURCE_DATA> subData(pDec->mips.size());
+        for (size_t i = 0; i < pDec->mips.size(); ++i)
         {
-            subData[i].pSysMem = dec.mips[i].data.data();
-            subData[i].SysMemPitch = dec.mips[i].sysMemPitch;
-            subData[i].SysMemSlicePitch = dec.mips[i].sysMemSlicePitch;
+            subData[i].pSysMem = pDec->mips[i].data.data();
+            subData[i].SysMemPitch = pDec->mips[i].sysMemPitch;
+            subData[i].SysMemSlicePitch = pDec->mips[i].sysMemSlicePitch;
         }
 
         D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = dec.width;
-        desc.Height = dec.height;
-        desc.MipLevels = dec.mipLevels;
+        desc.Width = pDec->width;
+        desc.Height = pDec->height;
+        desc.MipLevels = pDec->mipLevels;
         desc.ArraySize = 1;
-        desc.Format = dec.format;
+        desc.Format = pDec->format;
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_IMMUTABLE;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -1410,11 +1472,14 @@ ID3D11ShaderResourceView* TextureLoader::LoadTexture(const std::wstring& shapeDi
         {
             if (SUCCEEDED(m_pDevice->CreateShaderResourceView(loaded.pTexture, NULL, &loaded.pSRV)))
             {
-                loaded.width = dec.width;
-                loaded.height = dec.height;
-                loaded.hasAlpha = dec.hasAlpha;
-                loaded.hasSmoothAlpha = dec.hasSmoothAlpha;
+                loaded.width = pDec->width;
+                loaded.height = pDec->height;
+                loaded.hasAlpha = pDec->hasAlpha;
+                loaded.hasSmoothAlpha = pDec->hasSmoothAlpha;
                 InsertCache(key, loaded);
+                LOG_TEXTURE_W(L"GPU Texture Uploaded: '%ls' -> %ux%u, Mips=%u, Format=0x%x (Alpha: %ls, Smooth: %ls)",
+                    resolvedPath.c_str(), loaded.width, loaded.height, desc.MipLevels, (uint32_t)desc.Format,
+                    loaded.hasAlpha ? L"YES" : L"NO", loaded.hasSmoothAlpha ? L"YES" : L"NO");
                 return loaded.pSRV;
             }
             loaded.pTexture->Release();
@@ -1422,6 +1487,7 @@ ID3D11ShaderResourceView* TextureLoader::LoadTexture(const std::wstring& shapeDi
         }
     }
 
+    LOG_TEXTURE_WARN_W(L"Decode Failed for '%ls' -> using Default Fallback Texture", resolvedPath.c_str());
     return m_pDefaultSRV;
 }
 
@@ -1442,9 +1508,9 @@ bool TextureLoader::HasAlpha(const std::wstring& shapeDir, const std::wstring& r
     {
         std::lock_guard<std::mutex> lock(s_cpuCacheMutex);
         auto cit = s_cpuDecodedCache.find(key);
-        if (cit != s_cpuDecodedCache.end() && cit->second.isValid)
+        if (cit != s_cpuDecodedCache.end() && cit->second && cit->second->isValid)
         {
-            return cit->second.hasAlpha;
+            return cit->second->hasAlpha;
         }
     }
 
@@ -1475,9 +1541,9 @@ bool TextureLoader::HasSmoothAlpha(const std::wstring& shapeDir, const std::wstr
     {
         std::lock_guard<std::mutex> lock(s_cpuCacheMutex);
         auto cit = s_cpuDecodedCache.find(key);
-        if (cit != s_cpuDecodedCache.end() && cit->second.isValid)
+        if (cit != s_cpuDecodedCache.end() && cit->second && cit->second->isValid)
         {
-            return cit->second.hasSmoothAlpha;
+            return cit->second->hasSmoothAlpha;
         }
     }
 
@@ -1493,42 +1559,41 @@ bool TextureLoader::HasSmoothAlpha(const std::wstring& shapeDir, const std::wstr
 
 bool TextureLoader::LoadAceTexture(const std::wstring& filePath, LoadedTexture& outTex)
 {
-    DecodedTextureData dec = {};
+    std::shared_ptr<DecodedTextureData> pDec;
     std::wstring key = filePath;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
-    bool haveDec = false;
     {
         std::lock_guard<std::mutex> lock(s_cpuCacheMutex);
         auto cit = s_cpuDecodedCache.find(key);
-        if (cit != s_cpuDecodedCache.end() && cit->second.isValid && !cit->second.mips.empty())
+        if (cit != s_cpuDecodedCache.end() && cit->second && cit->second->isValid && !cit->second->mips.empty())
         {
-            dec = cit->second;
-            haveDec = true;
+            pDec = cit->second;
         }
     }
 
-    if (!haveDec)
+    if (!pDec)
     {
-        if (!DecodeAceToMemory(filePath, dec) || dec.mips.empty()) return false;
+        pDec = std::make_shared<DecodedTextureData>();
+        if (!DecodeAceToMemory(filePath, *pDec) || pDec->mips.empty()) return false;
         std::lock_guard<std::mutex> lock(s_cpuCacheMutex);
-        s_cpuDecodedCache[key] = dec;
+        s_cpuDecodedCache[key] = pDec;
     }
 
-    std::vector<D3D11_SUBRESOURCE_DATA> subData(dec.mips.size());
-    for (size_t i = 0; i < dec.mips.size(); ++i)
+    std::vector<D3D11_SUBRESOURCE_DATA> subData(pDec->mips.size());
+    for (size_t i = 0; i < pDec->mips.size(); ++i)
     {
-        subData[i].pSysMem = dec.mips[i].data.data();
-        subData[i].SysMemPitch = dec.mips[i].sysMemPitch;
-        subData[i].SysMemSlicePitch = dec.mips[i].sysMemSlicePitch;
+        subData[i].pSysMem = pDec->mips[i].data.data();
+        subData[i].SysMemPitch = pDec->mips[i].sysMemPitch;
+        subData[i].SysMemSlicePitch = pDec->mips[i].sysMemSlicePitch;
     }
 
     D3D11_TEXTURE2D_DESC desc = {};
-    desc.Width = dec.width;
-    desc.Height = dec.height;
-    desc.MipLevels = dec.mipLevels;
+    desc.Width = pDec->width;
+    desc.Height = pDec->height;
+    desc.MipLevels = pDec->mipLevels;
     desc.ArraySize = 1;
-    desc.Format = dec.format;
+    desc.Format = pDec->format;
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_IMMUTABLE;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -1539,10 +1604,10 @@ bool TextureLoader::LoadAceTexture(const std::wstring& filePath, LoadedTexture& 
         hr = m_pDevice->CreateShaderResourceView(outTex.pTexture, NULL, &outTex.pSRV);
         if (SUCCEEDED(hr))
         {
-            outTex.width = dec.width;
-            outTex.height = dec.height;
-            outTex.hasAlpha = dec.hasAlpha;
-            outTex.hasSmoothAlpha = dec.hasSmoothAlpha;
+            outTex.width = pDec->width;
+            outTex.height = pDec->height;
+            outTex.hasAlpha = pDec->hasAlpha;
+            outTex.hasSmoothAlpha = pDec->hasSmoothAlpha;
             return true;
         }
         outTex.pTexture->Release();
@@ -1554,42 +1619,41 @@ bool TextureLoader::LoadAceTexture(const std::wstring& filePath, LoadedTexture& 
 
 bool TextureLoader::LoadDdsTexture(const std::wstring& filePath, LoadedTexture& outTex)
 {
-    DecodedTextureData dec = {};
+    std::shared_ptr<DecodedTextureData> pDec;
     std::wstring key = filePath;
     std::transform(key.begin(), key.end(), key.begin(), ::tolower);
 
-    bool haveDec = false;
     {
         std::lock_guard<std::mutex> lock(s_cpuCacheMutex);
         auto cit = s_cpuDecodedCache.find(key);
-        if (cit != s_cpuDecodedCache.end() && cit->second.isValid && !cit->second.mips.empty())
+        if (cit != s_cpuDecodedCache.end() && cit->second && cit->second->isValid && !cit->second->mips.empty())
         {
-            dec = cit->second;
-            haveDec = true;
+            pDec = cit->second;
         }
     }
 
-    if (!haveDec)
+    if (!pDec)
     {
-        if (!DecodeDdsToMemory(filePath, dec) || dec.mips.empty()) return false;
+        pDec = std::make_shared<DecodedTextureData>();
+        if (!DecodeDdsToMemory(filePath, *pDec) || pDec->mips.empty()) return false;
         std::lock_guard<std::mutex> lock(s_cpuCacheMutex);
-        s_cpuDecodedCache[key] = dec;
+        s_cpuDecodedCache[key] = pDec;
     }
 
-    std::vector<D3D11_SUBRESOURCE_DATA> subData(dec.mips.size());
-    for (size_t i = 0; i < dec.mips.size(); ++i)
+    std::vector<D3D11_SUBRESOURCE_DATA> subData(pDec->mips.size());
+    for (size_t i = 0; i < pDec->mips.size(); ++i)
     {
-        subData[i].pSysMem = dec.mips[i].data.data();
-        subData[i].SysMemPitch = dec.mips[i].sysMemPitch;
-        subData[i].SysMemSlicePitch = dec.mips[i].sysMemSlicePitch;
+        subData[i].pSysMem = pDec->mips[i].data.data();
+        subData[i].SysMemPitch = pDec->mips[i].sysMemPitch;
+        subData[i].SysMemSlicePitch = pDec->mips[i].sysMemSlicePitch;
     }
 
     D3D11_TEXTURE2D_DESC desc = {};
-    desc.Width = dec.width;
-    desc.Height = dec.height;
-    desc.MipLevels = dec.mipLevels;
+    desc.Width = pDec->width;
+    desc.Height = pDec->height;
+    desc.MipLevels = pDec->mipLevels;
     desc.ArraySize = 1;
-    desc.Format = dec.format;
+    desc.Format = pDec->format;
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_IMMUTABLE;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -1600,10 +1664,10 @@ bool TextureLoader::LoadDdsTexture(const std::wstring& filePath, LoadedTexture& 
         hr = m_pDevice->CreateShaderResourceView(outTex.pTexture, NULL, &outTex.pSRV);
         if (SUCCEEDED(hr))
         {
-            outTex.width = dec.width;
-            outTex.height = dec.height;
-            outTex.hasAlpha = dec.hasAlpha;
-            outTex.hasSmoothAlpha = dec.hasSmoothAlpha;
+            outTex.width = pDec->width;
+            outTex.height = pDec->height;
+            outTex.hasAlpha = pDec->hasAlpha;
+            outTex.hasSmoothAlpha = pDec->hasSmoothAlpha;
             return true;
         }
         outTex.pTexture->Release();

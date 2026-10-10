@@ -105,6 +105,12 @@
     <ClInclude Include="UI\3D-VisualStudio.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="SRC\TrainConfig.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\TrainConfigStudioDlg.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SRC\TrainSimConsistBuilder.cpp">
@@ -219,6 +225,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UI\3D-VisualStudio.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SRC\TrainConfig.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\TrainConfigStudioDlg.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

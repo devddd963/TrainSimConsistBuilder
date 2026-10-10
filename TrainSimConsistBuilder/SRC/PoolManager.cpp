@@ -1,9 +1,11 @@
 #include "PoolManager.h"
 #include "TrainSimConsistBuilder.h"
 #include "AppLogging.h"
+#include "DatabaseManager.h"
 #include <fstream>
 #include <shlwapi.h>
 #include <algorithm>
+#include <map>
 
 namespace PoolManager
 {
@@ -12,199 +14,17 @@ namespace PoolManager
 
     std::wstring GetPoolPresetCacheFilePath()
     {
-        wchar_t szExePath[MAX_PATH] = { 0 };
-        GetModuleFileNameW(NULL, szExePath, MAX_PATH);
-        std::wstring exePath = szExePath;
-        size_t lastSlash = exePath.find_last_of(L"\\/");
-        std::wstring dir = (lastSlash != std::wstring::npos) ? exePath.substr(0, lastSlash + 1) : L"";
-
-        std::wstring appDataDir = dir + L"AppData";
-        CreateDirectoryW(appDataDir.c_str(), NULL);
-
-        return appDataDir + L"\\PoolPreset.dat";
-    }
-
-    static void WriteWString(HANDLE hFile, const std::wstring& str)
-    {
-        uint32_t len = (uint32_t)str.length();
-        DWORD written = 0;
-        WriteFile(hFile, &len, sizeof(len), &written, NULL);
-        if (len > 0)
-        {
-            WriteFile(hFile, str.data(), (DWORD)(len * sizeof(wchar_t)), &written, NULL);
-        }
-    }
-
-    static bool ReadWString(HANDLE hFile, std::wstring& outStr)
-    {
-        uint32_t len = 0;
-        DWORD read = 0;
-        if (!ReadFile(hFile, &len, sizeof(len), &read, NULL) || read != sizeof(len))
-            return false;
-
-        if (len == 0)
-        {
-            outStr.clear();
-            return true;
-        }
-
-        outStr.resize(len);
-        if (!ReadFile(hFile, &outStr[0], (DWORD)(len * sizeof(wchar_t)), &read, NULL) || read != len * sizeof(wchar_t))
-            return false;
-
-        return true;
+        return DatabaseManager::GetDatabaseFilePath();
     }
 
     bool SavePoolPresetsToDisk(const std::vector<PoolPreset>& presets)
     {
-        std::wstring cachePath = GetPoolPresetCacheFilePath();
-        HANDLE hFile = CreateFileW(cachePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE)
-            return false;
-
-        DWORD written = 0;
-        uint32_t magic = 0x504F4F4C;
-        uint32_t version = 3;
-        WriteFile(hFile, &magic, sizeof(magic), &written, NULL);
-        WriteFile(hFile, &version, sizeof(version), &written, NULL);
-
-        uint32_t presetCount = (uint32_t)presets.size();
-        WriteFile(hFile, &presetCount, sizeof(presetCount), &written, NULL);
-
-        for (const auto& preset : presets)
-        {
-            WriteWString(hFile, preset.presetName);
-            uint32_t poolCount = (uint32_t)preset.pools.size();
-            WriteFile(hFile, &poolCount, sizeof(poolCount), &written, NULL);
-
-            for (const auto& pool : preset.pools)
-            {
-                WriteWString(hFile, pool.name);
-                uint32_t pMode = (uint32_t)pool.pickMode;
-                WriteFile(hFile, &pMode, sizeof(pMode), &written, NULL);
-                WriteFile(hFile, &pool.minCount, sizeof(pool.minCount), &written, NULL);
-                WriteFile(hFile, &pool.maxCount, sizeof(pool.maxCount), &written, NULL);
-                
-                uint32_t flipPol = (uint32_t)pool.flipPolicy;
-                WriteFile(hFile, &flipPol, sizeof(flipPol), &written, NULL);
-
-                uint32_t collapsed = pool.isCollapsed ? 1 : 0;
-                WriteFile(hFile, &collapsed, sizeof(collapsed), &written, NULL);
-
-                uint32_t unitCount = (uint32_t)pool.units.size();
-                WriteFile(hFile, &unitCount, sizeof(unitCount), &written, NULL);
-
-                for (const auto& u : pool.units)
-                {
-                    WriteWString(hFile, u.szFileName);
-                    WriteWString(hFile, u.szFolder);
-                    uint32_t isEng = u.isEngine ? 1 : 0;
-                    WriteFile(hFile, &isEng, sizeof(isEng), &written, NULL);
-
-                    uint32_t fMode = (uint32_t)u.flipMode;
-                    WriteFile(hFile, &fMode, sizeof(fMode), &written, NULL);
-                }
-            }
-        }
-
-        CloseHandle(hFile);
-        LOG_INFO("Saved %zu pool presets to disk.", presets.size());
-        return true;
+        return DatabaseManager::SavePoolPresets(presets);
     }
 
     bool LoadPoolPresetsFromDisk(std::vector<PoolPreset>& outPresets)
     {
-        std::wstring cachePath = GetPoolPresetCacheFilePath();
-        HANDLE hFile = CreateFileW(cachePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE)
-            return false;
-
-        DWORD read = 0;
-        uint32_t magic = 0;
-        uint32_t version = 0;
-        if (!ReadFile(hFile, &magic, sizeof(magic), &read, NULL) || magic != 0x504F4F4C)
-        {
-            CloseHandle(hFile);
-            return false;
-        }
-
-        ReadFile(hFile, &version, sizeof(version), &read, NULL);
-
-        uint32_t presetCount = 0;
-        if (!ReadFile(hFile, &presetCount, sizeof(presetCount), &read, NULL))
-        {
-            CloseHandle(hFile);
-            return false;
-        }
-
-        outPresets.clear();
-        outPresets.reserve(presetCount);
-
-        for (uint32_t i = 0; i < presetCount; ++i)
-        {
-            PoolPreset preset;
-            if (!ReadWString(hFile, preset.presetName)) break;
-
-            uint32_t poolCount = 0;
-            if (!ReadFile(hFile, &poolCount, sizeof(poolCount), &read, NULL)) break;
-
-            preset.pools.reserve(poolCount);
-            for (uint32_t p = 0; p < poolCount; ++p)
-            {
-                ConsistPool pool;
-                if (!ReadWString(hFile, pool.name)) break;
-
-                uint32_t pMode = 0;
-                ReadFile(hFile, &pMode, sizeof(pMode), &read, NULL);
-                pool.pickMode = (PoolPickMode)pMode;
-
-                ReadFile(hFile, &pool.minCount, sizeof(pool.minCount), &read, NULL);
-                ReadFile(hFile, &pool.maxCount, sizeof(pool.maxCount), &read, NULL);
-
-                if (version >= 2)
-                {
-                    uint32_t flipPol = 0;
-                    ReadFile(hFile, &flipPol, sizeof(flipPol), &read, NULL);
-                    pool.flipPolicy = (PoolFlipPolicy)flipPol;
-                }
-
-                if (version >= 3)
-                {
-                    uint32_t collapsed = 0;
-                    ReadFile(hFile, &collapsed, sizeof(collapsed), &read, NULL);
-                    pool.isCollapsed = (collapsed != 0);
-                }
-
-                uint32_t unitCount = 0;
-                ReadFile(hFile, &unitCount, sizeof(unitCount), &read, NULL);
-
-                pool.units.reserve(unitCount);
-                for (uint32_t u = 0; u < unitCount; ++u)
-                {
-                    PoolUnit unit;
-                    if (!ReadWString(hFile, unit.szFileName)) break;
-                    if (!ReadWString(hFile, unit.szFolder)) break;
-
-                    uint32_t isEng = 1;
-                    ReadFile(hFile, &isEng, sizeof(isEng), &read, NULL);
-                    unit.isEngine = (isEng != 0);
-
-                    if (version >= 2)
-                    {
-                        uint32_t fMode = 0;
-                        ReadFile(hFile, &fMode, sizeof(fMode), &read, NULL);
-                        unit.flipMode = (UnitFlipMode)fMode;
-                    }
-
-                    pool.units.push_back(unit);
-                }
-                preset.pools.push_back(pool);
-            }
-            outPresets.push_back(preset);
-        }
-
-        CloseHandle(hFile);
-        return true;
+        return DatabaseManager::LoadPoolPresets(outPresets);
     }
 
     void InitializePoolPresets()
@@ -418,7 +238,9 @@ namespace PoolManager
         if (fromIndex < 0 || fromIndex >= n || toIndex < 0 || toIndex >= n || fromIndex == toIndex)
             return false;
 
-        std::swap(pPreset->pools[fromIndex], pPreset->pools[toIndex]);
+        ConsistPool moved = pPreset->pools[fromIndex];
+        pPreset->pools.erase(pPreset->pools.begin() + fromIndex);
+        pPreset->pools.insert(pPreset->pools.begin() + toIndex, moved);
         PersistPoolPresets();
         return true;
     }
@@ -658,128 +480,130 @@ namespace PoolManager
         return true;
     }
 
+    bool MoveUnitInPool(int poolIndex, int fromUnitIndex, int toUnitIndex)
+    {
+        std::vector<int> indices = { fromUnitIndex };
+        return MoveUnitsInPool(poolIndex, indices, toUnitIndex);
+    }
+
+    bool MoveUnitsInPool(int poolIndex, const std::vector<int>& fromIndices, int targetIndex)
+    {
+        PoolPreset* pPreset = GetActivePreset();
+        if (!pPreset || poolIndex < 0 || poolIndex >= (int)pPreset->pools.size())
+            return false;
+        if (fromIndices.empty()) return false;
+
+        auto& pool = pPreset->pools[poolIndex];
+        int totalUnits = (int)pool.units.size();
+        if (totalUnits <= 1) return false;
+
+        std::vector<int> sortedIndices = fromIndices;
+        std::sort(sortedIndices.begin(), sortedIndices.end());
+        sortedIndices.erase(std::unique(sortedIndices.begin(), sortedIndices.end()), sortedIndices.end());
+
+        for (int idx : sortedIndices)
+        {
+            if (idx < 0 || idx >= totalUnits) return false;
+        }
+
+        std::vector<PoolUnit> movingUnits;
+        for (int idx : sortedIndices)
+        {
+            movingUnits.push_back(pool.units[idx]);
+        }
+
+        int adjustedTarget = targetIndex;
+        for (int idx : sortedIndices)
+        {
+            if (idx < targetIndex)
+                adjustedTarget--;
+        }
+
+        for (auto it = sortedIndices.rbegin(); it != sortedIndices.rend(); ++it)
+        {
+            pool.units.erase(pool.units.begin() + *it);
+        }
+
+        if (adjustedTarget < 0) adjustedTarget = 0;
+        if (adjustedTarget > (int)pool.units.size()) adjustedTarget = (int)pool.units.size();
+
+        pool.units.insert(pool.units.begin() + adjustedTarget, movingUnits.begin(), movingUnits.end());
+        PersistPoolPresets();
+        return true;
+    }
+
+    bool MoveUnitsAcrossPools(int fromPoolIndex, const std::vector<int>& fromIndices, int toPoolIndex, int targetIndex)
+    {
+        if (fromPoolIndex == toPoolIndex)
+            return MoveUnitsInPool(fromPoolIndex, fromIndices, targetIndex);
+
+        PoolPreset* pPreset = GetActivePreset();
+        if (!pPreset) return false;
+        if (fromPoolIndex < 0 || fromPoolIndex >= (int)pPreset->pools.size()) return false;
+        if (toPoolIndex < 0 || toPoolIndex >= (int)pPreset->pools.size()) return false;
+        if (fromIndices.empty()) return false;
+
+        auto& fromPool = pPreset->pools[fromPoolIndex];
+        auto& toPool = pPreset->pools[toPoolIndex];
+
+        std::vector<int> sortedIndices = fromIndices;
+        std::sort(sortedIndices.begin(), sortedIndices.end());
+        sortedIndices.erase(std::unique(sortedIndices.begin(), sortedIndices.end()), sortedIndices.end());
+
+        for (int idx : sortedIndices)
+        {
+            if (idx < 0 || idx >= (int)fromPool.units.size()) return false;
+        }
+
+        std::vector<PoolUnit> movingUnits;
+        for (int idx : sortedIndices)
+        {
+            movingUnits.push_back(fromPool.units[idx]);
+        }
+
+        for (auto it = sortedIndices.rbegin(); it != sortedIndices.rend(); ++it)
+        {
+            fromPool.units.erase(fromPool.units.begin() + *it);
+        }
+
+        if (targetIndex < 0) targetIndex = 0;
+        if (targetIndex > (int)toPool.units.size()) targetIndex = (int)toPool.units.size();
+
+        toPool.units.insert(toPool.units.begin() + targetIndex, movingUnits.begin(), movingUnits.end());
+        PersistPoolPresets();
+        return true;
+    }
+
     // -----------------------------------------------------------------------
     // Replacement Group / Palette Management
     // -----------------------------------------------------------------------
     std::vector<ReplacementGroup> g_ReplacementGroupsCache;
+    std::vector<std::wstring> g_ReplacementGroupCategoriesCache;
 
     std::wstring GetReplacementGroupsCacheFilePath()
     {
-        wchar_t szExePath[MAX_PATH] = { 0 };
-        GetModuleFileNameW(NULL, szExePath, MAX_PATH);
-        std::wstring exePath = szExePath;
-        size_t lastSlash = exePath.find_last_of(L"\\/");
-        std::wstring dir = (lastSlash != std::wstring::npos) ? exePath.substr(0, lastSlash + 1) : L"";
-
-        std::wstring appDataDir = dir + L"AppData";
-        CreateDirectoryW(appDataDir.c_str(), NULL);
-
-        return appDataDir + L"\\ReplacementGroups.dat";
+        return DatabaseManager::GetDatabaseFilePath();
     }
 
     bool SaveReplacementGroupsToDisk(const std::vector<ReplacementGroup>& groups)
     {
-        std::wstring cachePath = GetReplacementGroupsCacheFilePath();
-        HANDLE hFile = CreateFileW(cachePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE)
-            return false;
-
-        DWORD written = 0;
-        uint32_t magic = 0x52475250; // "RGRP"
-        uint32_t version = 1;
-        WriteFile(hFile, &magic, sizeof(magic), &written, NULL);
-        WriteFile(hFile, &version, sizeof(version), &written, NULL);
-
-        uint32_t groupCount = (uint32_t)groups.size();
-        WriteFile(hFile, &groupCount, sizeof(groupCount), &written, NULL);
-
-        for (const auto& grp : groups)
-        {
-            WriteWString(hFile, grp.name);
-            uint32_t collapsed = grp.isCollapsed ? 1 : 0;
-            WriteFile(hFile, &collapsed, sizeof(collapsed), &written, NULL);
-
-            uint32_t unitCount = (uint32_t)grp.units.size();
-            WriteFile(hFile, &unitCount, sizeof(unitCount), &written, NULL);
-
-            for (const auto& u : grp.units)
-            {
-                WriteWString(hFile, u.szFileName);
-                WriteWString(hFile, u.szFolder);
-                uint32_t isEng = u.isEngine ? 1 : 0;
-                WriteFile(hFile, &isEng, sizeof(isEng), &written, NULL);
-                uint32_t fMode = (uint32_t)u.flipMode;
-                WriteFile(hFile, &fMode, sizeof(fMode), &written, NULL);
-            }
-        }
-
-        CloseHandle(hFile);
-        return true;
+        return DatabaseManager::SaveReplacementGroups(groups);
     }
 
     bool LoadReplacementGroupsFromDisk(std::vector<ReplacementGroup>& outGroups)
     {
-        std::wstring cachePath = GetReplacementGroupsCacheFilePath();
-        HANDLE hFile = CreateFileW(cachePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hFile == INVALID_HANDLE_VALUE)
-            return false;
+        return DatabaseManager::LoadReplacementGroups(outGroups);
+    }
 
-        DWORD read = 0;
-        uint32_t magic = 0;
-        uint32_t version = 0;
-        if (!ReadFile(hFile, &magic, sizeof(magic), &read, NULL) || magic != 0x52475250)
+    void PersistReplacementGroupCategories()
+    {
+        std::wstring joined;
+        for (size_t i = 0; i < g_ReplacementGroupCategoriesCache.size(); ++i)
         {
-            CloseHandle(hFile);
-            return false;
+            if (i > 0) joined += L"\t";
+            joined += g_ReplacementGroupCategoriesCache[i];
         }
-
-        ReadFile(hFile, &version, sizeof(version), &read, NULL);
-
-        uint32_t groupCount = 0;
-        if (!ReadFile(hFile, &groupCount, sizeof(groupCount), &read, NULL))
-        {
-            CloseHandle(hFile);
-            return false;
-        }
-
-        outGroups.clear();
-        outGroups.reserve(groupCount);
-
-        for (uint32_t g = 0; g < groupCount; ++g)
-        {
-            ReplacementGroup grp;
-            if (!ReadWString(hFile, grp.name)) break;
-
-            uint32_t collapsed = 0;
-            ReadFile(hFile, &collapsed, sizeof(collapsed), &read, NULL);
-            grp.isCollapsed = (collapsed != 0);
-
-            uint32_t unitCount = 0;
-            ReadFile(hFile, &unitCount, sizeof(unitCount), &read, NULL);
-
-            grp.units.reserve(unitCount);
-            for (uint32_t u = 0; u < unitCount; ++u)
-            {
-                PoolUnit unit;
-                if (!ReadWString(hFile, unit.szFileName)) break;
-                if (!ReadWString(hFile, unit.szFolder)) break;
-
-                uint32_t isEng = 0;
-                ReadFile(hFile, &isEng, sizeof(isEng), &read, NULL);
-                unit.isEngine = (isEng != 0);
-
-                uint32_t fMode = 0;
-                ReadFile(hFile, &fMode, sizeof(fMode), &read, NULL);
-                unit.flipMode = (UnitFlipMode)fMode;
-
-                grp.units.push_back(unit);
-            }
-
-            outGroups.push_back(grp);
-        }
-
-        CloseHandle(hFile);
-        return true;
+        DatabaseManager::SetSetting(L"ReplacementGroupCategories", joined);
     }
 
     void InitializeReplacementGroups()
@@ -788,14 +612,154 @@ namespace PoolManager
         {
             g_ReplacementGroupsCache.clear();
         }
+
+        g_ReplacementGroupCategoriesCache.clear();
+
+        std::wstring savedCats = DatabaseManager::GetSetting(L"ReplacementGroupCategories", L"");
+        if (!savedCats.empty())
+        {
+            std::wstringstream ss(savedCats);
+            std::wstring cat;
+            while (std::getline(ss, cat, L'\t'))
+            {
+                if (!cat.empty())
+                {
+                    bool exists = false;
+                    for (const auto& c : g_ReplacementGroupCategoriesCache)
+                    {
+                        if (_wcsicmp(c.c_str(), cat.c_str()) == 0) { exists = true; break; }
+                    }
+                    if (!exists)
+                    {
+                        g_ReplacementGroupCategoriesCache.push_back(cat);
+                    }
+                }
+            }
+        }
+
+        // Also register categories from existing groups if any
+        for (const auto& grp : g_ReplacementGroupsCache)
+        {
+            if (!grp.category.empty())
+            {
+                bool exists = false;
+                for (const auto& ex : g_ReplacementGroupCategoriesCache)
+                {
+                    if (_wcsicmp(ex.c_str(), grp.category.c_str()) == 0) { exists = true; break; }
+                }
+                if (!exists)
+                {
+                    g_ReplacementGroupCategoriesCache.push_back(grp.category);
+                }
+            }
+        }
     }
 
     void PersistReplacementGroups()
     {
         SaveReplacementGroupsToDisk(g_ReplacementGroupsCache);
+        PersistReplacementGroupCategories();
     }
 
-    int AddReplacementGroup(const std::wstring& name)
+    std::vector<std::wstring> GetReplacementGroupCategories()
+    {
+        return g_ReplacementGroupCategoriesCache;
+    }
+
+    bool AddReplacementGroupCategory(const std::wstring& categoryName)
+    {
+        std::wstring trimmed = categoryName;
+        size_t first = trimmed.find_first_not_of(L" \t\r\n");
+        if (first == std::wstring::npos) return false;
+        size_t last = trimmed.find_last_not_of(L" \t\r\n");
+        trimmed = trimmed.substr(first, (last - first + 1));
+        if (trimmed.empty()) return false;
+
+        for (const auto& c : g_ReplacementGroupCategoriesCache)
+        {
+            if (_wcsicmp(c.c_str(), trimmed.c_str()) == 0)
+                return false; // Already exists
+        }
+
+        g_ReplacementGroupCategoriesCache.push_back(trimmed);
+        PersistReplacementGroupCategories();
+        return true;
+    }
+
+    bool DeleteReplacementGroupCategory(const std::wstring& categoryName)
+    {
+        auto it = std::find_if(g_ReplacementGroupCategoriesCache.begin(), g_ReplacementGroupCategoriesCache.end(),
+            [&](const std::wstring& c) { return _wcsicmp(c.c_str(), categoryName.c_str()) == 0; });
+
+        if (it == g_ReplacementGroupCategoriesCache.end())
+            return false;
+
+        g_ReplacementGroupCategoriesCache.erase(it);
+
+        // Delete all groups in this category along with their units
+        g_ReplacementGroupsCache.erase(
+            std::remove_if(g_ReplacementGroupsCache.begin(), g_ReplacementGroupsCache.end(),
+                [&](const ReplacementGroup& grp) {
+                    return _wcsicmp(grp.category.c_str(), categoryName.c_str()) == 0;
+                }),
+            g_ReplacementGroupsCache.end()
+        );
+
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool EmptyReplacementGroupCategory(const std::wstring& categoryName)
+    {
+        // Remove all favourite groups belonging to this category
+        g_ReplacementGroupsCache.erase(
+            std::remove_if(g_ReplacementGroupsCache.begin(), g_ReplacementGroupsCache.end(),
+                [&](const ReplacementGroup& grp) {
+                    return _wcsicmp(grp.category.c_str(), categoryName.c_str()) == 0;
+                }),
+            g_ReplacementGroupsCache.end()
+        );
+
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool RenameReplacementGroupCategory(const std::wstring& oldName, const std::wstring& newName)
+    {
+        std::wstring trimmed = newName;
+        size_t first = trimmed.find_first_not_of(L" \t\r\n");
+        if (first == std::wstring::npos) return false;
+        size_t last = trimmed.find_last_not_of(L" \t\r\n");
+        trimmed = trimmed.substr(first, (last - first + 1));
+        if (trimmed.empty()) return false;
+
+        for (const auto& c : g_ReplacementGroupCategoriesCache)
+        {
+            if (_wcsicmp(c.c_str(), trimmed.c_str()) == 0)
+                return false; // Duplicate
+        }
+
+        auto it = std::find_if(g_ReplacementGroupCategoriesCache.begin(), g_ReplacementGroupCategoriesCache.end(),
+            [&](const std::wstring& c) { return _wcsicmp(c.c_str(), oldName.c_str()) == 0; });
+
+        if (it == g_ReplacementGroupCategoriesCache.end())
+            return false;
+
+        *it = trimmed;
+
+        for (auto& grp : g_ReplacementGroupsCache)
+        {
+            if (_wcsicmp(grp.category.c_str(), oldName.c_str()) == 0)
+            {
+                grp.category = trimmed;
+            }
+        }
+
+        PersistReplacementGroups();
+        return true;
+    }
+
+    int AddReplacementGroup(const std::wstring& name, const std::wstring& category)
     {
         ReplacementGroup grp;
         if (name.empty())
@@ -806,9 +770,48 @@ namespace PoolManager
         {
             grp.name = name;
         }
+
+        std::wstring cat = category;
+        if (cat.empty() && !g_ReplacementGroupCategoriesCache.empty())
+        {
+            cat = g_ReplacementGroupCategoriesCache[0];
+        }
+        grp.category = cat;
         g_ReplacementGroupsCache.push_back(grp);
         PersistReplacementGroups();
         return (int)g_ReplacementGroupsCache.size() - 1;
+    }
+
+    int CloneReplacementGroup(int groupIndex)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return -1;
+
+        ReplacementGroup newGrp = g_ReplacementGroupsCache[groupIndex];
+        newGrp.name = newGrp.name + L" (Copy)";
+
+        int insertIdx = groupIndex + 1;
+        if (insertIdx >= (int)g_ReplacementGroupsCache.size())
+        {
+            g_ReplacementGroupsCache.push_back(newGrp);
+        }
+        else
+        {
+            g_ReplacementGroupsCache.insert(g_ReplacementGroupsCache.begin() + insertIdx, newGrp);
+        }
+        PersistReplacementGroups();
+        return insertIdx;
+    }
+
+    bool MoveReplacementGroup(int fromIndex, int toIndex)
+    {
+        int n = (int)g_ReplacementGroupsCache.size();
+        if (fromIndex < 0 || fromIndex >= n || toIndex < 0 || toIndex >= n || fromIndex == toIndex)
+            return false;
+
+        std::swap(g_ReplacementGroupsCache[fromIndex], g_ReplacementGroupsCache[toIndex]);
+        PersistReplacementGroups();
+        return true;
     }
 
     bool RemoveReplacementGroup(int groupIndex)
@@ -827,6 +830,64 @@ namespace PoolManager
             return false;
 
         g_ReplacementGroupsCache[groupIndex].name = newName;
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool SetReplacementGroupCategory(int groupIndex, const std::wstring& newCategory)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        g_ReplacementGroupsCache[groupIndex].category = newCategory.empty() ? L"General" : newCategory;
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool CycleReplacementGroupPickMode(int groupIndex)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        auto& grp = g_ReplacementGroupsCache[groupIndex];
+        grp.pickMode = (grp.pickMode == PoolPickMode::Random) ? PoolPickMode::Sequential : PoolPickMode::Random;
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool CycleReplacementGroupFlipPolicy(int groupIndex)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        auto& grp = g_ReplacementGroupsCache[groupIndex];
+        if (grp.flipPolicy == PoolFlipPolicy::ForwardOnly)
+            grp.flipPolicy = PoolFlipPolicy::AllowRandom;
+        else if (grp.flipPolicy == PoolFlipPolicy::AllowRandom)
+            grp.flipPolicy = PoolFlipPolicy::AlwaysFlipped;
+        else
+            grp.flipPolicy = PoolFlipPolicy::ForwardOnly;
+
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool SetReplacementGroupPickMode(int groupIndex, PoolPickMode mode)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        g_ReplacementGroupsCache[groupIndex].pickMode = mode;
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool SetReplacementGroupFlipPolicy(int groupIndex, PoolFlipPolicy policy)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        g_ReplacementGroupsCache[groupIndex].flipPolicy = policy;
         PersistReplacementGroups();
         return true;
     }
@@ -862,6 +923,59 @@ namespace PoolManager
 
         g_ReplacementGroupsCache[groupIndex].units.clear();
         PersistReplacementGroups();
+        return true;
+    }
+
+    bool CopyReplacementGroupUnitsToClipboard(int groupIndex)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        const auto& grp = g_ReplacementGroupsCache[groupIndex];
+        if (grp.units.empty())
+            return false;
+
+        std::vector<ConsistReader::UnitInfo> clipUnits;
+        for (const auto& pu : grp.units)
+        {
+            ConsistReader::UnitInfo ui;
+            ui.uid = pu.szFileName;
+            ui.parentDir = pu.szFolder;
+            ui.isEngine = pu.isEngine;
+            ui.isFlipped = (pu.flipMode == UnitFlipMode::Flipped);
+            clipUnits.push_back(ui);
+        }
+
+        SetAppClipboardUnits(clipUnits);
+        return true;
+    }
+
+    bool CopyMultipleUnitsFromReplacementGroupToClipboard(int groupIndex, const std::vector<int>& unitIndices)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+
+        const auto& grp = g_ReplacementGroupsCache[groupIndex];
+        if (grp.units.empty() || unitIndices.empty())
+            return false;
+
+        std::vector<ConsistReader::UnitInfo> clipUnits;
+        for (int idx : unitIndices)
+        {
+            if (idx >= 0 && idx < (int)grp.units.size())
+            {
+                const auto& pu = grp.units[idx];
+                ConsistReader::UnitInfo ui;
+                ui.uid = pu.szFileName;
+                ui.parentDir = pu.szFolder;
+                ui.isEngine = pu.isEngine;
+                ui.isFlipped = (pu.flipMode == UnitFlipMode::Flipped);
+                clipUnits.push_back(ui);
+            }
+        }
+
+        if (clipUnits.empty()) return false;
+        SetAppClipboardUnits(clipUnits);
         return true;
     }
 
@@ -929,7 +1043,98 @@ namespace PoolManager
         return true;
     }
 
-    bool PickUnitFromGroup(int groupIndex, PoolUnit& outUnit)
+    bool MoveUnitInReplacementGroup(int groupIndex, int fromUnitIndex, int toUnitIndex)
+    {
+        std::vector<int> indices = { fromUnitIndex };
+        return MoveUnitsInReplacementGroup(groupIndex, indices, toUnitIndex);
+    }
+
+    bool MoveUnitsInReplacementGroup(int groupIndex, const std::vector<int>& fromIndices, int targetIndex)
+    {
+        if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
+            return false;
+        if (fromIndices.empty()) return false;
+
+        auto& grp = g_ReplacementGroupsCache[groupIndex];
+        int totalUnits = (int)grp.units.size();
+        if (totalUnits <= 1) return false;
+
+        std::vector<int> sortedIndices = fromIndices;
+        std::sort(sortedIndices.begin(), sortedIndices.end());
+        sortedIndices.erase(std::unique(sortedIndices.begin(), sortedIndices.end()), sortedIndices.end());
+
+        for (int idx : sortedIndices)
+        {
+            if (idx < 0 || idx >= totalUnits) return false;
+        }
+
+        std::vector<PoolUnit> movingUnits;
+        for (int idx : sortedIndices)
+        {
+            movingUnits.push_back(grp.units[idx]);
+        }
+
+        int adjustedTarget = targetIndex;
+        for (int idx : sortedIndices)
+        {
+            if (idx < targetIndex)
+                adjustedTarget--;
+        }
+
+        for (auto it = sortedIndices.rbegin(); it != sortedIndices.rend(); ++it)
+        {
+            grp.units.erase(grp.units.begin() + *it);
+        }
+
+        if (adjustedTarget < 0) adjustedTarget = 0;
+        if (adjustedTarget > (int)grp.units.size()) adjustedTarget = (int)grp.units.size();
+
+        grp.units.insert(grp.units.begin() + adjustedTarget, movingUnits.begin(), movingUnits.end());
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool MoveUnitsAcrossReplacementGroups(int fromGroupIndex, const std::vector<int>& fromIndices, int toGroupIndex, int targetIndex)
+    {
+        if (fromGroupIndex == toGroupIndex)
+            return MoveUnitsInReplacementGroup(fromGroupIndex, fromIndices, targetIndex);
+
+        if (fromGroupIndex < 0 || fromGroupIndex >= (int)g_ReplacementGroupsCache.size()) return false;
+        if (toGroupIndex < 0 || toGroupIndex >= (int)g_ReplacementGroupsCache.size()) return false;
+        if (fromIndices.empty()) return false;
+
+        auto& fromGrp = g_ReplacementGroupsCache[fromGroupIndex];
+        auto& toGrp = g_ReplacementGroupsCache[toGroupIndex];
+
+        std::vector<int> sortedIndices = fromIndices;
+        std::sort(sortedIndices.begin(), sortedIndices.end());
+        sortedIndices.erase(std::unique(sortedIndices.begin(), sortedIndices.end()), sortedIndices.end());
+
+        for (int idx : sortedIndices)
+        {
+            if (idx < 0 || idx >= (int)fromGrp.units.size()) return false;
+        }
+
+        std::vector<PoolUnit> movingUnits;
+        for (int idx : sortedIndices)
+        {
+            movingUnits.push_back(fromGrp.units[idx]);
+        }
+
+        for (auto it = sortedIndices.rbegin(); it != sortedIndices.rend(); ++it)
+        {
+            fromGrp.units.erase(fromGrp.units.begin() + *it);
+        }
+
+        if (targetIndex < 0) targetIndex = 0;
+        if (targetIndex > (int)toGrp.units.size()) targetIndex = (int)toGrp.units.size();
+
+        toGrp.units.insert(toGrp.units.begin() + targetIndex, movingUnits.begin(), movingUnits.end());
+        PersistReplacementGroups();
+        return true;
+    }
+
+    bool PickUnitFromGroup(int groupIndex, PoolUnit& outUnit, int seqIndex)
     {
         if (groupIndex < 0 || groupIndex >= (int)g_ReplacementGroupsCache.size())
             return false;
@@ -938,7 +1143,17 @@ namespace PoolManager
         if (grp.units.empty())
             return false;
 
-        int pick = rand() % (int)grp.units.size();
+        int pick = 0;
+        if (grp.pickMode == PoolPickMode::Sequential)
+        {
+            static std::map<int, int> s_groupSeq;
+            int s = (seqIndex >= 0) ? seqIndex : s_groupSeq[groupIndex]++;
+            pick = s % (int)grp.units.size();
+        }
+        else
+        {
+            pick = rand() % (int)grp.units.size();
+        }
         outUnit = grp.units[pick];
         return true;
     }

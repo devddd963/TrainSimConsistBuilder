@@ -89,10 +89,16 @@ namespace PoolManager
     bool CopyMultipleUnitsToClipboard(int poolIndex, const std::vector<int>& unitIndices);
     bool RemoveMultipleUnitsFromPool(int poolIndex, const std::vector<int>& unitIndices);
     bool SetMultipleUnitsFlipMode(int poolIndex, const std::vector<int>& unitIndices, UnitFlipMode mode);
+    bool MoveUnitInPool(int poolIndex, int fromUnitIndex, int toUnitIndex);
+    bool MoveUnitsInPool(int poolIndex, const std::vector<int>& fromIndices, int targetIndex);
+    bool MoveUnitsAcrossPools(int fromPoolIndex, const std::vector<int>& fromIndices, int toPoolIndex, int targetIndex);
 
     // Replacement Group / Palette for Context Menu Instant Unit Swap
     struct ReplacementGroup {
         std::wstring name;                         // e.g. "Twin WAP-7 Locos", "LHB 3A Coaches", "BOXN Wagons"
+        std::wstring category = L"General";        // e.g. "Electric Locomotives", "Diesel Locomotives", "Coaches", "Freight"
+        PoolPickMode pickMode = PoolPickMode::Random; // Random vs Sequential picking
+        PoolFlipPolicy flipPolicy = PoolFlipPolicy::ForwardOnly; // Group orientation policy
         bool isCollapsed = false;                  // UI collapse/expand state
         std::vector<PoolUnit> units;               // Curated units in this group
     };
@@ -102,24 +108,45 @@ namespace PoolManager
     bool LoadReplacementGroupsFromDisk(std::vector<ReplacementGroup>& outGroups);
     bool SaveReplacementGroupsToDisk(const std::vector<ReplacementGroup>& groups);
 
-    // Global in-memory replacement groups cache
+    // Global in-memory replacement groups & categories cache
     extern std::vector<ReplacementGroup> g_ReplacementGroupsCache;
+    extern std::vector<std::wstring> g_ReplacementGroupCategoriesCache;
 
     // Initialization & persistence
     void InitializeReplacementGroups();
     void PersistReplacementGroups();
+    void PersistReplacementGroupCategories();
+
+    // Category Management
+    std::vector<std::wstring> GetReplacementGroupCategories();
+    bool AddReplacementGroupCategory(const std::wstring& categoryName);
+    bool DeleteReplacementGroupCategory(const std::wstring& categoryName);
+    bool RenameReplacementGroupCategory(const std::wstring& oldName, const std::wstring& newName);
+    bool EmptyReplacementGroupCategory(const std::wstring& categoryName);
 
     // Replacement Group CRUD operations
-    int AddReplacementGroup(const std::wstring& name = L"");
+    int AddReplacementGroup(const std::wstring& name = L"", const std::wstring& category = L"");
+    int CloneReplacementGroup(int groupIndex);
+    bool MoveReplacementGroup(int fromIndex, int toIndex);
     bool RemoveReplacementGroup(int groupIndex);
     bool RenameReplacementGroup(int groupIndex, const std::wstring& newName);
+    bool SetReplacementGroupCategory(int groupIndex, const std::wstring& newCategory);
+    bool CycleReplacementGroupPickMode(int groupIndex);
+    bool CycleReplacementGroupFlipPolicy(int groupIndex);
+    bool SetReplacementGroupPickMode(int groupIndex, PoolPickMode mode);
+    bool SetReplacementGroupFlipPolicy(int groupIndex, PoolFlipPolicy policy);
     bool AddUnitToReplacementGroup(int groupIndex, const PoolUnit& unit);
     bool RemoveUnitFromReplacementGroup(int groupIndex, int unitIndex);
     bool ClearReplacementGroupUnits(int groupIndex);
     int PasteUnitsToReplacementGroup(int groupIndex, const std::vector<ConsistReader::UnitInfo>& clipboardUnits);
+    bool CopyReplacementGroupUnitsToClipboard(int groupIndex);
+    bool CopyMultipleUnitsFromReplacementGroupToClipboard(int groupIndex, const std::vector<int>& unitIndices);
     bool RemoveMultipleUnitsFromReplacementGroup(int groupIndex, const std::vector<int>& unitIndices);
     bool SetMultipleUnitsFlipModeInReplacementGroup(int groupIndex, const std::vector<int>& unitIndices, UnitFlipMode mode);
-    bool PickUnitFromGroup(int groupIndex, PoolUnit& outUnit);
+    bool MoveUnitInReplacementGroup(int groupIndex, int fromUnitIndex, int toUnitIndex);
+    bool MoveUnitsInReplacementGroup(int groupIndex, const std::vector<int>& fromIndices, int targetIndex);
+    bool MoveUnitsAcrossReplacementGroups(int fromGroupIndex, const std::vector<int>& fromIndices, int toGroupIndex, int targetIndex);
+    bool PickUnitFromGroup(int groupIndex, PoolUnit& outUnit, int seqIndex = -1);
 }
 
 // Backward compatibility namespace

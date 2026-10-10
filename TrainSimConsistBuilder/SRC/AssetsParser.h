@@ -7,16 +7,17 @@
 #define WM_STOCK_SCAN_PROGRESS (WM_USER + 303)
 
 struct StockItem {
-    std::wstring szFileName;  // File name without extension (e.g. "YellowWDG-4")
-    std::wstring szCategory;  // Diesel, Electric, Steam, Control, Freight, Passenger, Tender
-    std::wstring szFolder;    // Parent folder name under TRAINSET (e.g. "WDG4")
-    std::wstring szExtension; // ".eng" or ".wag"
-    std::wstring szDetails;   // Category specific details
+    std::wstring szFileName;      // File name without extension (e.g. "YellowWDG-4")
+    std::wstring szCategory;      // Diesel, Electric, Steam, Control, Freight, Passenger, Tender
+    std::wstring szFolder;        // Parent folder name under TRAINSET (e.g. "WDG4")
+    std::wstring szExtension;     // ".eng" or ".wag"
+    std::wstring szDetails;       // Category specific details
+    uint64_t     lastWriteTime = 0; // NTFS file write time for incremental fast sync
 };
 
 extern std::vector<StockItem> g_StockCache;
 extern CRITICAL_SECTION g_StockCacheCS;
-extern volatile BOOL g_bCancelScan;
+extern volatile BOOL g_bCancelStockScan;
 
 // Low-level helper functions exported for category parsers
 std::string ReadConFileToAscii(const std::wstring& filePath);
@@ -31,5 +32,5 @@ bool LoadStockCache(const std::wstring& basePath, uint64_t currentSig);
 void SaveStockCache(const std::wstring& basePath, uint64_t signature);
 std::wstring GetCacheFilePath();
 
-HANDLE StartStockScan(HWND hWndParent, const std::wstring& basePath);
+HANDLE StartStockScan(HWND hWndParent, const std::wstring& basePath, bool bForceRescan = false);
 void CancelStockScan(HANDLE& hThread);

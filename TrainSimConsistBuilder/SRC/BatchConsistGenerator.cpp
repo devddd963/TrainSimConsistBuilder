@@ -96,7 +96,7 @@ namespace BatchConsistGenerator
         return baseName + separator + suffix;
     }
 
-    bool BatchGenerateConsists(const PoolManager::PoolPreset& preset,
+    bool BatchGenerateConsists(const std::vector<PoolManager::PoolPreset>& presets,
                                const std::vector<GeneratedConsistSpec>& specs,
                                const std::wstring& targetDir,
                                bool overwrite,
@@ -106,9 +106,9 @@ namespace BatchConsistGenerator
         outCreatedFiles.clear();
         outError.clear();
 
-        if (preset.pools.empty())
+        if (presets.empty())
         {
-            outError = L"Preset contains no pools.";
+            outError = L"No presets or train blueprints selected.";
             return false;
         }
 
@@ -127,9 +127,13 @@ namespace BatchConsistGenerator
         std::random_device rd;
         std::mt19937 rng(rd());
 
-        for (const auto& spec : specs)
+        for (size_t i = 0; i < specs.size(); ++i)
         {
+            const auto& spec = specs[i];
             if (spec.fileName.empty()) continue;
+
+            const auto& preset = presets[i % presets.size()];
+            if (preset.pools.empty()) continue;
 
             std::wstring safeFileName = spec.fileName;
             for (auto& ch : safeFileName)
@@ -327,5 +331,16 @@ namespace BatchConsistGenerator
 
         LOG_INFO("Batch Consist Generation completed: %zu file(s) generated.", outCreatedFiles.size());
         return true;
+    }
+
+    bool BatchGenerateConsists(const PoolManager::PoolPreset& preset,
+                               const std::vector<GeneratedConsistSpec>& specs,
+                               const std::wstring& targetDir,
+                               bool overwrite,
+                               std::vector<std::wstring>& outCreatedFiles,
+                               std::wstring& outError)
+    {
+        std::vector<PoolManager::PoolPreset> presets = { preset };
+        return BatchGenerateConsists(presets, specs, targetDir, overwrite, outCreatedFiles, outError);
     }
 }

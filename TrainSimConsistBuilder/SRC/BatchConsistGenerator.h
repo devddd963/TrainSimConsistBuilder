@@ -24,6 +24,13 @@ namespace BatchConsistGenerator
                                bool overwrite,
                                std::vector<std::wstring>& outCreatedFiles,
                                std::wstring& outError);
+
+    bool BatchGenerateConsists(const std::vector<PoolManager::PoolPreset>& presets,
+                               const std::vector<GeneratedConsistSpec>& specs,
+                               const std::wstring& targetDir,
+                               bool overwrite,
+                               std::vector<std::wstring>& outCreatedFiles,
+                               std::wstring& outError);
 }
 
 // Backward compatibility namespace

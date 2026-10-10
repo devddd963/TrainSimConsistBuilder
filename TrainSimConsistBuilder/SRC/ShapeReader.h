@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <atomic>
 #include "TextureLoader.h"
 
 // Direct3D 11 Vertex Layout for Shape Rendering (36 bytes)
@@ -26,6 +27,7 @@ struct ShapeSubMesh {
     uint32_t indexCount = 0;
     int32_t  imageIndex = -1;    // Index into ParsedShape::rawImageNames (-1 = untextured)
     uint32_t shaderIndex = 0;
+    std::string shaderName;      // Named shader from shape file (e.g. BlendATex, TexDiff, TransNorm)
     bool     isTransparent = false;
     bool     isAlphaTest = false;
     std::wstring textureName;
@@ -148,7 +150,8 @@ public:
     // Fast CPU-only shape parser (Thread-safe, no Direct3D device required)
     static bool ParseShapeFile(
         const std::wstring& shapeFilePath,
-        ParsedShape& outShape
+        ParsedShape& outShape,
+        const std::atomic<bool>* pCancelToken = nullptr
     );
 
     // Direct3D 11 GPU Buffer and Texture Resource Creator (Must run on D3D thread)
@@ -162,6 +165,14 @@ public:
     static void HotSwapTextures(
         TextureLoader* pTextureLoader,
         ParsedShape& shape
+    );
+
+    // Standard Open Rails / MSTS material & shader pipeline classification
+    static void ClassifySubMeshMaterial(
+        ShapeSubMesh& sm,
+        bool hasTexAlpha,
+        bool hasSmoothAlpha,
+        const std::wstring& texName
     );
 
     // High-performance loader: ParseShapeFile + CreateGPUBuffers

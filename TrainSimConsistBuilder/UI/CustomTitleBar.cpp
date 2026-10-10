@@ -423,8 +423,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         FillRect(memDC, &rcRow2, hbrRibbon);
         DeleteObject(hbrRibbon);
 
-        int tabStartX = 10;
-        int tabW = 235;
+        int currentX = 10;
         int tabTop = row1H + 3;
         int baselineY = h;
         const int r_b = 6;
@@ -432,8 +431,15 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
 
         for (size_t i = 0; i < pState->tabs.size(); ++i)
         {
-            RECT rcTab = { tabStartX + (int)i * (tabW + 2), row1H, tabStartX + (int)i * (tabW + 2) + tabW, h };
+            SIZE szText = { 0 };
+            HFONT hOldFont = (HFONT)SelectObject(memDC, pState->hFontTabs);
+            GetTextExtentPoint32W(memDC, pState->tabs[i].text.c_str(), (int)pState->tabs[i].text.length(), &szText);
+            SelectObject(memDC, hOldFont);
+
+            int tabW = (std::max)(170, (int)szText.cx + 68);
+            RECT rcTab = { currentX, row1H, currentX + tabW, h };
             pState->tabs[i].rc = rcTab;
+            currentX += tabW + 2;
 
             bool isActive = (pState->activeTab == (int)i);
             bool isHover  = (pState->hoverTab == (int)i);

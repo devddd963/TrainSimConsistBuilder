@@ -10,6 +10,7 @@
 #include "ModernMessageBox.h"
 #include "UITheme.h"
 #include "../SRC/AppLogging.h"
+#include "../SRC/DatabaseManager.h"
 #include "../SRC/ShapeReader.h"
 #include "../SRC/ShapeAnimator.h"
 #include "../SRC/TextureLoader.h"
@@ -271,56 +272,28 @@ struct VisualStudioState
 
 static std::wstring LoadSavedStudioDirectory(int tabIndex)
 {
-    wchar_t szPath[MAX_PATH] = { 0 };
-    HKEY hKey = NULL;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder\\Settings", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        DWORD dwType = REG_SZ;
-        DWORD dwBytes = sizeof(szPath);
-        const wchar_t* valName = (tabIndex == 0) ? L"ShapeViewerLastDirectory" : L"StockViewerLastDirectory";
-        RegQueryValueExW(hKey, valName, NULL, &dwType, (LPBYTE)szPath, &dwBytes);
-        RegCloseKey(hKey);
-    }
-    return szPath;
+    const wchar_t* valName = (tabIndex == 0) ? L"ShapeViewerLastDirectory" : L"StockViewerLastDirectory";
+    return DatabaseManager::GetSetting(valName, L"");
 }
 
 static void SaveStudioDirectory(int tabIndex, const std::wstring& path)
 {
     if (path.empty()) return;
-    HKEY hKey = NULL;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder\\Settings", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS)
-    {
-        const wchar_t* valName = (tabIndex == 0) ? L"ShapeViewerLastDirectory" : L"StockViewerLastDirectory";
-        RegSetValueExW(hKey, valName, 0, REG_SZ, (const BYTE*)path.c_str(), (DWORD)((path.length() + 1) * sizeof(wchar_t)));
-        RegCloseKey(hKey);
-    }
+    const wchar_t* valName = (tabIndex == 0) ? L"ShapeViewerLastDirectory" : L"StockViewerLastDirectory";
+    DatabaseManager::SetSetting(valName, path);
 }
 
 static int LoadSavedStudioSidebarWidth()
 {
-    DWORD dwWidth = 240;
-    HKEY hKey = NULL;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder\\Settings", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        DWORD dwType = REG_DWORD;
-        DWORD dwSize = sizeof(dwWidth);
-        RegQueryValueExW(hKey, L"StudioSidebarWidth", NULL, &dwType, (LPBYTE)&dwWidth, &dwSize);
-        RegCloseKey(hKey);
-    }
+    int dwWidth = DatabaseManager::GetSettingInt(L"StudioSidebarWidth", 240);
     if (dwWidth < 140 || dwWidth > 800) dwWidth = 240;
-    return (int)dwWidth;
+    return dwWidth;
 }
 
 static void SaveStudioSidebarWidth(int width)
 {
     if (width < 140 || width > 800) return;
-    HKEY hKey = NULL;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\TrainSimConsistBuilder\\Settings", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS)
-    {
-        DWORD dwWidth = (DWORD)width;
-        RegSetValueExW(hKey, L"StudioSidebarWidth", 0, REG_DWORD, (const BYTE*)&dwWidth, sizeof(dwWidth));
-        RegCloseKey(hKey);
-    }
+    DatabaseManager::SetSettingInt(L"StudioSidebarWidth", width);
 }
 
 static void PushNavHistory(VisualStudioState* pState, const std::wstring& path)
@@ -1542,12 +1515,13 @@ static bool InitD3D11(HWND hViewportWnd, VisualStudioState* pState)
     bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
     pState->pD3DDevice->CreateBlendState(&bd, &pState->pBlendStateAlpha);
 
-    // Sampler State
+    // Sampler State (16x Anisotropic Filtering for crystal-sharp textures at acute viewing angles)
     D3D11_SAMPLER_DESC sampDesc = {};
-    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampDesc.Filter = D3D11_FILTER_ANISOTROPIC;
     sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
     sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
     sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampDesc.MaxAnisotropy = 16;
     sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
     sampDesc.MinLOD = 0;
     sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
@@ -1758,9 +1732,11 @@ static void RenderViewport(VisualStudioState* pState)
             }
         }
 
-        // Pass 2: Alpha-Test Cutout SubMeshes (Depth Write Enabled, AlphaCutoff = 0.5, Decal depth bias)
-        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateDecal);
-        cb.AlphaCutoff = 0.5f;
+        // Pass 2: Alpha-Test Cutout SubMeshes (Open Rails: Depth Write Enabled, BlendState = Alpha, AlphaCutoff = 10/255)
+        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
+        pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateWrite, 0);
+        pState->pD3DContext->OMSetBlendState(pState->pBlendStateAlpha, NULL, 0xFFFFFFFF);
+        cb.AlphaCutoff = 0.0392f;
         cb.GlassTintAlpha = 0.0f;
         pState->pD3DContext->UpdateSubresource(pState->pConstantBuffer, 0, NULL, &cb, 0, 0);
         for (const auto& subMesh : pState->currentShape.subMeshes)
@@ -1774,11 +1750,12 @@ static void RenderViewport(VisualStudioState* pState)
         }
         pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
 
-        // Pass 3: Smooth Alpha-Blended Glass / Transparent SubMeshes (Depth Read-Only, Blend Alpha, Glass Tint)
+        // Pass 3: Smooth Alpha-Blended Decals, Glass & Transparent SubMeshes (Depth Read-Only, Blend Alpha)
+        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
         pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateReadOnly, 0);
         pState->pD3DContext->OMSetBlendState(pState->pBlendStateAlpha, NULL, 0xFFFFFFFF);
-        cb.AlphaCutoff = 0.001f;
-        cb.GlassTintAlpha = 0.35f;
+        cb.AlphaCutoff = 0.005f;
+        cb.GlassTintAlpha = 0.0f;
         pState->pD3DContext->UpdateSubresource(pState->pConstantBuffer, 0, NULL, &cb, 0, 0);
         for (const auto& subMesh : pState->currentShape.subMeshes)
         {
@@ -1789,6 +1766,7 @@ static void RenderViewport(VisualStudioState* pState)
                 pState->pD3DContext->DrawIndexed(subMesh.indexCount, subMesh.startIndex, 0);
             }
         }
+        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
     }
     // 3. Render Composite Rolling Stock (Tab 1: Rolling Stock Inspector - Main Body + ORTS Freight Animations)
     else if (pState->activeTab == 1 && pState->compositeStock.isValid)
@@ -1879,20 +1857,23 @@ static void RenderViewport(VisualStudioState* pState)
         cb.GlassTintAlpha = 0.0f;
         RenderSubShapePass(0);
 
-        // Pass 2: Alpha-test cutout geometry across ALL sub-shapes (grilles, railings, cutouts, 2S plates, decals)
-        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateDecal);
-        cb.AlphaCutoff = 0.5f;
+        // Pass 2: Alpha-test cutout geometry across ALL sub-shapes (Open Rails: body shells, grilles, railings, cutouts, decals)
+        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
+        pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateWrite, 0);
+        pState->pD3DContext->OMSetBlendState(pState->pBlendStateAlpha, NULL, 0xFFFFFFFF);
+        cb.AlphaCutoff = 0.0392f;
         cb.GlassTintAlpha = 0.0f;
         RenderSubShapePass(1);
         pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
 
-        // Pass 3: Smooth transparent glass geometry across ALL sub-shapes (Window panes, glass tint)
-        // With DepthWriteMask = ZERO, the glass will smoothly blend over the interior and trainboard without blocking them
+        // Pass 3: Smooth transparent decals, glass & markings across ALL sub-shapes (Depth Read-Only, Blend Alpha)
+        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
         pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateReadOnly, 0);
         pState->pD3DContext->OMSetBlendState(pState->pBlendStateAlpha, NULL, 0xFFFFFFFF);
-        cb.AlphaCutoff = 0.001f;
-        cb.GlassTintAlpha = 0.35f;
+        cb.AlphaCutoff = 0.005f;
+        cb.GlassTintAlpha = 0.0f;
         RenderSubShapePass(2);
+        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
     }
 
     pState->pSwapChain->Present(1, 0);
@@ -1932,9 +1913,15 @@ static void LoadShapeIntoViewportAsync(VisualStudioState* pState, const std::wst
     const wchar_t* ext = PathFindExtensionW(path.c_str());
     bool isStock = (pState->activeTab == 1) || (ext && (_wcsicmp(ext, L".wag") == 0 || _wcsicmp(ext, L".eng") == 0));
 
+    LOG_INFO_W(L"[3D-Studio] Initiating asynchronous model load: '%ls' (isStockVehicle: %ls)", path.c_str(), isStock ? L"YES" : L"NO");
+
     if (isStock)
     {
-        if (!PathFileExistsW(path.c_str())) return;
+        if (!PathFileExistsW(path.c_str()))
+        {
+            LOG_WARN_W(L"[3D-Studio] File does not exist on disk: %ls", path.c_str());
+            return;
+        }
 
         uint64_t taskId = ++pState->activeLoadTaskId;
         pState->isLoadingShape = true;
@@ -1969,6 +1956,9 @@ static void LoadShapeIntoViewportAsync(VisualStudioState* pState, const std::wst
             pResult->parseTimeMs = (double)(tEnd.QuadPart - tStart.QuadPart) * 1000.0 / (double)freq.QuadPart;
             pResult->success = ok;
 
+            LOG_INFO_W(L"[3D-Studio] Completed stock load in %.2f ms (success: %ls): '%ls'",
+                pResult->parseTimeMs, ok ? L"YES" : L"NO", stockPath.c_str());
+
             // 1. Dispatch Stock Geometry IMMEDIATELY for Frame-0 Instant Render!
             if (IsWindow(hWndTarget)) {
                 PostMessageW(hWndTarget, WM_VS_STOCK_LOADED_ASYNC, (WPARAM)taskId, (LPARAM)pResult.release());
@@ -1990,7 +1980,11 @@ static void LoadShapeIntoViewportAsync(VisualStudioState* pState, const std::wst
 
     // Tab 0: Single .s shape file
     std::wstring actualShapePath = path;
-    if (!PathFileExistsW(actualShapePath.c_str())) return;
+    if (!PathFileExistsW(actualShapePath.c_str()))
+    {
+        LOG_WARN_W(L"[3D-Studio] Shape file does not exist on disk: %ls", actualShapePath.c_str());
+        return;
+    }
 
     uint64_t taskId = ++pState->activeLoadTaskId;
     pState->isLoadingShape = true;
@@ -2021,6 +2015,9 @@ static void LoadShapeIntoViewportAsync(VisualStudioState* pState, const std::wst
         QueryPerformanceCounter(&tEnd);
         pResult->parseTimeMs = (double)(tEnd.QuadPart - tStart.QuadPart) * 1000.0 / (double)freq.QuadPart;
         pResult->success = ok;
+
+        LOG_INFO_W(L"[3D-Studio] Completed single shape load in %.2f ms (success: %ls): '%ls'",
+            pResult->parseTimeMs, ok ? L"YES" : L"NO", actualShapePath.c_str());
 
         std::wstring shapeDir = pResult->pParsedShape ? pResult->pParsedShape->shapeDir : L"";
         std::vector<std::wstring> rawImages = pResult->pParsedShape ? pResult->pParsedShape->rawImageNames : std::vector<std::wstring>{};

@@ -3,6 +3,7 @@
 #endif
 
 #include "ShapeReader.h"
+#include "AppLogging.h"
 #include <iostream>
 #include <shlwapi.h>
 #include <algorithm>
@@ -1003,7 +1004,8 @@ static void FinalizeShapeAnimation(ParsedShape& outShape) {
     outShape.animation.hasSimulatedWheels = !outShape.animation.simulatedWheels.empty();
 }
 
-static bool ParseBinaryShape(const uint8_t* pData, size_t dataLen, ParsedShape& outShape) {
+static bool ParseBinaryShape(const uint8_t* pData, size_t dataLen, ParsedShape& outShape, const std::atomic<bool>* pCancelToken = nullptr) {
+    if (pCancelToken && *pCancelToken) return false;
     if (!pData || dataLen < 24) return false;
 
     // Locate tok_shape (0x0047) header within the first 64 bytes
@@ -1031,6 +1033,7 @@ static bool ParseBinaryShape(const uint8_t* pData, size_t dataLen, ParsedShape& 
     std::vector<MstsPrimState> primStates;
 
     while (!root.EndOfBlock(r)) {
+        if (pCancelToken && *pCancelToken) return false;
         BinaryShapeBlock sub = BinaryShapeBlock::ReadSubBlock(r);
         if (sub.id == tok_shader_names) {
             int count = r.ReadI32();
@@ -1244,21 +1247,13 @@ static bool ParseBinaryShape(const uint8_t* pData, size_t dataLen, ParsedShape& 
                                                                 }
                                                                 if (ps.shaderIdx >= 0 && (size_t)ps.shaderIdx < shaderNames.size()) {
                                                                     const std::string& shName = shaderNames[ps.shaderIdx];
-                                                                    if (shName.find("Alph") != std::string::npos || shName.find("Alpha") != std::string::npos || shName.find("BlendATex") != std::string::npos) {
-                                                                        subMesh.isTransparent = true;
-                                                                        subMesh.isAlphaTest = true;  // 1-bit cutout (AlphATex, AlphATexDiff, BlendATex, BlendATexDiff, trainboards, grilles) -> writes depth
-                                                                    } else if (shName.find("Trans") != std::string::npos || shName.find("Blend") != std::string::npos || shName.find("Add") != std::string::npos) {
-                                                                        subMesh.isTransparent = true;
-                                                                        subMesh.isAlphaTest = false; // Smooth alpha blend (TransNorm, TransDiff, BlendNorm, cabin glass, tinted windows) -> read-only depth
-                                                                    } else {
-                                                                        subMesh.isTransparent = false;
-                                                                        subMesh.isAlphaTest = false;
-                                                                    }
+                                                                    subMesh.shaderIndex = (uint32_t)ps.shaderIdx;
+                                                                    subMesh.shaderName = shName;
                                                                 }
-                                                                if (imgIdx < 0) {
-                                                                    subMesh.isTransparent = false;
-                                                                    subMesh.isAlphaTest = false;
+                                                                if (imgIdx >= 0 && (size_t)imgIdx < outShape.rawImageNames.size()) {
+                                                                    subMesh.textureName = outShape.rawImageNames[imgIdx];
                                                                 }
+                                                                ShapeReader::ClassifySubMeshMaterial(subMesh, (imgIdx >= 0), false, subMesh.textureName);
                                                             }
 
                                                             subMesh.imageIndex = imgIdx;
@@ -1430,8 +1425,11 @@ static bool ParseBinaryShape(const uint8_t* pData, size_t dataLen, ParsedShape& 
 // =========================================================================
 bool ShapeReader::ParseShapeFile(
     const std::wstring& shapeFilePath,
-    ParsedShape& outShape
+    ParsedShape& outShape,
+    const std::atomic<bool>* pCancelToken
 ) {
+    if (pCancelToken && *pCancelToken) return false;
+
     outShape.isValid = false;
     outShape.shapeFilePath = shapeFilePath;
 
@@ -1449,22 +1447,35 @@ bool ShapeReader::ParseShapeFile(
         FILE_FLAG_SEQUENTIAL_SCAN,
         NULL
     );
-    if (hFile == INVALID_HANDLE_VALUE) return false;
+    if (hFile == INVALID_HANDLE_VALUE) {
+        LOG_WARN("ShapeReader: Could not open shape file '%ls' (Error: %lu)", shapeFilePath.c_str(), GetLastError());
+        return false;
+    }
 
     LARGE_INTEGER liSize;
     if (!GetFileSizeEx(hFile, &liSize) || liSize.QuadPart < 16) {
+        LOG_WARN("ShapeReader: Shape file '%ls' is too small or invalid (%lld bytes)", shapeFilePath.c_str(), liSize.QuadPart);
         CloseHandle(hFile);
         return false;
     }
 
     HANDLE hMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
     if (!hMap) {
+        LOG_ERROR("ShapeReader: Failed CreateFileMappingW for '%ls' (Error: %lu)", shapeFilePath.c_str(), GetLastError());
         CloseHandle(hFile);
         return false;
     }
 
     const uint8_t* pRawBytes = (const uint8_t*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
     if (!pRawBytes) {
+        LOG_ERROR("ShapeReader: Failed MapViewOfFile for '%ls' (Error: %lu)", shapeFilePath.c_str(), GetLastError());
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        return false;
+    }
+
+    if (pCancelToken && *pCancelToken) {
+        UnmapViewOfFile(pRawBytes);
         CloseHandle(hMap);
         CloseHandle(hFile);
         return false;
@@ -1501,7 +1512,15 @@ bool ShapeReader::ParseShapeFile(
             }
         }
 
+        if (pCancelToken && *pCancelToken) {
+            UnmapViewOfFile(pRawBytes);
+            CloseHandle(hMap);
+            CloseHandle(hFile);
+            return false;
+        }
+
         if (!FastZlib::DecompressZlib(pRawBytes + zlibStart, fileSize - zlibStart, decompressedBytes)) {
+            LOG_SHAPE_ERROR("FastZlib decompression failed for compressed shape '%ls' (Offset: %zu, Size: %zu)", shapeFilePath.c_str(), zlibStart, fileSize);
             UnmapViewOfFile(pRawBytes);
             CloseHandle(hMap);
             CloseHandle(hFile);
@@ -1512,6 +1531,13 @@ bool ShapeReader::ParseShapeFile(
     } else {
         pPayload = pRawBytes;
         payloadLen = fileSize;
+    }
+
+    if (pCancelToken && *pCancelToken) {
+        UnmapViewOfFile(pRawBytes);
+        CloseHandle(hMap);
+        CloseHandle(hFile);
+        return false;
     }
 
     // 3. Determine whether payload is MSTS Binary Tokenized Shape or ASCII / UTF-16 Text
@@ -1538,9 +1564,14 @@ bool ShapeReader::ParseShapeFile(
         }
     }
 
+    LOG_SHAPE_W(L"--------------------------------------------------------------------------------");
+    LOG_SHAPE_W(L"Parsing Shape File: '%ls' (Disk Size: %zu B, Payload: %zu B, Format: %ls)",
+        shapeFilePath.c_str(), fileSize, payloadLen,
+        isCompressed ? (isBinary ? L"Compressed Binary" : L"Compressed Text") : (isBinary ? L"Binary" : L"Text"));
+
     bool parseSuccess = false;
     if (isBinary) {
-        parseSuccess = ParseBinaryShape(pPayload, payloadLen, outShape);
+        parseSuccess = ParseBinaryShape(pPayload, payloadLen, outShape, pCancelToken);
     } else {
         std::vector<char> decompressedAscii;
         const char* textStart = nullptr;
@@ -1574,6 +1605,12 @@ bool ShapeReader::ParseShapeFile(
 
         // Scan until "shape ("
         while (!scan.IsEOF()) {
+            if (pCancelToken && *pCancelToken) {
+                UnmapViewOfFile(pRawBytes);
+                CloseHandle(hMap);
+                CloseHandle(hFile);
+                return false;
+            }
             if (scan.MatchKeyword("shape") || scan.MatchKeyword("shape_file")) {
                 if (scan.Match('(')) break;
             }
@@ -1581,6 +1618,12 @@ bool ShapeReader::ParseShapeFile(
         }
 
         while (!scan.IsEOF()) {
+        if (pCancelToken && *pCancelToken) {
+            UnmapViewOfFile(pRawBytes);
+            CloseHandle(hMap);
+            CloseHandle(hFile);
+            return false;
+        }
         scan.SkipWhitespace();
         if (scan.Match(')')) break; // End of shape
 
@@ -2103,21 +2146,13 @@ bool ShapeReader::ParseShapeFile(
                                                                                                             }
                                                                                                             if (ps.shaderIdx >= 0 && (size_t)ps.shaderIdx < shaderNames.size()) {
                                                                                                                 const std::string& shName = shaderNames[ps.shaderIdx];
-                                                                                                                if (shName.find("Alph") != std::string::npos || shName.find("Alpha") != std::string::npos || shName.find("BlendATex") != std::string::npos) {
-                                                                                                                    subMesh.isTransparent = true;
-                                                                                                                    subMesh.isAlphaTest = true;  // 1-bit cutout (AlphATex, AlphATexDiff, BlendATex, BlendATexDiff, trainboards, grilles) -> writes depth
-                                                                                                                } else if (shName.find("Trans") != std::string::npos || shName.find("Blend") != std::string::npos || shName.find("Add") != std::string::npos) {
-                                                                                                                    subMesh.isTransparent = true;
-                                                                                                                    subMesh.isAlphaTest = false; // Smooth alpha blend (TransNorm, TransDiff, BlendNorm, cabin glass, tinted windows) -> read-only depth
-                                                                                                                } else {
-                                                                                                                    subMesh.isTransparent = false;
-                                                                                                                    subMesh.isAlphaTest = false;
-                                                                                                                }
+                                                                                                                subMesh.shaderIndex = (uint32_t)ps.shaderIdx;
+                                                                                                                subMesh.shaderName = shName;
                                                                                                             }
-                                                                                                            if (imgIdx < 0) {
-                                                                                                                subMesh.isTransparent = false;
-                                                                                                                subMesh.isAlphaTest = false;
+                                                                                                            if (imgIdx >= 0 && (size_t)imgIdx < outShape.rawImageNames.size()) {
+                                                                                                                subMesh.textureName = outShape.rawImageNames[imgIdx];
                                                                                                             }
+                                                                                                            ShapeReader::ClassifySubMeshMaterial(subMesh, (imgIdx >= 0), false, subMesh.textureName);
                                                                                                         }
 
                                                                                                         subMesh.imageIndex = imgIdx;
@@ -2412,6 +2447,15 @@ bool ShapeReader::ParseShapeFile(
     }
 
     outShape.isValid = true;
+    const wchar_t* szFmt = isBinary ? L"Binary" : L"Text";
+    LOG_SHAPE_W(L"Parsed Shape Complete: '%ls' (Format: %ls, Matrices: %zu, Sub-meshes: %zu, Vertices: %zu, Indices: %zu, Textures: %zu)",
+        shapeFilePath.c_str(), szFmt,
+        outShape.boneMatrices.size(), outShape.subMeshes.size(),
+        outShape.vertices.size(), outShape.indices.size(), outShape.rawImageNames.size());
+    LOG_SHAPE_W(L"  -> Bounding Box: Min=[%.2f, %.2f, %.2f], Max=[%.2f, %.2f, %.2f], Center=[%.2f, %.2f, %.2f], Radius=%.2fm",
+        outShape.boundsMin.x, outShape.boundsMin.y, outShape.boundsMin.z,
+        outShape.boundsMax.x, outShape.boundsMax.y, outShape.boundsMax.z,
+        outShape.center.x, outShape.center.y, outShape.center.z, outShape.radius);
     return true;
 }
 
@@ -2474,58 +2518,188 @@ bool ShapeReader::CreateGPUBuffers(
 
         std::vector<ID3D11ShaderResourceView*> imageSRVs(shape.rawImageNames.size(), nullptr);
         std::vector<bool> imageHasAlpha(shape.rawImageNames.size(), false);
+        std::vector<bool> imageHasSmoothAlpha(shape.rawImageNames.size(), false);
         for (size_t i = 0; i < shape.rawImageNames.size(); ++i) {
             imageSRVs[i] = pTextureLoader->LoadTexture(shape.shapeDir, shape.rawImageNames[i]);
             imageHasAlpha[i] = pTextureLoader->HasAlpha(shape.shapeDir, shape.rawImageNames[i]);
+            imageHasSmoothAlpha[i] = pTextureLoader->HasSmoothAlpha(shape.shapeDir, shape.rawImageNames[i]);
         }
 
         ID3D11ShaderResourceView* pDefaultSRV = pTextureLoader->GetDefaultTexture();
 
-        for (auto& subMesh : shape.subMeshes) {
+        for (size_t smIdx = 0; smIdx < shape.subMeshes.size(); ++smIdx) {
+            auto& subMesh = shape.subMeshes[smIdx];
             const std::wstring& texName = (!subMesh.textureName.empty()) ? subMesh.textureName :
                 ((subMesh.imageIndex >= 0 && (size_t)subMesh.imageIndex < shape.rawImageNames.size()) ? shape.rawImageNames[subMesh.imageIndex] : L"");
 
             bool hasAlphaFlag = false;
+            bool hasSmoothAlphaFlag = false;
             if (subMesh.imageIndex >= 0 && (size_t)subMesh.imageIndex < imageSRVs.size()) {
                 subMesh.pSRV = imageSRVs[subMesh.imageIndex] ? imageSRVs[subMesh.imageIndex] : pDefaultSRV;
                 hasAlphaFlag = imageHasAlpha[subMesh.imageIndex];
+                hasSmoothAlphaFlag = imageHasSmoothAlpha[subMesh.imageIndex];
             } else if (!texName.empty()) {
                 subMesh.pSRV = pTextureLoader->LoadTexture(shape.shapeDir, texName);
                 if (!subMesh.pSRV) subMesh.pSRV = pDefaultSRV;
                 hasAlphaFlag = pTextureLoader->HasAlpha(shape.shapeDir, texName);
+                hasSmoothAlphaFlag = pTextureLoader->HasSmoothAlpha(shape.shapeDir, texName);
             } else {
                 subMesh.pSRV = pDefaultSRV;
             }
 
-            // Open Rails pipeline:
-            // 1. If texture has NO real alpha (e.g. body textures, chassis, bogies, trainboards),
-            //    it is strictly OPAQUE (Pass 1). This ensures locomotive body, roofs, and cabs render solid.
-            // 2. If texture has alpha cutout (e.g. couplers, grilles, pantographs, signs, springs),
-            //    it is ALPHA-TEST (Pass 2, depth write enabled).
-            // 3. Only genuine glass/window textures (e.g. Glass.ace) or translucent materials
-            //    render in Pass 3 (Translucent Glass Blend, depth read-only).
-            if (!texName.empty()) {
-                std::wstring lowerTex = texName;
-                for (wchar_t& c : lowerTex) c = towlower(c);
-                bool isGlassTex = (lowerTex.find(L"glass") != std::wstring::npos ||
-                                   lowerTex.find(L"window") != std::wstring::npos ||
-                                   lowerTex.find(L"mirror") != std::wstring::npos);
-
-                if (!hasAlphaFlag) {
-                    subMesh.isTransparent = false;
-                    subMesh.isAlphaTest = false;
-                } else if (!isGlassTex) {
-                    subMesh.isTransparent = true;
-                    subMesh.isAlphaTest = true;
-                } else {
-                    subMesh.isTransparent = true;
-                    subMesh.isAlphaTest = false;
-                }
-            }
+            ClassifySubMeshMaterial(subMesh, hasAlphaFlag, hasSmoothAlphaFlag, texName);
         }
+
+        LOG_SHAPE_W(L"=== SubMesh & Material Rendering Pipeline: '%ls' ===", shape.shapeFilePath.c_str());
+        LOG_SHAPE_W(L"Total SubMeshes: %zu | Total Vertices: %zu | Total Indices: %zu", shape.subMeshes.size(), shape.vertices.size(), shape.indices.size());
+        for (size_t smIdx = 0; smIdx < shape.subMeshes.size(); ++smIdx) {
+            const auto& sm = shape.subMeshes[smIdx];
+            const wchar_t* passName = L"Pass 1 [Opaque Solid]";
+            if (sm.isTransparent && sm.isAlphaTest) passName = L"Pass 2 [AlphaTest Cutout]";
+            else if (sm.isTransparent && !sm.isAlphaTest) passName = L"Pass 3 [Smooth Glass Blend]";
+
+            std::wstring wShader(sm.shaderName.begin(), sm.shaderName.end());
+            LOG_SHAPE_W(L"  [SubMesh #%02zu] Indices: %5u (Start: %5u) | Shader: '%-14ls' | Texture: '%-28ls' | Applied: %-26ls | SRV: %ls",
+                smIdx, sm.indexCount, sm.startIndex,
+                wShader.empty() ? L"(None)" : wShader.c_str(),
+                sm.textureName.empty() ? L"(Untextured)" : sm.textureName.c_str(),
+                passName,
+                sm.pSRV ? L"Allocated" : L"Default");
+        }
+        LOG_SHAPE_W(L"--------------------------------------------------------------------------------");
     }
 
     return true;
+}
+
+void ShapeReader::ClassifySubMeshMaterial(
+    ShapeSubMesh& sm,
+    bool hasTexAlpha,
+    bool hasSmoothAlpha,
+    const std::wstring& texName
+) {
+    std::string lowerShader = sm.shaderName;
+    for (char& c : lowerShader) c = (char)tolower((unsigned char)c);
+
+    std::wstring lowerTex = texName;
+    for (wchar_t& c : lowerTex) c = towlower(c);
+    bool isGlassTex = (lowerTex.find(L"glass") != std::wstring::npos ||
+                       lowerTex.find(L"window") != std::wstring::npos ||
+                       lowerTex.find(L"winplane") != std::wstring::npos ||
+                       lowerTex.find(L"doorwin") != std::wstring::npos ||
+                       lowerTex.find(L"mirror") != std::wstring::npos ||
+                       lowerTex.find(L"trans")  != std::wstring::npos);
+
+    // 1. Group 1: Explicit Solid / Opaque Shader Tokens (Open Rails Specification)
+    // TexDiff, Tex, OptAmbient, OptSpecular, LoShine, HiShine, OptLoShine, OptHiShine, Gloss, Solid, Flat
+    // In MSTS / Open Rails, Tex and TexDiff completely ignore alpha and render in Pass 1 (Opaque with Z-Write).
+    bool isExplicitOpaqueShader = (
+        lowerShader == "texdiff" ||
+        lowerShader == "tex" ||
+        lowerShader == "optambient" ||
+        lowerShader == "optspecular" ||
+        lowerShader == "loshine" ||
+        lowerShader == "hishine" ||
+        lowerShader == "optloshine" ||
+        lowerShader == "opthishine" ||
+        lowerShader == "gloss" ||
+        lowerShader == "solid" ||
+        lowerShader == "flat" ||
+        (lowerShader.find("tex") != std::string::npos &&
+         lowerShader.find("alph") == std::string::npos &&
+         lowerShader.find("blend") == std::string::npos &&
+         lowerShader.find("add") == std::string::npos &&
+         lowerShader.find("sub") == std::string::npos &&
+         lowerShader.find("trans") == std::string::npos)
+    );
+
+    if (isExplicitOpaqueShader) {
+        sm.isTransparent = false;
+        sm.isAlphaTest = false; // Pass 1: Opaque (Writes Depth)
+        return;
+    }
+
+    // 2. Group 3: Smooth Alpha-Blended / Translucent Shader Tokens (Open Rails Specification)
+    // TransNorm, TransDiff, TransLoop, BlendNorm, AddATex, AddATexDiff, SubATex, SubATexDiff, Glass, Window
+    // Used strictly for transparent cabin glass windows, headlights, and smoke with Read-Only depth (Pass 3).
+    bool isExplicitBlendShader = (
+        lowerShader == "transnorm" ||
+        lowerShader == "transdiff" ||
+        lowerShader == "transloop" ||
+        lowerShader == "blendnorm" ||
+        lowerShader == "addatex" ||
+        lowerShader == "addatexdiff" ||
+        lowerShader == "subatex" ||
+        lowerShader == "subatexdiff" ||
+        lowerShader == "glass" ||
+        lowerShader == "translucent" ||
+        lowerShader.find("transnorm") != std::string::npos ||
+        lowerShader.find("transdiff") != std::string::npos ||
+        lowerShader.find("blendnorm") != std::string::npos ||
+        lowerShader.find("addatex") != std::string::npos ||
+        isGlassTex
+    );
+
+    if (isExplicitBlendShader) {
+        if (!hasTexAlpha) {
+            sm.isTransparent = false;
+            sm.isAlphaTest = false;
+        } else {
+            sm.isTransparent = true;
+            sm.isAlphaTest = false; // Pass 3: Smooth Alpha Blend (Glass, Read-Only Depth)
+        }
+        return;
+    }
+
+    // 3. Group 2: Alpha-Test Cutout Shader Tokens (Open Rails Specification)
+    // AlphATex, AlphATexDiff, BlendATex, BlendATexDiff, Cutout, AlphaTest, Alph1, Alph2
+    // Open Rails Specification: BlendATexDiff and AlphATexDiff are strictly Alpha-Tested materials
+    // with Depth Writing (Z-Write) ENABLED (Pass 2) for locomotive bodies, grilles, pantographs, and decals.
+    // They are only routed to Pass 3 (Z-Write = OFF) if the texture is explicitly glass/window.
+    bool isExplicitAlphaTestShader = (
+        lowerShader == "blendatexdiff" ||
+        lowerShader == "blendatex" ||
+        lowerShader == "alphatexdiff" ||
+        lowerShader == "alphatex" ||
+        lowerShader == "cutout" ||
+        lowerShader == "alphatest" ||
+        lowerShader == "alph1" ||
+        lowerShader == "alph2" ||
+        lowerShader.find("blendatex") != std::string::npos ||
+        lowerShader.find("alphatex") != std::string::npos ||
+        lowerShader.find("cutout") != std::string::npos ||
+        lowerShader.find("alph") != std::string::npos ||
+        lowerShader.find("vegetation") != std::string::npos ||
+        lowerShader.find("cruciform") != std::string::npos
+    );
+
+    if (isExplicitAlphaTestShader) {
+        if (hasTexAlpha) {
+            if (isGlassTex) {
+                sm.isTransparent = true;
+                sm.isAlphaTest = false; // Pass 3: Smooth Glass Blend (Read-Only Depth)
+            } else {
+                sm.isTransparent = true;
+                sm.isAlphaTest = true;  // Pass 2: AlphaTest Cutout (Writes Depth!)
+            }
+        } else {
+            sm.isTransparent = false;
+            sm.isAlphaTest = false; // Pass 1: Opaque
+        }
+        return;
+    }
+
+    // 4. Fallback / Unspecified Shaders: Open Rails Auto-detection
+    if (!hasTexAlpha) {
+        sm.isTransparent = false;
+        sm.isAlphaTest = false; // Pass 1: Opaque Solid
+    } else if (isGlassTex) {
+        sm.isTransparent = true;
+        sm.isAlphaTest = false; // Pass 3: Smooth Glass Blend
+    } else {
+        sm.isTransparent = true;
+        sm.isAlphaTest = true;  // Pass 2: AlphaTest Cutout (Writes Depth)
+    }
 }
 
 void ShapeReader::HotSwapTextures(TextureLoader* pTextureLoader, ParsedShape& shape) {
@@ -2533,9 +2707,11 @@ void ShapeReader::HotSwapTextures(TextureLoader* pTextureLoader, ParsedShape& sh
 
     std::vector<ID3D11ShaderResourceView*> imageSRVs(shape.rawImageNames.size(), nullptr);
     std::vector<bool> imageHasAlpha(shape.rawImageNames.size(), false);
+    std::vector<bool> imageHasSmoothAlpha(shape.rawImageNames.size(), false);
     for (size_t i = 0; i < shape.rawImageNames.size(); ++i) {
         imageSRVs[i] = pTextureLoader->LoadTexture(shape.shapeDir, shape.rawImageNames[i]);
         imageHasAlpha[i] = pTextureLoader->HasAlpha(shape.shapeDir, shape.rawImageNames[i]);
+        imageHasSmoothAlpha[i] = pTextureLoader->HasSmoothAlpha(shape.shapeDir, shape.rawImageNames[i]);
     }
 
     ID3D11ShaderResourceView* pDefaultSRV = pTextureLoader->GetDefaultTexture();
@@ -2545,35 +2721,21 @@ void ShapeReader::HotSwapTextures(TextureLoader* pTextureLoader, ParsedShape& sh
             ((subMesh.imageIndex >= 0 && (size_t)subMesh.imageIndex < shape.rawImageNames.size()) ? shape.rawImageNames[subMesh.imageIndex] : L"");
 
         bool hasAlphaFlag = false;
+        bool hasSmoothAlphaFlag = false;
         if (subMesh.imageIndex >= 0 && (size_t)subMesh.imageIndex < imageSRVs.size()) {
             subMesh.pSRV = imageSRVs[subMesh.imageIndex] ? imageSRVs[subMesh.imageIndex] : pDefaultSRV;
             hasAlphaFlag = imageHasAlpha[subMesh.imageIndex];
+            hasSmoothAlphaFlag = imageHasSmoothAlpha[subMesh.imageIndex];
         } else if (!texName.empty()) {
             subMesh.pSRV = pTextureLoader->LoadTexture(shape.shapeDir, texName);
             if (!subMesh.pSRV) subMesh.pSRV = pDefaultSRV;
             hasAlphaFlag = pTextureLoader->HasAlpha(shape.shapeDir, texName);
+            hasSmoothAlphaFlag = pTextureLoader->HasSmoothAlpha(shape.shapeDir, texName);
         } else {
             subMesh.pSRV = pDefaultSRV;
         }
 
-        if (!texName.empty()) {
-            std::wstring lowerTex = texName;
-            for (wchar_t& c : lowerTex) c = towlower(c);
-            bool isGlassTex = (lowerTex.find(L"glass") != std::wstring::npos ||
-                               lowerTex.find(L"window") != std::wstring::npos ||
-                               lowerTex.find(L"mirror") != std::wstring::npos);
-
-            if (!hasAlphaFlag) {
-                subMesh.isTransparent = false;
-                subMesh.isAlphaTest = false;
-            } else if (!isGlassTex) {
-                subMesh.isTransparent = true;
-                subMesh.isAlphaTest = true;
-            } else {
-                subMesh.isTransparent = true;
-                subMesh.isAlphaTest = false;
-            }
-        }
+        ClassifySubMeshMaterial(subMesh, hasAlphaFlag, hasSmoothAlphaFlag, texName);
     }
 }
 

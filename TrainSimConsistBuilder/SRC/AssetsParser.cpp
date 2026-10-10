@@ -6,14 +6,20 @@
 #include "PassengerParser.h"
 #include "FreightParser.h"
 #include "TenderParser.h"
+#include "DatabaseManager.h"
 #include "AppLogging.h"
 #include <sstream>
 #include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
+#include <thread>
+#include <atomic>
+#include <mutex>
 
 std::vector<StockItem> g_StockCache;
 CRITICAL_SECTION g_StockCacheCS;
 
-extern volatile BOOL g_bCancelScan;
+volatile BOOL g_bCancelStockScan = FALSE;
 
 std::string ReadConFileToAscii(const std::wstring& filePath)
 {
@@ -470,26 +476,124 @@ void ParseStockMetadata(const std::wstring& filePath, std::wstring& outName, std
     }
 }
 
-void ScanStockLibraryRecursive(const std::wstring& folderPath, HWND hWndParent, uint64_t& lastUpdateTime)
+static StockItem ParseStockFileToItem(
+    const std::wstring& folderPath,
+    const std::wstring& fileName,
+    const std::wstring& ext,
+    uint64_t lastWriteTime
+)
 {
-    if (g_bCancelScan) return;
+    std::wstring fileFullPath = folderPath + L"\\" + fileName;
+    std::wstring outName, outType, outPower, outMass, outCabView;
+    ParseStockMetadata(fileFullPath, outName, outType, outPower, outMass, outCabView, 0);
+
+    std::wstring category = L"";
+    std::wstring typeLower = outType;
+    for (wchar_t& c : typeLower) c = towlower(c);
+    std::wstring details = L"";
+
+    if (ext == L".eng")
+    {
+        if (typeLower.find(L"control") != std::wstring::npos || typeLower.find(L"cab") != std::wstring::npos)
+        {
+            category = L"Control";
+            ParseControlDetails(outCabView, outMass, details);
+        }
+        else if (typeLower.find(L"diesel") != std::wstring::npos)
+        {
+            category = L"Diesel";
+            ParseDieselDetails(outPower, outMass, details);
+        }
+        else if (typeLower.find(L"electric") != std::wstring::npos)
+        {
+            category = L"Electric";
+            ParseElectricDetails(outPower, outMass, details);
+        }
+        else if (typeLower.find(L"steam") != std::wstring::npos)
+        {
+            category = L"Steam";
+            ParseSteamDetails(outPower, outMass, details);
+        }
+        else
+        {
+            category = L"Diesel";
+            ParseDieselDetails(outPower, outMass, details);
+        }
+    }
+    else // .wag
+    {
+        if (typeLower.find(L"tender") != std::wstring::npos || fileName.find(L"tender") != std::wstring::npos || fileName.find(L"Tender") != std::wstring::npos)
+        {
+            category = L"Tender";
+            ParseTenderDetails(outMass, details);
+        }
+        else if (typeLower.find(L"carriage") != std::wstring::npos || typeLower.find(L"passenger") != std::wstring::npos)
+        {
+            category = L"Passenger";
+            ParsePassengerDetails(outMass, details);
+        }
+        else
+        {
+            category = L"Freight";
+            ParseFreightDetails(outMass, details);
+        }
+    }
+
+    size_t dotPos = fileName.find_last_of(L'.');
+    std::wstring dispName = (dotPos != std::wstring::npos) ? fileName.substr(0, dotPos) : fileName;
+    size_t lastSlash = folderPath.find_last_of(L"\\/");
+    std::wstring parentFolder = (lastSlash != std::wstring::npos) ? folderPath.substr(lastSlash + 1) : L"";
+
+    StockItem item;
+    item.szFileName = dispName;
+    item.szCategory = category;
+    item.szFolder = parentFolder;
+    item.szExtension = ext;
+    item.szDetails = details;
+    item.lastWriteTime = lastWriteTime;
+    return item;
+}
+
+struct DiskStockEntry {
+    std::wstring folderPath;
+    std::wstring fileName;
+    std::wstring ext;
+    std::wstring parentFolder;
+    std::wstring key;
+    uint64_t diskTime = 0;
+    bool isUpdate = false;
+};
+
+static void CollectStockFilesFast(
+    const std::wstring& folderPath,
+    std::vector<DiskStockEntry>& outFiles
+)
+{
+    if (g_bCancelStockScan) return;
 
     std::wstring searchPattern = folderPath + L"\\*";
     WIN32_FIND_DATAW ffd;
-    HANDLE hFind = FindFirstFileW(searchPattern.c_str(), &ffd);
+    HANDLE hFind = FindFirstFileExW(
+        searchPattern.c_str(),
+        FindExInfoBasic,
+        &ffd,
+        FindExSearchNameMatch,
+        NULL,
+        FIND_FIRST_EX_LARGE_FETCH
+    );
 
     if (hFind != INVALID_HANDLE_VALUE)
     {
         do
         {
-            if (g_bCancelScan) break;
+            if (g_bCancelStockScan) break;
 
             if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
             {
                 if (wcscmp(ffd.cFileName, L".") != 0 && wcscmp(ffd.cFileName, L"..") != 0)
                 {
                     std::wstring subFolder = folderPath + L"\\" + ffd.cFileName;
-                    ScanStockLibraryRecursive(subFolder, hWndParent, lastUpdateTime);
+                    CollectStockFilesFast(subFolder, outFiles);
                 }
             }
             else
@@ -503,90 +607,25 @@ void ScanStockLibraryRecursive(const std::wstring& folderPath, HWND hWndParent, 
 
                     if (ext == L".eng" || ext == L".wag")
                     {
-                        std::wstring fileFullPath = folderPath + L"\\" + ffd.cFileName;
-                        
-                        std::wstring outName;
-                        std::wstring outType;
-                        std::wstring outPower;
-                        std::wstring outMass;
-                        std::wstring outCabView;
-
-                        ParseStockMetadata(fileFullPath, outName, outType, outPower, outMass, outCabView, 0);
-
-                        std::wstring category = L"";
-                        std::wstring typeLower = outType;
-                        for (wchar_t& c : typeLower) c = towlower(c);
-
-                        std::wstring details = L"";
-
-                        if (ext == L".eng")
-                        {
-                            if (typeLower.find(L"control") != std::wstring::npos || typeLower.find(L"cab") != std::wstring::npos)
-                            {
-                                category = L"Control";
-                                ParseControlDetails(outCabView, outMass, details);
-                            }
-                            else if (typeLower.find(L"diesel") != std::wstring::npos)
-                            {
-                                category = L"Diesel";
-                                ParseDieselDetails(outPower, outMass, details);
-                            }
-                            else if (typeLower.find(L"electric") != std::wstring::npos)
-                            {
-                                category = L"Electric";
-                                ParseElectricDetails(outPower, outMass, details);
-                            }
-                            else if (typeLower.find(L"steam") != std::wstring::npos)
-                            {
-                                category = L"Steam";
-                                ParseSteamDetails(outPower, outMass, details);
-                            }
-                            else
-                            {
-                                category = L"Diesel";
-                                ParseDieselDetails(outPower, outMass, details);
-                            }
-                        }
-                        else // .wag
-                        {
-                            if (typeLower.find(L"tender") != std::wstring::npos || fileName.find(L"tender") != std::wstring::npos || fileName.find(L"Tender") != std::wstring::npos)
-                            {
-                                category = L"Tender";
-                                ParseTenderDetails(outMass, details);
-                            }
-                            else if (typeLower.find(L"carriage") != std::wstring::npos || typeLower.find(L"passenger") != std::wstring::npos)
-                            {
-                                category = L"Passenger";
-                                ParsePassengerDetails(outMass, details);
-                            }
-                            else
-                            {
-                                category = L"Freight";
-                                ParseFreightDetails(outMass, details);
-                            }
-                        }
-
                         std::wstring dispName = fileName.substr(0, dotPos);
                         size_t lastSlash = folderPath.find_last_of(L"\\/");
                         std::wstring parentFolder = (lastSlash != std::wstring::npos) ? folderPath.substr(lastSlash + 1) : L"";
 
-                        StockItem item;
-                        item.szFileName = dispName;
-                        item.szCategory = category;
-                        item.szFolder = parentFolder;
-                        item.szExtension = ext;
-                        item.szDetails = details;
+                        uint64_t diskTime = ((uint64_t)ffd.ftLastWriteTime.dwHighDateTime << 32) | ffd.ftLastWriteTime.dwLowDateTime;
 
-                        EnterCriticalSection(&g_StockCacheCS);
-                        g_StockCache.push_back(item);
-                        LeaveCriticalSection(&g_StockCacheCS);
+                        // Create lookup key: folder|name.ext (lowercase)
+                        std::wstring key = parentFolder + L"|" + dispName + ext;
+                        for (auto& c : key) c = towlower(c);
 
-                        uint64_t currentTime = GetTickCount64();
-                        if (currentTime - lastUpdateTime >= 163)
-                        {
-                            lastUpdateTime = currentTime;
-                            PostMessageW(hWndParent, WM_STOCK_SCAN_PROGRESS, 0, 0);
-                        }
+                        DiskStockEntry entry;
+                        entry.folderPath = folderPath;
+                        entry.fileName = ffd.cFileName;
+                        entry.ext = std::move(ext);
+                        entry.parentFolder = std::move(parentFolder);
+                        entry.key = std::move(key);
+                        entry.diskTime = diskTime;
+
+                        outFiles.push_back(std::move(entry));
                     }
                 }
             }
@@ -599,6 +638,7 @@ void ScanStockLibraryRecursive(const std::wstring& folderPath, HWND hWndParent, 
 struct StockScanThreadParams {
     HWND hWndParent;
     std::wstring basePath;
+    bool bForceRescan = false;
 };
 
 uint64_t GetTrainsetSignature(const std::wstring& basePath)
@@ -642,119 +682,24 @@ uint64_t GetTrainsetSignature(const std::wstring& basePath)
 
 std::wstring GetCacheFilePath()
 {
-    wchar_t szExePath[MAX_PATH] = { 0 };
-    GetModuleFileNameW(NULL, szExePath, MAX_PATH);
-    std::wstring exePath = szExePath;
-    size_t lastSlash = exePath.find_last_of(L"\\/");
-    std::wstring dir = (lastSlash != std::wstring::npos) ? exePath.substr(0, lastSlash + 1) : L"";
-    
-    std::wstring appDataDir = dir + L"AppData";
-    CreateDirectoryW(appDataDir.c_str(), NULL);
-    
-    return appDataDir + L"\\stock_cache.dat";
+    return DatabaseManager::GetDatabaseFilePath();
 }
 
 bool LoadStockCache(const std::wstring& basePath, uint64_t currentSig)
 {
-    std::wstring cachePath = GetCacheFilePath();
-    HANDLE hFile = CreateFileW(cachePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return false;
-
-    DWORD bytesRead = 0;
-    uint32_t magic = 0;
-    if (!ReadFile(hFile, &magic, sizeof(magic), &bytesRead, NULL) || magic != 0x53544348) {
-        CloseHandle(hFile);
-        return false;
-    }
-
-    uint64_t cachedSig = 0;
-    if (!ReadFile(hFile, &cachedSig, sizeof(cachedSig), &bytesRead, NULL)) {
-        CloseHandle(hFile);
-        return false;
-    }
-
-    if (cachedSig != currentSig) {
-        CloseHandle(hFile);
-        return false; // Stale cache
-    }
-
-    uint32_t itemCount = 0;
-    if (!ReadFile(hFile, &itemCount, sizeof(itemCount), &bytesRead, NULL)) {
-        CloseHandle(hFile);
-        return false;
-    }
-
-    std::vector<StockItem> tempCache;
-    tempCache.reserve(itemCount);
-
-    auto ReadString = [&](std::wstring& outStr) -> bool {
-        uint32_t len = 0;
-        if (!ReadFile(hFile, &len, sizeof(len), &bytesRead, NULL)) return false;
-        if (len == 0) {
-            outStr.clear();
-            return true;
-        }
-        std::vector<wchar_t> buf(len);
-        if (!ReadFile(hFile, buf.data(), len * sizeof(wchar_t), &bytesRead, NULL)) return false;
-        outStr.assign(buf.begin(), buf.end());
-        return true;
-    };
-
-    for (uint32_t i = 0; i < itemCount; ++i) {
-        StockItem item;
-        if (!ReadString(item.szFileName) ||
-            !ReadString(item.szCategory) ||
-            !ReadString(item.szFolder) ||
-            !ReadString(item.szExtension) ||
-            !ReadString(item.szDetails)) {
-            CloseHandle(hFile);
-            return false;
-        }
-        tempCache.push_back(item);
-    }
-
-    CloseHandle(hFile);
-
+    UNREFERENCED_PARAMETER(basePath);
     EnterCriticalSection(&g_StockCacheCS);
-    g_StockCache = std::move(tempCache);
+    bool loaded = DatabaseManager::LoadStockCache(currentSig, g_StockCache);
     LeaveCriticalSection(&g_StockCacheCS);
-
-    return true;
+    return loaded;
 }
 
 void SaveStockCache(const std::wstring& basePath, uint64_t signature)
 {
-    std::wstring cachePath = GetCacheFilePath();
-    HANDLE hFile = CreateFileW(cachePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) return;
-
-    DWORD bytesWritten = 0;
-    uint32_t magic = 0x53544348; // "STCH"
-    WriteFile(hFile, &magic, sizeof(magic), &bytesWritten, NULL);
-    WriteFile(hFile, &signature, sizeof(signature), &bytesWritten, NULL);
-
+    UNREFERENCED_PARAMETER(basePath);
     EnterCriticalSection(&g_StockCacheCS);
-    uint32_t itemCount = (uint32_t)g_StockCache.size();
-    WriteFile(hFile, &itemCount, sizeof(itemCount), &bytesWritten, NULL);
-
-    auto WriteString = [&](const std::wstring& str) {
-        uint32_t len = (uint32_t)str.length();
-        WriteFile(hFile, &len, sizeof(len), &bytesWritten, NULL);
-        if (len > 0) {
-            WriteFile(hFile, str.c_str(), len * sizeof(wchar_t), &bytesWritten, NULL);
-        }
-    };
-
-    for (const auto& item : g_StockCache) {
-        WriteString(item.szFileName);
-        WriteString(item.szCategory);
-        WriteString(item.szFolder);
-        WriteString(item.szExtension);
-        WriteString(item.szDetails);
-    }
+    DatabaseManager::SaveStockCache(signature, g_StockCache);
     LeaveCriticalSection(&g_StockCacheCS);
-
-    CloseHandle(hFile);
 }
 
 DWORD WINAPI StockScannerThreadProc(LPVOID lpParam)
@@ -762,6 +707,7 @@ DWORD WINAPI StockScannerThreadProc(LPVOID lpParam)
     StockScanThreadParams* params = (StockScanThreadParams*)lpParam;
     HWND hWndParent = params->hWndParent;
     std::wstring basePath = params->basePath;
+    bool bForceRescan = params->bForceRescan;
     delete params;
 
     if (!basePath.empty() && basePath.back() != L'\\')
@@ -769,37 +715,206 @@ DWORD WINAPI StockScannerThreadProc(LPVOID lpParam)
         basePath += L'\\';
     }
 
-    // Try loading from cache first
     uint64_t currentSig = GetTrainsetSignature(basePath);
-    if (LoadStockCache(basePath, currentSig))
-    {
-        LOG_INFO("Loaded %zu rolling stock items from fast disk cache.", g_StockCache.size());
-        PostMessageW(hWndParent, WM_STOCK_SCAN_COMPLETE, 0, 0);
-        return 0;
-    }
-
-    LOG_INFO("Scanning rolling stock library in '%ls'...", basePath.c_str());
     std::wstring trainsetPath = basePath + L"TRAINS\\TRAINSET";
 
-    EnterCriticalSection(&g_StockCacheCS);
-    g_StockCache.clear();
-    LeaveCriticalSection(&g_StockCacheCS);
+    std::unordered_map<std::wstring, StockItem> dbMap;
+    bool hasDbRecords = DatabaseManager::LoadStockMap(dbMap);
 
-    uint64_t lastUpdateTime = GetTickCount64();
-    ScanStockLibraryRecursive(trainsetPath, hWndParent, lastUpdateTime);
+    // If signature matches, DB has records, and rescan is NOT forced -> Instant match (<30ms)
+    if (!bForceRescan && hasDbRecords && !dbMap.empty())
+    {
+        std::wstring sigStr = DatabaseManager::GetSetting(L"TrainsetSignature", L"0");
+        uint64_t dbSig = 0;
+        try { dbSig = std::stoull(sigStr); } catch (...) { dbSig = 0; }
 
-    if (!g_bCancelScan)
+        if (dbSig == currentSig && currentSig != 0)
+        {
+            EnterCriticalSection(&g_StockCacheCS);
+            g_StockCache.clear();
+            g_StockCache.reserve(dbMap.size());
+            for (auto& pair : dbMap)
+            {
+                g_StockCache.push_back(std::move(pair.second));
+            }
+            std::sort(g_StockCache.begin(), g_StockCache.end(), [](const StockItem& a, const StockItem& b) {
+                return _wcsicmp(a.szFileName.c_str(), b.szFileName.c_str()) < 0;
+            });
+            size_t total = g_StockCache.size();
+            LeaveCriticalSection(&g_StockCacheCS);
+
+            LOG_INFO("Loaded %zu rolling stock items instantly from SQLite database.", total);
+            PostMessageW(hWndParent, WM_STOCK_SCAN_COMPLETE, 0, 0);
+            return 0;
+        }
+    }
+
+    // Fast Kernel32 directory traverse across entire TRAINSET folder (~15-20ms)
+    LOG_INFO("Performing fast Kernel32 Incremental Sync for '%ls'...", basePath.c_str());
+
+    std::vector<DiskStockEntry> diskEntries;
+    diskEntries.reserve(dbMap.empty() ? 10000 : dbMap.size() + 500);
+    CollectStockFilesFast(trainsetPath, diskEntries);
+
+    if (g_bCancelStockScan) return 0;
+
+    std::unordered_set<std::wstring> visitedKeys;
+    visitedKeys.reserve(diskEntries.size());
+
+    std::vector<DiskStockEntry> toParseEntries;
+    toParseEntries.reserve(diskEntries.size());
+
+    std::vector<StockItem> currentCache;
+    currentCache.reserve(diskEntries.size());
+
+    // Instant differential categorization
+    for (auto& entry : diskEntries)
+    {
+        visitedKeys.insert(entry.key);
+        auto it = dbMap.find(entry.key);
+        if (it != dbMap.end() && it->second.lastWriteTime == entry.diskTime && entry.diskTime != 0)
+        {
+            // 100% UNCHANGED: Instant match from SQLite map (0 file reads, 0 parsing)
+            currentCache.push_back(it->second);
+        }
+        else
+        {
+            // NEW OR MODIFIED: Queue for multi-threaded parsing
+            entry.isUpdate = (it != dbMap.end());
+            toParseEntries.push_back(std::move(entry));
+        }
+    }
+
+    std::vector<StockItem> toInsert;
+    std::vector<StockItem> toUpdate;
+    toInsert.reserve(toParseEntries.size());
+    toUpdate.reserve(toParseEntries.size());
+
+    // Initial progressive UI update with existing unchanged items
+    if (!currentCache.empty())
     {
         EnterCriticalSection(&g_StockCacheCS);
-        std::sort(g_StockCache.begin(), g_StockCache.end(), [](const StockItem& a, const StockItem& b) {
+        g_StockCache = currentCache;
+        LeaveCriticalSection(&g_StockCacheCS);
+        PostMessageW(hWndParent, WM_STOCK_SCAN_PROGRESS, (WPARAM)currentCache.size(), (LPARAM)diskEntries.size());
+    }
+
+    // Multi-threaded parallel parsing across all available CPU cores
+    if (!toParseEntries.empty() && !g_bCancelStockScan)
+    {
+        unsigned int numThreads = std::thread::hardware_concurrency();
+        if (numThreads == 0) numThreads = 4;
+        if (numThreads > 16) numThreads = 16;
+        if (numThreads > toParseEntries.size()) numThreads = (unsigned int)toParseEntries.size();
+
+        std::atomic<size_t> nextIndex(0);
+        std::atomic<size_t> parsedCount(0);
+        std::mutex resultsMutex;
+        uint64_t lastStreamTime = GetTickCount64();
+
+        auto WorkerFunc = [&]() {
+            std::vector<StockItem> localInserts;
+            std::vector<StockItem> localUpdates;
+            std::vector<StockItem> localCache;
+            localInserts.reserve(128);
+            localUpdates.reserve(128);
+            localCache.reserve(128);
+
+            while (!g_bCancelStockScan)
+            {
+                size_t idx = nextIndex.fetch_add(1);
+                if (idx >= toParseEntries.size()) break;
+
+                const auto& entry = toParseEntries[idx];
+                StockItem item = ParseStockFileToItem(entry.folderPath, entry.fileName, entry.ext, entry.diskTime);
+                if (entry.isUpdate)
+                {
+                    localUpdates.push_back(item);
+                }
+                else
+                {
+                    localInserts.push_back(item);
+                }
+                localCache.push_back(std::move(item));
+
+                size_t done = parsedCount.fetch_add(1) + 1;
+
+                if (localCache.size() >= 64 || done == toParseEntries.size())
+                {
+                    std::lock_guard<std::mutex> lk(resultsMutex);
+                    toInsert.insert(toInsert.end(), std::make_move_iterator(localInserts.begin()), std::make_move_iterator(localInserts.end()));
+                    toUpdate.insert(toUpdate.end(), std::make_move_iterator(localUpdates.begin()), std::make_move_iterator(localUpdates.end()));
+                    currentCache.insert(currentCache.end(), std::make_move_iterator(localCache.begin()), std::make_move_iterator(localCache.end()));
+                    localInserts.clear();
+                    localUpdates.clear();
+                    localCache.clear();
+
+                    uint64_t now = GetTickCount64();
+                    if (now - lastStreamTime >= 80)
+                    {
+                        lastStreamTime = now;
+                        EnterCriticalSection(&g_StockCacheCS);
+                        g_StockCache = currentCache;
+                        LeaveCriticalSection(&g_StockCacheCS);
+                        PostMessageW(hWndParent, WM_STOCK_SCAN_PROGRESS, (WPARAM)currentCache.size(), (LPARAM)diskEntries.size());
+                    }
+                }
+            }
+
+            if (!localCache.empty())
+            {
+                std::lock_guard<std::mutex> lk(resultsMutex);
+                toInsert.insert(toInsert.end(), std::make_move_iterator(localInserts.begin()), std::make_move_iterator(localInserts.end()));
+                toUpdate.insert(toUpdate.end(), std::make_move_iterator(localUpdates.begin()), std::make_move_iterator(localUpdates.end()));
+                currentCache.insert(currentCache.end(), std::make_move_iterator(localCache.begin()), std::make_move_iterator(localCache.end()));
+            }
+        };
+
+        std::vector<std::thread> workers;
+        workers.reserve(numThreads);
+        for (unsigned int t = 0; t < numThreads; ++t)
+        {
+            workers.emplace_back(WorkerFunc);
+        }
+
+        for (auto& w : workers)
+        {
+            if (w.joinable()) w.join();
+        }
+    }
+
+    if (!g_bCancelStockScan)
+    {
+        // Detect deletions (records in DB that no longer exist on physical disk)
+        std::vector<std::pair<std::wstring, std::wstring>> toDelete;
+        for (const auto& pair : dbMap)
+        {
+            if (visitedKeys.find(pair.first) == visitedKeys.end())
+            {
+                toDelete.push_back({ pair.second.szFolder, pair.second.szFileName });
+            }
+        }
+
+        // Apply diff to SQLite database within a single fast atomic transaction
+        if (!toInsert.empty() || !toUpdate.empty() || !toDelete.empty())
+        {
+            DatabaseManager::SyncStockDiff(toInsert, toUpdate, toDelete);
+        }
+
+        // Update signature in AppSettings
+        DatabaseManager::SetSetting(L"TrainsetSignature", std::to_wstring(currentSig));
+
+        // Sort and publish full cache to UI
+        EnterCriticalSection(&g_StockCacheCS);
+        std::sort(currentCache.begin(), currentCache.end(), [](const StockItem& a, const StockItem& b) {
             return _wcsicmp(a.szFileName.c_str(), b.szFileName.c_str()) < 0;
         });
+        g_StockCache = std::move(currentCache);
         size_t totalScanned = g_StockCache.size();
         LeaveCriticalSection(&g_StockCacheCS);
 
-        // Save to cache file for next run
-        SaveStockCache(basePath, currentSig);
-        LOG_INFO("Stock Library scan complete: %zu rolling stock items parsed.", totalScanned);
+        LOG_INFO("Stock Library Differential Sync complete: %zu items active (+%zu new, ~%zu updated, -%zu deleted).",
+            totalScanned, toInsert.size(), toUpdate.size(), toDelete.size());
 
         PostMessageW(hWndParent, WM_STOCK_SCAN_COMPLETE, 0, 0);
     }
@@ -807,11 +922,13 @@ DWORD WINAPI StockScannerThreadProc(LPVOID lpParam)
     return 0;
 }
 
-HANDLE StartStockScan(HWND hWndParent, const std::wstring& basePath)
+HANDLE StartStockScan(HWND hWndParent, const std::wstring& basePath, bool bForceRescan)
 {
+    g_bCancelStockScan = FALSE; // Reset cancel flag to start clean scan
     StockScanThreadParams* params = new StockScanThreadParams();
     params->hWndParent = hWndParent;
     params->basePath = basePath;
+    params->bForceRescan = bForceRescan;
     return CreateThread(NULL, 0, StockScannerThreadProc, params, 0, NULL);
 }
 
@@ -819,9 +936,11 @@ void CancelStockScan(HANDLE& hThread)
 {
     if (hThread != NULL)
     {
-        g_bCancelScan = TRUE;
-        WaitForSingleObject(hThread, 200);
+        g_bCancelStockScan = TRUE;
+        WaitForSingleObject(hThread, 500);
         CloseHandle(hThread);
         hThread = NULL;
     }
 }
+
+

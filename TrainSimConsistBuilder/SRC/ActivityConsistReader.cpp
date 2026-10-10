@@ -1,4 +1,5 @@
 #include "ActivityConsistReader.h"
+#include "AppLogging.h"
 #include <windows.h>
 #include <sstream>
 #include <algorithm>
@@ -375,6 +376,9 @@ namespace ActivityConsistReader {
                 }
             }
         }
+
+        LOG_INFO("ActivityConsistReader: Parsed '%ls' (File: '%ls', Embedded Consists: %zu)",
+            actFilePath.c_str(), data.fileName.c_str(), data.consists.size());
 
         return data;
     }

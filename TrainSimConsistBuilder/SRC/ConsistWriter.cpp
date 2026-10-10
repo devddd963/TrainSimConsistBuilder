@@ -1,4 +1,5 @@
 #include "ConsistWriter.h"
+#include "AppLogging.h"
 #include <sstream>
 #include <fstream>
 #include <iomanip>
@@ -12,6 +13,8 @@ namespace ConsistWriter
                      double perfFactorPct,
                      const std::vector<ConsistReader::UnitInfo>& units)
     {
+        LOG_INFO("ConsistWriter: Initiating save of consist '%ls' (%zu units) to '%ls'...", name.c_str(), units.size(), fullPath.c_str());
+
         // Clean strings (trim spaces/quotes)
         auto TrimQuotes = [](const std::wstring& s) -> std::wstring {
             if (s.empty()) return L"";
@@ -83,8 +86,11 @@ namespace ConsistWriter
             fwrite(&bom, sizeof(bom), 1, fp);
             fwrite(content.c_str(), sizeof(wchar_t), content.size(), fp);
             fclose(fp);
+            LOG_INFO("ConsistWriter: Successfully saved consist '%ls' (%zu bytes written).", fullPath.c_str(), content.size() * sizeof(wchar_t));
             return true;
         }
+
+        LOG_ERROR("ConsistWriter: Failed to open/write consist file '%ls'.", fullPath.c_str());
         return false;
     }
 }

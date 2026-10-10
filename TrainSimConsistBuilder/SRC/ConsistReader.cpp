@@ -1,4 +1,5 @@
 #include "ConsistReader.h"
+#include "AppLogging.h"
 #include <sstream>
 #include <algorithm>
 #include <stdexcept>
@@ -271,6 +272,9 @@ namespace ConsistReader {
                 }
             }
         }
+
+        LOG_INFO("ConsistReader: Parsed consist '%ls' -> ID: '%ls', Name: '%ls', Units: %zu, MaxSpeed: %.1f km/h",
+            fullPath.c_str(), data.trainCfg.trainCfgId.c_str(), data.trainCfg.name.c_str(), data.units.size(), data.trainCfg.maxVelocity);
 
         return data;
     }

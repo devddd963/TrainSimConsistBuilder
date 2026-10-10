@@ -5,15 +5,14 @@
 namespace Updater
 {
     const wchar_t APP_TITLE[] = L"Train Sim Consist Builder for Open Rails";
-    const wchar_t APP_VERSION[] = L"9.0.0";
-    const int APP_BUILD_NUMBER = 36906;
+    const wchar_t APP_VERSION[] = L"9.3.0";
+    const int APP_BUILD_NUMBER = 93000;
+    const wchar_t APP_UPDATE_ZIP_NAME[] = L"TrainSimConsistBuilder.zip";
 
 #if defined(_WIN64)
     const wchar_t APP_ARCH[] = L"64-bit (x64)";
-    const wchar_t APP_TARGET_EXE_NAME[] = L"TrainSimConsistBuilder_v9.0.0_x64.exe";
 #else
     const wchar_t APP_ARCH[] = L"32-bit (x32)";
-    const wchar_t APP_TARGET_EXE_NAME[] = L"TrainSimConsistBuilder_v9.0.0_x32.exe";
 #endif
 
     struct UpdateInfo

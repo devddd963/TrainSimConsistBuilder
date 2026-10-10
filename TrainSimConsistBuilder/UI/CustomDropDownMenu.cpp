@@ -6,6 +6,7 @@
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <algorithm>
+#include <unordered_set>
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -31,6 +32,7 @@ namespace
         HWND hParent = NULL;
         RECT rcAnchorScreen = { 0 };
         std::vector<DropDownItem> items;
+        std::unordered_set<std::wstring> collapsedGroups;
         bool isMultiSelect = false;
         int selectedId = 0;
         int hoverIndex = -1;
@@ -56,6 +58,97 @@ namespace
     };
 
     static DropDownInternalState* g_pCurrentState = nullptr;
+
+    static std::vector<int> GetVisibleIndices(const DropDownInternalState& state)
+    {
+        std::vector<int> visible;
+        visible.reserve(state.items.size());
+        for (size_t i = 0; i < state.items.size(); ++i)
+        {
+            const auto& it = state.items[i];
+            
+            // If parentGroup is collapsed, hide this item
+            if (!it.parentGroup.empty() && state.collapsedGroups.count(it.parentGroup) > 0)
+            {
+                continue;
+            }
+
+            // If this item is a group header, it is visible (since its parentGroup is expanded)
+            if (it.isGroupHeader)
+            {
+                visible.push_back((int)i);
+            }
+            else if (it.group.empty() || state.collapsedGroups.count(it.group) == 0)
+            {
+                visible.push_back((int)i);
+            }
+        }
+        return visible;
+    }
+
+    static void SyncHeaderCheckStates(DropDownInternalState* pState)
+    {
+        if (!pState || !pState->isMultiSelect) return;
+
+        // 1. Sync all GroupHeaders (both Level 2 sub-groups and Level 1 top-groups)
+        for (auto& hdr : pState->items)
+        {
+            if (!hdr.isGroupHeader || hdr.id <= 0) continue;
+
+            size_t totalChild = 0;
+            size_t checkedChild = 0;
+
+            for (const auto& child : pState->items)
+            {
+                if (child.isGroupHeader || child.isHeader || child.isSeparator || !child.isEnabled) continue;
+
+                // Match either direct group or matching parentGroup (for category headers)
+                bool isMatch = (child.group == hdr.group) || (child.parentGroup == hdr.group);
+                if (isMatch)
+                {
+                    totalChild++;
+                    if (child.isChecked) checkedChild++;
+                }
+            }
+
+            if (totalChild > 0)
+            {
+                hdr.isChecked = (checkedChild == totalChild);
+                hdr.isIndeterminate = (checkedChild > 0 && checkedChild < totalChild);
+            }
+        }
+
+        // 2. Sync Global Header (id == 1, isHeader && !isGroupHeader)
+        size_t totalAllRegular = 0;
+        size_t checkedAllRegular = 0;
+        for (const auto& item : pState->items)
+        {
+            if (!item.isHeader && !item.isSeparator && item.isEnabled)
+            {
+                totalAllRegular++;
+                if (item.isChecked) checkedAllRegular++;
+            }
+        }
+
+        for (auto& item : pState->items)
+        {
+            if (item.isHeader && !item.isGroupHeader && item.id > 0)
+            {
+                item.isChecked = (totalAllRegular > 0 && checkedAllRegular == totalAllRegular);
+                item.isIndeterminate = (checkedAllRegular > 0 && checkedAllRegular < totalAllRegular);
+            }
+        }
+    }
+
+    static void RecalculateLayout(DropDownInternalState* pState)
+    {
+        if (!pState) return;
+        auto visible = GetVisibleIndices(*pState);
+        int totalVis = (int)visible.size();
+        pState->contentHeight = 12 + totalVis * pState->itemHeight;
+        int maxOffset = (std::max)(0, pState->contentHeight - pState->viewportHeight);
+        pState->scrollOffset = (std::max)(0, (std::min)(maxOffset, pState->scrollOffset));
+    }
 
     static HFONT CreateFluentFont(int pointSize, int weight, const wchar_t* faceName)
     {
@@ -156,7 +249,8 @@ namespace
             bool hasScroll = (pState->contentHeight > pState->viewportHeight);
             int itemRight = hasScroll ? (w - 14) : (w - 6);
 
-            int startIdx = pState->scrollOffset / pState->itemHeight;
+            auto visibleIndices = GetVisibleIndices(*pState);
+            int startVisIdx = pState->scrollOffset / pState->itemHeight;
             int curY = 6 - (pState->scrollOffset % pState->itemHeight);
 
             // Clip viewport
@@ -164,13 +258,138 @@ namespace
             HRGN hRgnClip = CreateRectRgn(rcClip.left, rcClip.top + 4, rcClip.right, rcClip.bottom - 4);
             SelectClipRgn(hMemDC, hRgnClip);
 
-            for (size_t i = startIdx; i < pState->items.size(); ++i)
+            for (size_t v = startVisIdx; v < visibleIndices.size(); ++v)
             {
                 if (curY >= h) break;
 
+                int i = visibleIndices[v];
                 const auto& it = pState->items[i];
                 RECT rcItem = { 6, curY, itemRight, curY + pState->itemHeight };
+
+                // 1. Separator line rendering
+                if (it.isSeparator)
+                {
+                    HPEN hPenSep = CreatePen(PS_SOLID, 1, RGB(65, 68, 76));
+                    HPEN hOldSepP = (HPEN)SelectObject(hMemDC, hPenSep);
+                    int midY = (rcItem.top + rcItem.bottom) / 2;
+                    MoveToEx(hMemDC, rcItem.left + 8, midY, NULL);
+                    LineTo(hMemDC, rcItem.right - 8, midY);
+                    SelectObject(hMemDC, hOldSepP);
+                    DeleteObject(hPenSep);
+                    curY += pState->itemHeight;
+                    continue;
+                }
+
+                // 2. Collapsible Group Header
+                if (it.isGroupHeader)
+                {
+                    bool isCollapsed = (pState->collapsedGroups.count(it.group) > 0);
+                    bool isHover = ((int)i == pState->hoverIndex);
+
+                    COLORREF gBg = isHover ? RGB(48, 52, 62) : ((it.indentLevel > 0) ? RGB(28, 30, 36) : RGB(32, 34, 40));
+                    COLORREF gBrd = isHover ? RGB(0, 120, 215) : ((it.indentLevel > 0) ? RGB(44, 48, 58) : RGB(50, 54, 64));
+                    HBRUSH hbrGrp = CreateSolidBrush(gBg);
+                    HPEN hPenGrp = CreatePen(PS_SOLID, 1, gBrd);
+                    HBRUSH hOldB = (HBRUSH)SelectObject(hMemDC, hbrGrp);
+                    HPEN hOldP = (HPEN)SelectObject(hMemDC, hPenGrp);
+
+                    int leftIndent = (it.indentLevel == 1) ? 14 : ((it.indentLevel >= 2) ? 28 : 0);
+                    RECT rcGrpDraw = { rcItem.left + leftIndent, rcItem.top + 2, rcItem.right, rcItem.bottom - 2 };
+                    RoundRect(hMemDC, rcGrpDraw.left, rcGrpDraw.top, rcGrpDraw.right, rcGrpDraw.bottom, 6, 6);
+                    SelectObject(hMemDC, hOldB);
+                    SelectObject(hMemDC, hOldP);
+                    DeleteObject(hbrGrp);
+                    DeleteObject(hPenGrp);
+
+                    int leftTextOffset = rcGrpDraw.left + 8;
+
+                    // Chevron (Expand / Collapse indicator)
+                    SelectObject(hMemDC, pState->hFontIcon);
+                    SetTextColor(hMemDC, RGB(96, 205, 255));
+                    RECT rcChev = { leftTextOffset, rcItem.top, leftTextOffset + 18, rcItem.bottom };
+                    DrawTextW(hMemDC, isCollapsed ? L"\xE70E" : L"\xE70D", -1, &rcChev, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    leftTextOffset += 20;
+
+                    if (pState->isMultiSelect && it.id > 0)
+                    {
+                        // Checkbox for whole group
+                        RECT rcBox = { leftTextOffset, rcItem.top + (pState->itemHeight - 16) / 2, leftTextOffset + 16, rcItem.top + (pState->itemHeight - 16) / 2 + 16 };
+                        bool isBoxFilled = (it.isChecked || it.isIndeterminate);
+
+                        HBRUSH hBoxBr = CreateSolidBrush(isBoxFilled ? accentCol : RGB(32, 32, 34));
+                        HPEN hBoxPen = CreatePen(PS_SOLID, 1, isBoxFilled ? accentCol : borderCol);
+                        HBRUSH hOldBoxB = (HBRUSH)SelectObject(hMemDC, hBoxBr);
+                        HPEN hOldBoxP = (HPEN)SelectObject(hMemDC, hBoxPen);
+                        RoundRect(hMemDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
+                        SelectObject(hMemDC, hOldBoxB);
+                        SelectObject(hMemDC, hOldBoxP);
+                        DeleteObject(hBoxBr);
+                        DeleteObject(hBoxPen);
+
+                        if (it.isChecked)
+                        {
+                            SelectObject(hMemDC, pState->hFontIcon);
+                            SetTextColor(hMemDC, RGB(255, 255, 255));
+                            RECT rcGlyph = { rcBox.left, rcBox.top - 1, rcBox.right, rcBox.bottom };
+                            DrawTextW(hMemDC, L"\xE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        }
+                        else if (it.isIndeterminate)
+                        {
+                            HBRUSH hDotBr = CreateSolidBrush(RGB(255, 255, 255));
+                            RECT rcDot = { rcBox.left + 4, rcBox.top + 4, rcBox.right - 4, rcBox.bottom - 4 };
+                            FillRect(hMemDC, &rcDot, hDotBr);
+                            DeleteObject(hDotBr);
+                        }
+                        leftTextOffset = rcBox.right + 8;
+                    }
+
+                    // Folder / Group Icon
+                    SelectObject(hMemDC, pState->hFontIcon);
+                    SetTextColor(hMemDC, (it.indentLevel == 0) ? RGB(255, 185, 0) : RGB(96, 205, 255));
+                    RECT rcGrpIcon = { leftTextOffset, rcItem.top, leftTextOffset + 18, rcItem.bottom };
+                    const wchar_t* gIcoStr = !it.icon.empty() ? it.icon.c_str() : (isCollapsed ? L"\xE8B7" : L"\xE838");
+                    DrawTextW(hMemDC, gIcoStr, -1, &rcGrpIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    leftTextOffset += 22;
+
+                    // Group Title & Count
+                    int textRight = rcItem.right - 10;
+                    std::wstring countStr = it.groupCount > 0 ? (L"(" + std::to_wstring(it.groupCount) + L")") : it.secondaryText;
+                    if (!countStr.empty())
+                    {
+                        SelectObject(hMemDC, pState->hFontSmall);
+                        SIZE secSz = { 0 };
+                        GetTextExtentPoint32W(hMemDC, countStr.c_str(), (int)countStr.length(), &secSz);
+
+                        RECT rcSec = { rcItem.right - secSz.cx - 8, rcItem.top, rcItem.right - 8, rcItem.bottom };
+                        SetTextColor(hMemDC, RGB(160, 168, 180));
+                        DrawTextW(hMemDC, countStr.c_str(), -1, &rcSec, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                        textRight = rcSec.left - 8;
+                    }
+
+                    SelectObject(hMemDC, (it.indentLevel == 0) ? pState->hFontBold : pState->hFontMain);
+                    SetTextColor(hMemDC, RGB(240, 245, 255));
+                    RECT rcGText = { leftTextOffset, rcItem.top, textRight, rcItem.bottom };
+                    DrawTextW(hMemDC, it.text.c_str(), -1, &rcGText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                    curY += pState->itemHeight;
+                    continue;
+                }
+
+                // 3. Non-interactive section category title header (id <= 0)
+                if (it.isHeader && it.id <= 0)
+                {
+                    SelectObject(hMemDC, pState->hFontSmall);
+                    SetTextColor(hMemDC, RGB(140, 148, 162));
+                    RECT rcHdr = { rcItem.left + 12, rcItem.top + 2, rcItem.right - 10, rcItem.bottom };
+                    DrawTextW(hMemDC, it.text.c_str(), -1, &rcHdr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                    curY += pState->itemHeight;
+                    continue;
+                }
+
                 bool isHover = ((int)i == pState->hoverIndex && it.isEnabled);
+                int leftIndent = (it.indentLevel >= 2) ? 36 : ((it.indentLevel == 1) ? 20 : ((!it.group.empty()) ? 16 : 0));
+                RECT rcItemDraw = { rcItem.left + leftIndent, rcItem.top, rcItem.right, rcItem.bottom };
 
                 if (isHover)
                 {
@@ -178,19 +397,19 @@ namespace
                     HPEN hPenHover = CreatePen(PS_SOLID, 1, hoverBg);
                     HBRUSH hOldB = (HBRUSH)SelectObject(hMemDC, hbrHover);
                     HPEN hOldP = (HPEN)SelectObject(hMemDC, hPenHover);
-                    RoundRect(hMemDC, rcItem.left, rcItem.top, rcItem.right, rcItem.bottom, 6, 6);
+                    RoundRect(hMemDC, rcItemDraw.left, rcItemDraw.top, rcItemDraw.right, rcItemDraw.bottom, 6, 6);
                     SelectObject(hMemDC, hOldB);
                     SelectObject(hMemDC, hOldP);
                     DeleteObject(hbrHover);
                     DeleteObject(hPenHover);
                 }
 
-                int leftTextOffset = rcItem.left + 10;
+                int leftTextOffset = rcItemDraw.left + 10;
 
                 if (pState->isMultiSelect)
                 {
                     // Checkbox
-                    RECT rcBox = { rcItem.left + 8, rcItem.top + (pState->itemHeight - 16) / 2, rcItem.left + 24, rcItem.top + (pState->itemHeight - 16) / 2 + 16 };
+                    RECT rcBox = { rcItemDraw.left + 8, rcItem.top + (pState->itemHeight - 16) / 2, rcItemDraw.left + 24, rcItem.top + (pState->itemHeight - 16) / 2 + 16 };
                     bool isBoxFilled = (it.isChecked || it.isIndeterminate);
 
                     HBRUSH hBoxBr = CreateSolidBrush(isBoxFilled ? accentCol : RGB(32, 32, 34));
@@ -220,8 +439,8 @@ namespace
 
                     leftTextOffset = rcBox.right + 10;
 
-                    // Optional Header star/icon
-                    if (it.isHeader)
+                    // Optional Header star/icon for selectable headers (id > 0)
+                    if (it.isHeader && it.id > 0)
                     {
                         SelectObject(hMemDC, pState->hFontIcon);
                         SetTextColor(hMemDC, goldCol);
@@ -237,7 +456,7 @@ namespace
                     {
                         SelectObject(hMemDC, pState->hFontIcon);
                         SetTextColor(hMemDC, it.isChecked ? accentCol : (it.isEnabled ? textSec : textDis));
-                        RECT rcIcon = { rcItem.left + 8, rcItem.top, rcItem.left + 26, rcItem.bottom };
+                        RECT rcIcon = { rcItemDraw.left + 8, rcItem.top, rcItemDraw.left + 26, rcItem.bottom };
                         DrawTextW(hMemDC, it.icon.c_str(), -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
                         leftTextOffset = rcIcon.right + 8;
                     }
@@ -339,8 +558,17 @@ namespace
                 int virtualY = y - 6 + pState->scrollOffset;
                 if (virtualY >= 0)
                 {
-                    hitIdx = virtualY / pState->itemHeight;
-                    if (hitIdx >= (int)pState->items.size()) hitIdx = -1;
+                    int candidateVis = virtualY / pState->itemHeight;
+                    auto visibleIndices = GetVisibleIndices(*pState);
+                    if (candidateVis >= 0 && candidateVis < (int)visibleIndices.size())
+                    {
+                        int realIdx = visibleIndices[candidateVis];
+                        const auto& item = pState->items[realIdx];
+                        if (!item.isSeparator && !(item.isHeader && item.id <= 0 && !item.isGroupHeader) && item.isEnabled)
+                        {
+                            hitIdx = realIdx;
+                        }
+                    }
                 }
             }
 
@@ -412,48 +640,96 @@ namespace
             int virtualY = y - 6 + pState->scrollOffset;
             if (virtualY >= 0)
             {
-                int hitIdx = virtualY / pState->itemHeight;
-                if (hitIdx >= 0 && hitIdx < (int)pState->items.size())
+                int candidateVis = virtualY / pState->itemHeight;
+                auto visibleIndices = GetVisibleIndices(*pState);
+                if (candidateVis >= 0 && candidateVis < (int)visibleIndices.size())
                 {
+                    int hitIdx = visibleIndices[candidateVis];
                     auto& it = pState->items[hitIdx];
+                    if (it.isSeparator || (it.isHeader && it.id <= 0 && !it.isGroupHeader))
+                    {
+                        return 0;
+                    }
+
+                    if (it.isGroupHeader)
+                    {
+                        // Check if multi-select and clicked checkbox
+                        bool clickedBox = false;
+                        if (pState->isMultiSelect && it.id > 0)
+                        {
+                            int leftIndent = (it.indentLevel == 1) ? 14 : ((it.indentLevel >= 2) ? 28 : 0);
+                            int boxL = 6 + leftIndent + 8 + 20;
+                            int boxR = boxL + 16;
+                            if (x >= boxL - 3 && x <= boxR + 4)
+                            {
+                                clickedBox = true;
+                            }
+                        }
+
+                        if (clickedBox)
+                        {
+                            bool nextAll = !it.isChecked;
+                            it.isChecked = nextAll;
+                            it.isIndeterminate = false;
+                            for (auto& item : pState->items)
+                            {
+                                if (!item.isGroupHeader && !item.isHeader && !item.isSeparator && item.isEnabled)
+                                {
+                                    if (item.group == it.group || item.parentGroup == it.group)
+                                    {
+                                        item.isChecked = nextAll;
+                                        item.isIndeterminate = false;
+                                    }
+                                }
+                            }
+
+                            SyncHeaderCheckStates(pState);
+
+                            if (pState->onItemToggled) pState->onItemToggled(pState->items);
+                            InvalidateRect(hWnd, NULL, FALSE);
+                            if (pState->hParent && IsWindow(pState->hParent)) InvalidateRect(pState->hParent, NULL, TRUE);
+                            return 0;
+                        }
+                        else
+                        {
+                            // Toggle Expand / Collapse
+                            if (pState->collapsedGroups.count(it.group) > 0)
+                            {
+                                pState->collapsedGroups.erase(it.group);
+                            }
+                            else
+                            {
+                                pState->collapsedGroups.insert(it.group);
+                            }
+                            RecalculateLayout(pState);
+                            InvalidateRect(hWnd, NULL, FALSE);
+                            return 0;
+                        }
+                    }
+
                     if (it.isEnabled)
                     {
                         if (pState->isMultiSelect)
                         {
-                            if (it.isHeader)
+                            if (it.isHeader && it.id > 0)
                             {
-                                // Header toggles all
+                                // Header toggles all actionable items
                                 bool nextAll = !it.isChecked;
                                 for (auto& item : pState->items)
                                 {
-                                    item.isChecked = nextAll;
-                                    item.isIndeterminate = false;
+                                    if (!item.isSeparator && !(item.isHeader && item.id <= 0) && item.isEnabled)
+                                    {
+                                        item.isChecked = nextAll;
+                                        item.isIndeterminate = false;
+                                    }
                                 }
                             }
                             else
                             {
                                 it.isChecked = !it.isChecked;
-
-                                // Update header indeterminate / checked state
-                                size_t totalRegular = 0;
-                                size_t checkedRegular = 0;
-                                for (size_t k = 0; k < pState->items.size(); ++k)
-                                {
-                                    if (!pState->items[k].isHeader)
-                                    {
-                                        totalRegular++;
-                                        if (pState->items[k].isChecked) checkedRegular++;
-                                    }
-                                }
-                                for (auto& item : pState->items)
-                                {
-                                    if (item.isHeader)
-                                    {
-                                        item.isChecked = (totalRegular > 0 && checkedRegular == totalRegular);
-                                        item.isIndeterminate = (checkedRegular > 0 && checkedRegular < totalRegular);
-                                    }
-                                }
                             }
+
+                            SyncHeaderCheckStates(pState);
 
                             if (pState->onItemToggled)
                             {
@@ -670,11 +946,20 @@ int CustomDropDownMenu::ShowSingleSelect(
     MapWindowPoints(hParent, NULL, (LPPOINT)&rcScreen, 2);
     state.rcAnchorScreen = rcScreen;
 
+    for (const auto& it : state.items)
+    {
+        if (it.isGroupHeader && it.isCollapsed)
+        {
+            state.collapsedGroups.insert(it.group);
+        }
+    }
+
     int anchorW = rcScreen.right - rcScreen.left;
     int calculatedW = 48 + maxTextW + (maxSecW > 0 ? (maxSecW + 24) : 0) + 24;
     int popupW = (std::max)({ anchorW, minWidth, calculatedW });
 
-    int totalItems = (int)state.items.size();
+    auto visibleIndices = GetVisibleIndices(state);
+    int totalItems = (int)visibleIndices.size();
     int visibleItems = (std::min)(totalItems, state.maxVisibleItems);
     state.contentHeight = 12 + totalItems * state.itemHeight;
     state.viewportHeight = 12 + visibleItems * state.itemHeight;
@@ -803,11 +1088,20 @@ bool CustomDropDownMenu::ShowMultiSelect(
     MapWindowPoints(hParent, NULL, (LPPOINT)&rcScreen, 2);
     state.rcAnchorScreen = rcScreen;
 
+    for (const auto& it : state.items)
+    {
+        if (it.isGroupHeader && it.isCollapsed)
+        {
+            state.collapsedGroups.insert(it.group);
+        }
+    }
+
     int anchorW = rcScreen.right - rcScreen.left;
     int calculatedW = 56 + maxTextW + (maxSecW > 0 ? (maxSecW + 24) : 0) + 24;
     int popupW = (std::max)({ anchorW, minWidth, calculatedW });
 
-    int totalItems = (int)state.items.size();
+    auto visibleIndices = GetVisibleIndices(state);
+    int totalItems = (int)visibleIndices.size();
     int visibleItems = (std::min)(totalItems, state.maxVisibleItems);
     state.contentHeight = 12 + totalItems * state.itemHeight;
     state.viewportHeight = 12 + visibleItems * state.itemHeight;

@@ -85,12 +85,13 @@ static CommandItem g_Items[] = {
     { CMD_ACTION_DELETE_CONSISTS,    L"\xE74D", L"Delete Consist(s)",   FALSE, FALSE, FALSE, 120, {0} },
     { CMD_ACTION_STOCK_INFO,         L"\xE946", L"Stock Info",         FALSE, FALSE, TRUE,  95,  {0} },
     { CMD_ACTION_SHAPE_VIEWER,       L"\xE7B7", L"3D Visual Studio",   FALSE, FALSE, TRUE,  135, {0} },
+    { CMD_ACTION_TRAIN_CONFIGS,      L"\xE7C0", L"Train Configs",      FALSE, FALSE, TRUE,  115, {0} },
     { CMD_ACTION_POOL_MANAGER,       L"\xE71D", L"Pool Manager",       FALSE, FALSE, TRUE,  105, {0} },
     { CMD_ACTION_POOL_MUTATOR,       L"\xE790", L"Pool Mutator",       FALSE, FALSE, TRUE,  105, {0} },
     { CMD_ACTION_BATCH_WIZARD,       L"\xE9D9", L"Batch Consists",     FALSE, FALSE, TRUE,  105, {0} },
     { CMD_ACTION_REFRESH_CONSISTS,   L"\xE72C", L"Refresh Consists",   FALSE, FALSE, TRUE,  120, {0} },
     { CMD_ACTION_REFRESH_STOCKS,     L"\xE777", L"Refresh Stock Library", FALSE, FALSE, TRUE, 145, {0} },
-    { CMD_ACTION_ABOUT,              L"\xE946", L"v9.0.0",             FALSE, FALSE, TRUE,  78,  {0} }
+    { CMD_ACTION_ABOUT,              L"\xE946", L"v9.3.0",             FALSE, FALSE, TRUE,  78,  {0} }
 };
 
 static const int g_NumItems = sizeof(g_Items) / sizeof(g_Items[0]);

@@ -118,10 +118,19 @@ void FluentDragGhost::RenderGhost()
         GetTextExtentPoint32W(hMemDC, s_items[0].name.c_str(), (int)s_items[0].name.length(), &szTitle);
         SelectObject(hMemDC, s_hFontBadge);
         GetTextExtentPoint32W(hMemDC, s_items[0].subtitle.c_str(), (int)s_items[0].subtitle.length(), &szSub);
+
+        int badgeW = 0;
+        if (s_isValidTarget)
+        {
+            std::wstring badgeText = s_actionText.empty() ? L"Reorder Pool" : s_actionText;
+            SIZE szBadge = { 0 };
+            GetTextExtentPoint32W(hMemDC, badgeText.c_str(), (int)badgeText.length(), &szBadge);
+            badgeW = szBadge.cx + 28;
+        }
         SelectObject(hMemDC, hOldFont);
 
-        int totalW = (std::max)(szTitle.cx + szSub.cx + 70, (LONG)220);
-        if (totalW > 380) totalW = 380;
+        int totalW = (std::max)({ (LONG)(szTitle.cx + szSub.cx + 70), (LONG)220, (LONG)badgeW });
+        if (totalW > 450) totalW = 450;
 
         BITMAPINFO bmi = { 0 };
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -174,7 +183,7 @@ void FluentDragGhost::RenderGhost()
         if (s_isValidTarget)
         {
             std::wstring badgeText = s_actionText.empty() ? L"Reorder Pool" : s_actionText;
-            RECT rcBadge = { 20, cardH + 2, totalW - 4, cardH + 24 };
+            RECT rcBadge = { 0, cardH + 2, totalW - 10, cardH + 24 };
 
             HBRUSH hbrBadge = CreateSolidBrush(RGB(255, 255, 255));
             HPEN hPenBadge = CreatePen(PS_SOLID, 1, RGB(0, 120, 215));
@@ -240,11 +249,22 @@ void FluentDragGhost::RenderGhost()
         GetTextExtentPoint32W(hMemDC, s_items[i].name.c_str(), (int)s_items[i].name.length(), &sz);
         if (sz.cx > maxTextW) maxTextW = sz.cx;
     }
+
+    int badgeW = 0;
+    if (s_isValidTarget)
+    {
+        std::wstring badgeText = s_actionText.empty() ?
+            (L"+ Insert " + std::to_wstring(s_items.size()) + L" Unit" + (s_items.size() > 1 ? L"s" : L"") + L" to Consist") : s_actionText;
+        SelectObject(hMemDC, s_hFontBadge);
+        SIZE szBadge = { 0 };
+        GetTextExtentPoint32W(hMemDC, badgeText.c_str(), (int)badgeText.length(), &szBadge);
+        badgeW = szBadge.cx + 28;
+    }
     SelectObject(hMemDC, hOldFont);
 
-    int totalW = maxTextW + 48; // padding + icon
+    int totalW = (std::max)(maxTextW + 48, badgeW);
     if (totalW < 160) totalW = 160;
-    if (totalW > 350) totalW = 350;
+    if (totalW > 450) totalW = 450;
 
     // Create 32-bit ARGB DIBSection for smooth alpha blending
     BITMAPINFO bmi = { 0 };
@@ -325,7 +345,7 @@ void FluentDragGhost::RenderGhost()
         std::wstring badgeText = s_actionText.empty() ?
             (L"+ Insert " + std::to_wstring(s_items.size()) + L" Unit" + (s_items.size() > 1 ? L"s" : L"") + L" to Consist") : s_actionText;
 
-        RECT rcBadge = { 20, curY + 2, totalW - 4, curY + 24 };
+        RECT rcBadge = { 0, curY + 2, totalW - 10, curY + 24 };
 
         HBRUSH hbrBadge = CreateSolidBrush(RGB(255, 255, 255));
         HPEN hPenBadge = CreatePen(PS_SOLID, 1, RGB(0, 120, 215));

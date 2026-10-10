@@ -38,6 +38,7 @@ CustomListControl::CustomListControl()
       m_sortColIndex(-1), m_sortAscending(true),
       m_hoverHeaderColIndex(-1), m_pressedHeaderColIndex(-1),
       m_hoverHeaderInDropdown(false), m_pressedHeaderInDropdown(false),
+      m_bShowSelectionGutter(false), m_bHoverGutterHeader(false), m_bPressedGutterHeader(false),
       m_hasFocus(false),
     m_typeAheadBuffer(L""),
     m_lastTypeAheadTime(0),
@@ -61,7 +62,13 @@ CustomListControl::CustomListControl()
     m_faytMatchIndex(-1),
     m_faytHoverBtn(0),
     m_hFontFaytIcon(NULL),
-    m_hFontFaytText(NULL)
+    m_hFontFaytText(NULL),
+    m_inlineCopyCol(-1),
+    m_copiedRow(-1),
+    m_copiedCol(-1),
+    m_copiedTick(0),
+    m_bHoverCopyBtn(false),
+    m_hFontCopyIcon(NULL)
 {
     m_ptDragStart = { 0, 0 };
     m_ptMarqueeStart = { 0, 0 };
@@ -81,6 +88,7 @@ CustomListControl::~CustomListControl()
 {
     if (m_hFontFaytIcon) { DeleteObject(m_hFontFaytIcon); m_hFontFaytIcon = NULL; }
     if (m_hFontFaytText) { DeleteObject(m_hFontFaytText); m_hFontFaytText = NULL; }
+    if (m_hFontCopyIcon) { DeleteObject(m_hFontCopyIcon); m_hFontCopyIcon = NULL; }
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +98,7 @@ bool CustomListControl::Register(HINSTANCE hInstance)
 {
     WNDCLASSEXW wcx = { 0 };
     wcx.cbSize        = sizeof(wcx);
-    wcx.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+    wcx.style         = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS | CS_GLOBALCLASS;
     wcx.lpfnWndProc   = CustomListControl::WndProc;
     wcx.cbWndExtra    = sizeof(CustomListControl*);
     wcx.hInstance     = hInstance;
@@ -103,11 +111,16 @@ bool CustomListControl::Register(HINSTANCE hInstance)
 
 HWND CustomListControl::Create(HWND hParent, int x, int y, int width, int height, UINT_PTR id)
 {
+    HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(hParent, GWLP_HINSTANCE);
+    if (!hInst) hInst = GetModuleHandleW(L"TSCBCore64.dll");
+    if (!hInst) hInst = GetModuleHandleW(L"TSCBCore32.dll");
+    if (!hInst) hInst = GetModuleHandleW(NULL);
+
     m_hWnd = CreateWindowExW(
         0, L"CustomListControl", L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPCHILDREN,
         x, y, width, height,
-        hParent, (HMENU)id, GetModuleHandle(NULL), this
+        hParent, (HMENU)id, hInst, this
     );
     return m_hWnd;
 }
@@ -214,6 +227,7 @@ void CustomListControl::Clear()
     m_items.clear();
     m_selectedIndex = -1;
     m_selectedIndices.clear();
+    m_checkedIndices.clear();
     m_anchorRow = -1;
     m_scrollY = 0;
     m_scrollX = 0;
@@ -253,14 +267,12 @@ void CustomListControl::SetSelectedIndex(int index)
     if (index < -1 || index >= itemCount) return;
 
     m_selectedIndex = index;
-    if (m_isMultiSelect)
-    {
-        m_selectedIndices.clear();
-        if (index >= 0) m_selectedIndices.insert(index);
-    }
-
+    m_selectedIndices.clear();
+    m_selectedOrder.clear();
     if (index >= 0)
     {
+        m_selectedIndices.insert(index);
+        m_selectedOrder.push_back(index);
         EnsureVisible(index);
     }
     Invalidate();
@@ -272,7 +284,12 @@ void CustomListControl::SetMultiSelect(bool bEnable)
     if (!bEnable)
     {
         m_selectedIndices.clear();
-        if (m_selectedIndex >= 0) m_selectedIndices.insert(m_selectedIndex);
+        m_selectedOrder.clear();
+        if (m_selectedIndex >= 0)
+        {
+            m_selectedIndices.insert(m_selectedIndex);
+            m_selectedOrder.push_back(m_selectedIndex);
+        }
     }
     Invalidate();
 }
@@ -284,25 +301,27 @@ std::vector<int> CustomListControl::GetSelectedIndices() const
         if (m_selectedIndex >= 0) return { m_selectedIndex };
         return {};
     }
-    std::vector<int> result(m_selectedIndices.begin(), m_selectedIndices.end());
-    std::sort(result.begin(), result.end());
-    return result;
+    return m_selectedOrder;
 }
 
 void CustomListControl::SetSelectedIndices(const std::vector<int>& indices)
 {
     m_selectedIndices.clear();
+    m_selectedOrder.clear();
     int count = GetItemCount();
     for (int idx : indices)
     {
         if (idx >= 0 && idx < count)
         {
-            m_selectedIndices.insert(idx);
+            if (m_selectedIndices.insert(idx).second)
+            {
+                m_selectedOrder.push_back(idx);
+            }
         }
     }
-    if (!indices.empty())
+    if (!m_selectedOrder.empty())
     {
-        m_selectedIndex = indices.back();
+        m_selectedIndex = m_selectedOrder.back();
         m_anchorRow = m_selectedIndex;
     }
     else
@@ -316,10 +335,12 @@ void CustomListControl::SetSelectedIndices(const std::vector<int>& indices)
 void CustomListControl::SelectAll()
 {
     m_selectedIndices.clear();
+    m_selectedOrder.clear();
     int count = GetItemCount();
     for (int i = 0; i < count; ++i)
     {
         m_selectedIndices.insert(i);
+        m_selectedOrder.push_back(i);
     }
     if (count > 0)
     {
@@ -332,6 +353,7 @@ void CustomListControl::SelectAll()
 void CustomListControl::ClearSelection()
 {
     m_selectedIndices.clear();
+    m_selectedOrder.clear();
     m_selectedIndex = -1;
     m_anchorRow = -1;
     Invalidate();
@@ -352,18 +374,92 @@ void CustomListControl::ToggleRowSelection(int row)
     if (m_selectedIndices.find(row) != m_selectedIndices.end())
     {
         m_selectedIndices.erase(row);
+        auto it = std::find(m_selectedOrder.begin(), m_selectedOrder.end(), row);
+        if (it != m_selectedOrder.end()) m_selectedOrder.erase(it);
+
         if (m_selectedIndex == row)
         {
-            m_selectedIndex = m_selectedIndices.empty() ? -1 : *m_selectedIndices.begin();
+            m_selectedIndex = m_selectedOrder.empty() ? -1 : m_selectedOrder.back();
         }
     }
     else
     {
         m_selectedIndices.insert(row);
+        m_selectedOrder.push_back(row);
         m_selectedIndex = row;
         m_anchorRow = row;
     }
     Invalidate();
+}
+
+// ---------------------------------------------------------------------------
+// Selection Gutter APIs
+// ---------------------------------------------------------------------------
+void CustomListControl::SetShowSelectionGutter(bool bShow)
+{
+    m_bShowSelectionGutter = bShow;
+    UpdateScrollbars();
+    Invalidate();
+}
+
+void CustomListControl::SetItemChecked(int itemIndex, bool bChecked)
+{
+    if (bChecked)
+    {
+        m_checkedIndices.insert(itemIndex);
+    }
+    else
+    {
+        m_checkedIndices.erase(itemIndex);
+    }
+    Invalidate();
+}
+
+bool CustomListControl::IsItemChecked(int itemIndex) const
+{
+    return m_checkedIndices.count(itemIndex) > 0;
+}
+
+void CustomListControl::SetAllItemsChecked(bool bChecked)
+{
+    m_checkedIndices.clear();
+    if (bChecked)
+    {
+        int count = GetItemCount();
+        for (int i = 0; i < count; ++i)
+        {
+            m_checkedIndices.insert(i);
+        }
+    }
+    Invalidate();
+}
+
+void CustomListControl::ClearCheckedItems()
+{
+    m_checkedIndices.clear();
+    Invalidate();
+}
+
+std::vector<int> CustomListControl::GetCheckedIndices() const
+{
+    std::vector<int> result(m_checkedIndices.begin(), m_checkedIndices.end());
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+void CustomListControl::SetCheckedIndices(const std::vector<int>& indices)
+{
+    m_checkedIndices.clear();
+    for (int idx : indices)
+    {
+        m_checkedIndices.insert(idx);
+    }
+    Invalidate();
+}
+
+int CustomListControl::GetCheckedCount() const
+{
+    return (int)m_checkedIndices.size();
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +614,9 @@ void CustomListControl::UpdateScrollbars()
     m_scrollY = m_vScroll.GetPos();
 
     // --- Horizontal scrollbar ---
-    m_hScroll.SetRange(0, totalColsWidth, listW);
+    int availW = listW - GetGutterWidth();
+    if (availW < 1) availW = 1;
+    m_hScroll.SetRange(0, totalColsWidth, availW);
     m_hScroll.SetPos(m_scrollX);
     m_scrollX = m_hScroll.GetPos();
 }
@@ -640,11 +738,18 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         HPEN hPen    = CreatePen(PS_SOLID, 1, dividerCol);
         HPEN hOldPen = (HPEN)SelectObject(hMemDC, hPen);
 
-        int xAccumDiv = -m_scrollX;
+        if (m_bShowSelectionGutter)
+        {
+            int xGutter = GetGutterWidth();
+            MoveToEx(hMemDC, xGutter, 0, NULL);
+            LineTo(hMemDC, xGutter, rcList.bottom);
+        }
+
+        int xAccumDiv = GetGutterWidth() - m_scrollX;
         for (size_t c = 0; c < m_columns.size() - 1; ++c)
         {
             xAccumDiv += m_columns[c].width;
-            if (xAccumDiv > 0 && xAccumDiv < listW)
+            if (xAccumDiv > GetGutterWidth() && xAccumDiv < listW)
             {
                 MoveToEx(hMemDC, xAccumDiv, m_headerHeight, NULL);
                 LineTo(hMemDC, xAccumDiv, rcList.bottom);
@@ -658,15 +763,21 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         int savedDCRows = SaveDC(hMemDC);
         IntersectClipRect(hMemDC, 0, m_headerHeight, listW, rcList.bottom);
 
+        int totalColsWidth = 0;
+        for (const auto& col : m_columns) totalColsWidth += col.width;
+        int rightOfColumns = GetGutterWidth() - m_scrollX + totalColsWidth;
+        int rowPillRight = (std::min)(listW - 4, rightOfColumns);
+        if (rowPillRight < 4) rowPillRight = 4;
+
         for (int r = startRow; r < endRow; ++r)
         {
             int yTop = m_headerHeight + (r - m_scrollY) * m_rowHeight;
-            RECT rcRow = { 4, yTop + 1, listW - 4, yTop + m_rowHeight - 1 };
+            RECT rcRow = { 4, yTop + 1, rowPillRight, yTop + m_rowHeight - 1 };
 
             bool isRowSel = IsRowSelected(r);
             bool isRowHover = (r == m_hoveredRow && !isRowSel);
 
-            // Draw Row Pill Highlight & Selection (Matches CustomTreeView Fluent style)
+            // Draw Row Pill Highlight & Selection (Simple, clean Fluent selection surface)
             if (isRowSel || isRowHover)
             {
                 COLORREF pillCol = isRowSel ? RGB(35, 65, 105) : RGB(38, 38, 44);
@@ -677,19 +788,60 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
 
                 RoundRect(hMemDC, rcRow.left, rcRow.top, rcRow.right, rcRow.bottom, 6, 6);
 
-                // If selected, draw vibrant vertical indicator bar on left
-                if (isRowSel)
-                {
-                    HBRUSH hAccentBr = CreateSolidBrush(RGB(0, 150, 255));
-                    RECT rcBar = { rcRow.left, rcRow.top + 3, rcRow.left + 3, rcRow.bottom - 3 };
-                    FillRect(hMemDC, &rcBar, hAccentBr);
-                    DeleteObject(hAccentBr);
-                }
-
                 SelectObject(hMemDC, hOldBr);
                 SelectObject(hMemDC, hOldP);
                 DeleteObject(hPillBr);
                 DeleteObject(hPillPen);
+            }
+
+            // Draw Checkbox in Selection Gutter
+            if (m_bShowSelectionGutter)
+            {
+                const int chkSize = 14;
+                int chkX = (GetGutterWidth() - chkSize) / 2;
+                int chkY = yTop + (m_rowHeight - chkSize) / 2;
+                RECT rcChk = { chkX, chkY, chkX + chkSize, chkY + chkSize };
+
+                bool bChecked = IsItemChecked(r);
+                if (bChecked)
+                {
+                    COLORREF chkBg = RGB(0, 120, 215); // Fluent Accent Blue
+                    HBRUSH hbrChk = CreateSolidBrush(chkBg);
+                    HPEN hpenChk = CreatePen(PS_SOLID, 1, chkBg);
+                    HGDIOBJ oldB = SelectObject(hMemDC, hbrChk);
+                    HGDIOBJ oldP = SelectObject(hMemDC, hpenChk);
+                    RoundRect(hMemDC, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
+                    SelectObject(hMemDC, oldB);
+                    SelectObject(hMemDC, oldP);
+                    DeleteObject(hbrChk);
+                    DeleteObject(hpenChk);
+
+                    HPEN hpenTick = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+                    HGDIOBJ oldTickP = SelectObject(hMemDC, hpenTick);
+                    POINT pts[3] = {
+                        { rcChk.left + 3, rcChk.top + 7 },
+                        { rcChk.left + 6, rcChk.top + 10 },
+                        { rcChk.left + 11, rcChk.top + 4 }
+                    };
+                    Polyline(hMemDC, pts, 3);
+                    SelectObject(hMemDC, oldTickP);
+                    DeleteObject(hpenTick);
+                }
+                else
+                {
+                    bool isHover = (r == m_hoveredRow);
+                    COLORREF boxBorder = isHover ? RGB(160, 160, 160) : RGB(90, 90, 90);
+                    COLORREF boxBg = RGB(36, 36, 36);
+                    HBRUSH hbrBox = CreateSolidBrush(boxBg);
+                    HPEN hpenBox = CreatePen(PS_SOLID, 1, boxBorder);
+                    HGDIOBJ oldB = SelectObject(hMemDC, hbrBox);
+                    HGDIOBJ oldP = SelectObject(hMemDC, hpenBox);
+                    RoundRect(hMemDC, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
+                    SelectObject(hMemDC, oldB);
+                    SelectObject(hMemDC, oldP);
+                    DeleteObject(hbrBox);
+                    DeleteObject(hpenBox);
+                }
             }
 
             COLORREF rowTextCol = isRowSel ? RGB(255, 255, 255) : textCol;
@@ -714,13 +866,13 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             }
             SetTextColor(hMemDC, rowTextCol);
 
-            int xAccum = -m_scrollX;
+            int xAccum = GetGutterWidth() - m_scrollX;
             for (size_t c = 0; c < m_columns.size(); ++c)
             {
                 int colWidth = m_columns[c].width;
                 RECT rcCell  = { xAccum, yTop, xAccum + colWidth, yTop + m_rowHeight };
 
-                if (rcCell.right > 0 && rcCell.left < listW)
+                if (rcCell.right > GetGutterWidth() && rcCell.left < listW)
                 {
                     std::wstring cellText = GetCellText(r, (int)c);
                     if (m_columns[c].title == L"Orientation")
@@ -732,6 +884,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                         rcBtn.bottom -= 3;
 
                         if (rcBtn.right > listW - 4) rcBtn.right = listW - 4;
+                        if (rcBtn.left < GetGutterWidth() + 4) rcBtn.left = GetGutterWidth() + 4;
                         if (rcBtn.left < rcBtn.right)
                         {
                             bool isHovered = (r == m_hoveredRow && (int)c == m_hoveredCol);
@@ -787,6 +940,28 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                     rcText.left  += 8;
                     rcText.right -= 8;
                     if (rcText.right > listW - 8) rcText.right = listW - 8;
+                    if (rcText.left < GetGutterWidth() + 8) rcText.left = GetGutterWidth() + 8;
+
+                    bool bShowInlineCopy = (m_inlineCopyCol >= 0 && (int)c == m_inlineCopyCol &&
+                        (r == m_hoveredRow || (r == m_copiedRow && (int)c == m_copiedCol && (GetTickCount64() - m_copiedTick < 1200))));
+
+                    RECT rcCopyBtn = { 0 };
+                    if (bShowInlineCopy)
+                    {
+                        rcCopyBtn.right = rcCell.right - 4;
+                        if (rcCopyBtn.right > listW - 4) rcCopyBtn.right = listW - 4;
+                        rcCopyBtn.left = rcCopyBtn.right - 20;
+                        rcCopyBtn.top = rcCell.top + (m_rowHeight - 18) / 2;
+                        rcCopyBtn.bottom = rcCopyBtn.top + 18;
+                        if (rcCopyBtn.left < rcText.left) rcCopyBtn.left = rcText.left;
+
+                        if (rcCopyBtn.left < rcCopyBtn.right)
+                        {
+                            rcText.right = rcCopyBtn.left - 4;
+                        }
+                    }
+
+                    if (rcText.right < rcText.left) rcText.right = rcCell.right;
 
                     UINT fmt = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS;
                     if (m_columns[c].align == 1) fmt = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS;
@@ -818,6 +993,69 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                     else
                     {
                         DrawTextW(hMemDC, cellText.c_str(), -1, &rcText, fmt);
+                    }
+
+                    if (bShowInlineCopy && rcCopyBtn.left < rcCopyBtn.right)
+                    {
+                        if (!m_hFontCopyIcon)
+                        {
+                            LOGFONTW lf = { 0 };
+                            lf.lfHeight = -MulDiv(9 * 10, GetDpiForSystem(), 720);
+                            lf.lfWeight = FW_NORMAL;
+                            lf.lfCharSet = DEFAULT_CHARSET;
+                            lf.lfQuality = CLEARTYPE_QUALITY;
+                            wcscpy_s(lf.lfFaceName, L"Segoe Fluent Icons");
+                            m_hFontCopyIcon = CreateFontIndirectW(&lf);
+                            if (!m_hFontCopyIcon)
+                            {
+                                wcscpy_s(lf.lfFaceName, L"Segoe MDL2 Assets");
+                                m_hFontCopyIcon = CreateFontIndirectW(&lf);
+                            }
+                        }
+
+                        bool isRecentlyCopied = (r == m_copiedRow && (int)c == m_copiedCol && (GetTickCount64() - m_copiedTick < 1200));
+
+                        if (isRecentlyCopied)
+                        {
+                            COLORREF copyBg = RGB(30, 140, 60); // Green success
+                            COLORREF copyBorder = RGB(50, 180, 80);
+                            HBRUSH hbrCopy = CreateSolidBrush(copyBg);
+                            HPEN hpenCopy = CreatePen(PS_SOLID, 1, copyBorder);
+                            HGDIOBJ oldBC = SelectObject(hMemDC, hbrCopy);
+                            HGDIOBJ oldPC = SelectObject(hMemDC, hpenCopy);
+                            RoundRect(hMemDC, rcCopyBtn.left, rcCopyBtn.top, rcCopyBtn.right, rcCopyBtn.bottom, 4, 4);
+                            SelectObject(hMemDC, oldBC);
+                            SelectObject(hMemDC, oldPC);
+                            DeleteObject(hbrCopy);
+                            DeleteObject(hpenCopy);
+
+                            HFONT hOldFI = m_hFontCopyIcon ? (HFONT)SelectObject(hMemDC, m_hFontCopyIcon) : NULL;
+                            COLORREF oldTC = SetTextColor(hMemDC, RGB(255, 255, 255));
+                            DrawTextW(hMemDC, L"\xE73E", -1, &rcCopyBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                            SetTextColor(hMemDC, oldTC);
+                            if (hOldFI) SelectObject(hMemDC, hOldFI);
+                        }
+                        else
+                        {
+                            bool isHoverBtn = (m_bHoverCopyBtn && r == m_hoveredRow);
+                            COLORREF copyBg = isHoverBtn ? RGB(55, 55, 62) : RGB(40, 40, 45);
+                            COLORREF copyBorder = isHoverBtn ? RGB(110, 110, 125) : RGB(65, 65, 70);
+                            HBRUSH hbrCopy = CreateSolidBrush(copyBg);
+                            HPEN hpenCopy = CreatePen(PS_SOLID, 1, copyBorder);
+                            HGDIOBJ oldBC = SelectObject(hMemDC, hbrCopy);
+                            HGDIOBJ oldPC = SelectObject(hMemDC, hpenCopy);
+                            RoundRect(hMemDC, rcCopyBtn.left, rcCopyBtn.top, rcCopyBtn.right, rcCopyBtn.bottom, 4, 4);
+                            SelectObject(hMemDC, oldBC);
+                            SelectObject(hMemDC, oldPC);
+                            DeleteObject(hbrCopy);
+                            DeleteObject(hpenCopy);
+
+                            HFONT hOldFI = m_hFontCopyIcon ? (HFONT)SelectObject(hMemDC, m_hFontCopyIcon) : NULL;
+                            COLORREF oldTC = SetTextColor(hMemDC, isHoverBtn ? RGB(255, 255, 255) : RGB(190, 190, 190));
+                            DrawTextW(hMemDC, L"\xE8C8", -1, &rcCopyBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                            SetTextColor(hMemDC, oldTC);
+                            if (hOldFI) SelectObject(hMemDC, hOldFI);
+                        }
                     }
                 }
 
@@ -853,19 +1091,104 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         HBRUSH hbrHeader = CreateSolidBrush(headerBgCol);
         FillRect(hMemDC, &rcHeader, hbrHeader);
         DeleteObject(hbrHeader);
+
+        // Master Tri-State Vector Checkbox in Header Gutter
+        if (m_bShowSelectionGutter)
+        {
+            RECT rcGutterHdr = { 0, 0, GetGutterWidth(), m_headerHeight };
+            if (m_bPressedGutterHeader)
+            {
+                HBRUSH hbrHdr = CreateSolidBrush(RGB(55, 55, 55));
+                FillRect(hMemDC, &rcGutterHdr, hbrHdr);
+                DeleteObject(hbrHdr);
+            }
+            else if (m_bHoverGutterHeader)
+            {
+                HBRUSH hbrHdr = CreateSolidBrush(RGB(45, 45, 45));
+                FillRect(hMemDC, &rcGutterHdr, hbrHdr);
+                DeleteObject(hbrHdr);
+            }
+
+            int totalItems = GetItemCount();
+            int checkedCount = GetCheckedCount();
+
+            const int chkSize = 14;
+            int chkX = (GetGutterWidth() - chkSize) / 2;
+            int chkY = (m_headerHeight - chkSize) / 2;
+            RECT rcChk = { chkX, chkY, chkX + chkSize, chkY + chkSize };
+
+            if (checkedCount == totalItems && totalItems > 0)
+            {
+                // All Checked -> Blue background with white tick
+                COLORREF chkBg = RGB(0, 120, 215);
+                HBRUSH hbrChk = CreateSolidBrush(chkBg);
+                HPEN hpenChk = CreatePen(PS_SOLID, 1, chkBg);
+                HGDIOBJ oldB = SelectObject(hMemDC, hbrChk);
+                HGDIOBJ oldP = SelectObject(hMemDC, hpenChk);
+                RoundRect(hMemDC, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
+                SelectObject(hMemDC, oldB);
+                SelectObject(hMemDC, oldP);
+                DeleteObject(hbrChk);
+                DeleteObject(hpenChk);
+
+                HPEN hpenTick = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+                HGDIOBJ oldTickP = SelectObject(hMemDC, hpenTick);
+                POINT pts[3] = {
+                    { rcChk.left + 3, rcChk.top + 7 },
+                    { rcChk.left + 6, rcChk.top + 10 },
+                    { rcChk.left + 11, rcChk.top + 4 }
+                };
+                Polyline(hMemDC, pts, 3);
+                SelectObject(hMemDC, oldTickP);
+                DeleteObject(hpenTick);
+            }
+            else if (checkedCount > 0)
+            {
+                // Partially Checked -> Blue background with white minus dash
+                COLORREF chkBg = RGB(0, 120, 215);
+                HBRUSH hbrChk = CreateSolidBrush(chkBg);
+                HPEN hpenChk = CreatePen(PS_SOLID, 1, chkBg);
+                HGDIOBJ oldB = SelectObject(hMemDC, hbrChk);
+                HGDIOBJ oldP = SelectObject(hMemDC, hpenChk);
+                RoundRect(hMemDC, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
+                SelectObject(hMemDC, oldB);
+                SelectObject(hMemDC, oldP);
+                DeleteObject(hbrChk);
+                DeleteObject(hpenChk);
+
+                HPEN hpenDash = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
+                HGDIOBJ oldDashP = SelectObject(hMemDC, hpenDash);
+                int midY = (rcChk.top + rcChk.bottom) / 2;
+                MoveToEx(hMemDC, rcChk.left + 3, midY, NULL);
+                LineTo(hMemDC, rcChk.right - 3, midY);
+                SelectObject(hMemDC, oldDashP);
+                DeleteObject(hpenDash);
+            }
+            else
+            {
+                // Unchecked -> Subtle outline box
+                COLORREF boxBorder = m_bHoverGutterHeader ? RGB(160, 160, 160) : RGB(90, 90, 90);
+                COLORREF boxBg = RGB(36, 36, 36);
+                HBRUSH hbrBox = CreateSolidBrush(boxBg);
+                HPEN hpenBox = CreatePen(PS_SOLID, 1, boxBorder);
+                HGDIOBJ oldB = SelectObject(hMemDC, hbrBox);
+                HGDIOBJ oldP = SelectObject(hMemDC, hpenBox);
+                RoundRect(hMemDC, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
+                SelectObject(hMemDC, oldB);
+                SelectObject(hMemDC, oldP);
+                DeleteObject(hbrBox);
+                DeleteObject(hpenBox);
+            }
+        }
  
         SetTextColor(hMemDC, CustomUITheme::TextPrimary);
-        int xAccumH = -m_scrollX;
+        int xAccumH = GetGutterWidth() - m_scrollX;
         for (size_t c = 0; c < m_columns.size(); ++c)
         {
             int colWidth = m_columns[c].width;
-            if (c == m_columns.size() - 1)
-            {
-                colWidth = width - xAccumH;
-            }
             RECT rcCell  = { xAccumH, 0, xAccumH + colWidth, m_headerHeight };
  
-            if (rcCell.right > 0 && rcCell.left < width)
+            if (rcCell.right > GetGutterWidth() && rcCell.left < width)
             {
                 // Split the cell into Left (Sort) and Right (Dropdown) zones
                 RECT rcLeftHighlight = rcCell;
@@ -918,10 +1241,13 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 RECT rcText = rcCell;
                 rcText.left  += 8;
                 rcText.right -= 22;
-                if (rcText.right < rcText.left) rcText.right = rcText.left;
-                if (rcText.right > width - 22) rcText.right = width - 22;
-                DrawTextW(hMemDC, m_columns[c].title.c_str(), -1, &rcText,
-                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                if (rcText.right < rcText.left) rcText.right = rcCell.right - 4;
+                if (rcText.left < GetGutterWidth() + 8) rcText.left = GetGutterWidth() + 8;
+
+                UINT headerFmt = (m_columns[c].align == 1) ? (DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX) :
+                                 ((m_columns[c].align == 2) ? (DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX) :
+                                                              (DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX));
+                DrawTextW(hMemDC, m_columns[c].title.c_str(), -1, &rcText, headerFmt);
 
                 if ((int)c == m_hoverHeaderColIndex)
                 {
@@ -997,11 +1323,17 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         // Draw vertical column separators in header
         HPEN hPenHDiv = CreatePen(PS_SOLID, 1, dividerCol);
         HPEN hOldPenHDiv = (HPEN)SelectObject(hMemDC, hPenHDiv);
-        int xAccumHDiv = -m_scrollX;
+        if (m_bShowSelectionGutter)
+        {
+            int xGutter = GetGutterWidth();
+            MoveToEx(hMemDC, xGutter, 0, NULL);
+            LineTo(hMemDC, xGutter, m_headerHeight);
+        }
+        int xAccumHDiv = GetGutterWidth() - m_scrollX;
         for (size_t c = 0; c < m_columns.size() - 1; ++c)
         {
             xAccumHDiv += m_columns[c].width;
-            if (xAccumHDiv > 0 && xAccumHDiv < width)
+            if (xAccumHDiv > GetGutterWidth() && xAccumHDiv < width)
             {
                 MoveToEx(hMemDC, xAccumHDiv, 0, NULL);
                 LineTo(hMemDC, xAccumHDiv, m_headerHeight);
@@ -1398,6 +1730,14 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             CloseFayt();
             return 0;
         }
+        else if (wParam == TIMER_COPY_FEEDBACK_ID)
+        {
+            KillTimer(m_hWnd, TIMER_COPY_FEEDBACK_ID);
+            m_copiedRow = -1;
+            m_copiedCol = -1;
+            Invalidate();
+            return 0;
+        }
         break;
     }
 
@@ -1475,7 +1815,13 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         GetCursorPos(&pt);
         ScreenToClient(m_hWnd, &pt);
 
-        int xAccum = -m_scrollX;
+        if (m_bHoverCopyBtn)
+        {
+            SetCursor(LoadCursor(NULL, IDC_HAND));
+            return TRUE;
+        }
+
+        int xAccum = GetGutterWidth() - m_scrollX;
         bool nearBoundary = false;
         if (m_columns.size() > 1)
         {
@@ -1486,7 +1832,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             }
         }
 
-        if (m_isResizing || (nearBoundary && pt.y <= m_headerHeight))
+        if (m_isResizing || (nearBoundary && pt.y <= m_headerHeight && pt.x >= GetGutterWidth()))
         {
             SetCursor(LoadCursor(NULL, IDC_SIZEWE));
             return TRUE;
@@ -1551,16 +1897,35 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             }
         }
 
+        SetFocus();
+        {
+            NMHDR nmhdrFocus = { 0 };
+            nmhdrFocus.hwndFrom = m_hWnd;
+            nmhdrFocus.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+            nmhdrFocus.code     = NM_SETFOCUS;
+            SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdrFocus.idFrom, (LPARAM)&nmhdrFocus);
+        }
+
         if (y <= m_headerHeight)
         {
+            // Check gutter master checkbox click
+            if (m_bShowSelectionGutter && x < GetGutterWidth())
+            {
+                m_bPressedGutterHeader = true;
+                SetCapture(m_hWnd);
+                RECT rcGutterHdr = { 0, 0, GetGutterWidth(), m_headerHeight };
+                InvalidateRect(m_hWnd, &rcGutterHdr, TRUE);
+                return 0;
+            }
+
             // Column resize hit-test
-            int xAccum = -m_scrollX;
+            int xAccum = GetGutterWidth() - m_scrollX;
             if (m_columns.size() > 1)
             {
                 for (size_t c = 0; c < m_columns.size() - 1; ++c)
                 {
                     xAccum += m_columns[c].width;
-                    if (abs(x - xAccum) <= 2)
+                    if (abs(x - xAccum) <= 2 && x >= GetGutterWidth())
                     {
                         m_isResizing     = true;
                         m_resizeColIndex = (int)c;
@@ -1573,7 +1938,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             }
 
             // If not resizing, it's a column header press!
-            int xPos = -m_scrollX;
+            int xPos = GetGutterWidth() - m_scrollX;
             RECT rcClient;
             GetClientRect(m_hWnd, &rcClient);
             int cw = rcClient.right;
@@ -1581,12 +1946,8 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             for (size_t c = 0; c < m_columns.size(); ++c)
             {
                 int colWidth = m_columns[c].width;
-                if (c == m_columns.size() - 1)
-                {
-                    colWidth = cw - xPos;
-                }
                 int nextX = xPos + colWidth;
-                if (x >= xPos && x < nextX)
+                if (x >= xPos && x < nextX && x >= GetGutterWidth())
                 {
                     m_pressedHeaderColIndex = (int)c;
                     m_pressedHeaderInDropdown = (x >= nextX - 20);
@@ -1605,30 +1966,37 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             bool bCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             bool bShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
 
-            int xPos = -m_scrollX;
-            int clickedCol = -1;
-            RECT rcClient;
-            GetClientRect(m_hWnd, &rcClient);
-            int cw = rcClient.right;
-            for (size_t c = 0; c < m_columns.size(); ++c)
-            {
-                int colWidth = m_columns[c].width;
-                if (c == m_columns.size() - 1)
-                {
-                    colWidth = cw - xPos;
-                }
-                int nextX = xPos + colWidth;
-                if (x >= xPos && x < nextX)
-                {
-                    clickedCol = (int)c;
-                    break;
-                }
-                xPos = nextX;
-            }
+            int totalColsWidth = 0;
+            for (const auto& col : m_columns) totalColsWidth += col.width;
+            int rightOfCols = GetGutterWidth() - m_scrollX + totalColsWidth;
 
-            if (clickedRow >= 0 && clickedRow < itemCount)
+            if (clickedRow >= 0 && clickedRow < itemCount && x < rightOfCols)
             {
-                // Check if Orientation button was clicked
+                // Check if row checkbox in selection gutter was clicked
+                if (m_bShowSelectionGutter && x < GetGutterWidth())
+                {
+                    m_pressedRow = clickedRow;
+                    m_pressedCol = -1; // -1 denotes selection gutter
+                    SetCapture(m_hWnd);
+                    Invalidate();
+                    return 0;
+                }
+
+                int xPos = GetGutterWidth() - m_scrollX;
+                int clickedCol = -1;
+                for (size_t c = 0; c < m_columns.size(); ++c)
+                {
+                    int colWidth = m_columns[c].width;
+                    int nextX = xPos + colWidth;
+                    if (x >= xPos && x < nextX)
+                    {
+                        clickedCol = (int)c;
+                        break;
+                    }
+                    xPos = nextX;
+                }
+
+                // Check if Orientation column button was clicked
                 if (clickedCol >= 0 && m_columns[clickedCol].title == L"Orientation")
                 {
                     m_pressedRow = clickedRow;
@@ -1638,11 +2006,61 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                     return 0;
                 }
 
+                // Check if inline copy button was clicked
+                if (m_inlineCopyCol >= 0 && clickedCol == m_inlineCopyCol)
+                {
+                    RECT rcBtn;
+                    rcBtn.right = xPos + m_columns[clickedCol].width - 4;
+                    rcBtn.left = rcBtn.right - 20;
+                    rcBtn.top = m_headerHeight + (clickedRow - m_scrollY) * m_rowHeight + (m_rowHeight - 18) / 2;
+                    rcBtn.bottom = rcBtn.top + 18;
+
+                    if (PtInRect(&rcBtn, pt))
+                    {
+                        std::wstring textToCopy = GetCellText(clickedRow, clickedCol);
+                        if (textToCopy.rfind(L"● ", 0) == 0)
+                        {
+                            textToCopy = textToCopy.substr(2);
+                        }
+                        if (!textToCopy.empty() && OpenClipboard(m_hWnd))
+                        {
+                            EmptyClipboard();
+                            size_t cch = textToCopy.size() + 1;
+                            HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, cch * sizeof(wchar_t));
+                            if (hGlob)
+                            {
+                                wchar_t* pBuf = (wchar_t*)GlobalLock(hGlob);
+                                if (pBuf)
+                                {
+                                    wcscpy_s(pBuf, cch, textToCopy.c_str());
+                                    GlobalUnlock(hGlob);
+                                    SetClipboardData(CF_UNICODETEXT, hGlob);
+                                }
+                                else
+                                {
+                                    GlobalFree(hGlob);
+                                }
+                            }
+                            CloseClipboard();
+                        }
+
+                        m_copiedRow = clickedRow;
+                        m_copiedCol = clickedCol;
+                        m_copiedTick = GetTickCount64();
+                        SetTimer(m_hWnd, TIMER_COPY_FEEDBACK_ID, 1200, NULL);
+                        Invalidate();
+                        return 0; // Handled, do not initiate dragging or selection change
+                    }
+                }
+
                 bool isAlreadySelected = (m_selectedIndices.count(clickedRow) > 0);
 
-                if ((m_bAllowRearrange || m_bAllowTransferSource) && isAlreadySelected && !bCtrl && !bShift)
+                if (m_bAllowRearrange || m_bAllowTransferSource)
                 {
-                    // Clicked on ALREADY-SELECTED row in Rearrange or Transfer list -> Potential Item Drag
+                    // Clicked on ANY row in a draggable list (Workspace or Stock Library)
+                    // Windows Explorer model:
+                    // Potential item drag. If moved > 4px, it will drag this item (or existing multi-selection if already selected).
+                    // If released without moving > 4px, it executes standard click / Ctrl / Shift selection.
                     m_bPotentialItemDrag = true;
                     m_bPotentialDrag = false;
                     m_ptDragStart = { x, y };
@@ -1655,7 +2073,9 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 {
                     // Marquee disabled (Consists Manager) -> Direct single-click selection
                     m_selectedIndices.clear();
+                    m_selectedOrder.clear();
                     m_selectedIndices.insert(clickedRow);
+                    m_selectedOrder.push_back(clickedRow);
                     m_selectedIndex = clickedRow;
                     m_anchorRow = clickedRow;
                     Invalidate();
@@ -1673,19 +2093,70 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 }
                 else
                 {
-                    // Marquee allowed & clicked on UNSELECTED row -> Candidate for MARQUEE SELECTION
+                    // Table without item drag: clicking directly on a row selects it immediately
+                    if (m_isMultiSelect)
+                    {
+                        if (bCtrl)
+                        {
+                            ToggleRowSelection(clickedRow);
+                        }
+                        else if (bShift)
+                        {
+                            int anchor = (m_anchorRow >= 0) ? m_anchorRow : 0;
+                            int rStart = (std::min)(anchor, clickedRow);
+                            int rEnd   = (std::max)(anchor, clickedRow);
+                            m_selectedIndices.clear();
+                            m_selectedOrder.clear();
+                            for (int r = rStart; r <= rEnd; ++r)
+                            {
+                                m_selectedIndices.insert(r);
+                                m_selectedOrder.push_back(r);
+                            }
+                            m_selectedIndex = clickedRow;
+                            Invalidate();
+                        }
+                        else
+                        {
+                            m_selectedIndices.clear();
+                            m_selectedOrder.clear();
+                            m_selectedIndices.insert(clickedRow);
+                            m_selectedOrder.push_back(clickedRow);
+                            m_selectedIndex = clickedRow;
+                            m_anchorRow = clickedRow;
+                            Invalidate();
+                        }
+                    }
+                    else
+                    {
+                        SetSelectedIndex(clickedRow);
+                    }
+
                     m_bPotentialItemDrag = false;
-                    m_bPotentialDrag = true;
-                    m_ptDragStart = { x, y };
+                    m_bPotentialDrag = false;
                     m_pendingClickedRow = clickedRow;
-                    m_bPendingCtrl = bCtrl;
-                    m_bPendingShift = bShift;
-                    SetCapture(m_hWnd);
+
+                    NMHDR nmhdr = { 0 };
+                    nmhdr.hwndFrom = m_hWnd;
+                    nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+                    nmhdr.code     = NM_CLICK;
+                    SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+                    return 0;
                 }
             }
             else
             {
-                // Clicked on empty space below rows
+                // Clicked on empty space (either below rows OR to the right of columns)
+                if (!bCtrl && !bShift)
+                {
+                    ClearSelection();
+                }
+
+                NMHDR nmhdr = { 0 };
+                nmhdr.hwndFrom = m_hWnd;
+                nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+                nmhdr.code     = NM_CLICK;
+                SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+
                 if (m_bAllowMarquee)
                 {
                     m_bPotentialItemDrag = false;
@@ -1766,6 +2237,26 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         {
             if (abs(x - m_ptDragStart.x) > 4 || abs(y - m_ptDragStart.y) > 4)
             {
+                if (m_pendingClickedRow >= 0 && m_pendingClickedRow < GetItemCount())
+                {
+                    if (m_selectedIndices.find(m_pendingClickedRow) == m_selectedIndices.end() && !m_bPendingCtrl && !m_bPendingShift)
+                    {
+                        m_selectedIndices.clear();
+                        m_selectedOrder.clear();
+                        m_selectedIndices.insert(m_pendingClickedRow);
+                        m_selectedOrder.push_back(m_pendingClickedRow);
+                        m_selectedIndex = m_pendingClickedRow;
+                        m_anchorRow = m_pendingClickedRow;
+                        Invalidate();
+
+                        NMHDR nmhdr = { 0 };
+                        nmhdr.hwndFrom = m_hWnd;
+                        nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+                        nmhdr.code     = NM_CLICK;
+                        SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+                    }
+                }
+
                 m_bIsItemDragging = true;
                 SetCursor(LoadCursor(NULL, IDC_SIZEALL));
 
@@ -1818,6 +2309,26 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         {
             if (abs(x - m_ptDragStart.x) > 4 || abs(y - m_ptDragStart.y) > 4)
             {
+                if (m_pendingClickedRow >= 0 && m_pendingClickedRow < GetItemCount())
+                {
+                    if (m_selectedIndices.find(m_pendingClickedRow) == m_selectedIndices.end() && !m_bPendingCtrl && !m_bPendingShift)
+                    {
+                        m_selectedIndices.clear();
+                        m_selectedOrder.clear();
+                        m_selectedIndices.insert(m_pendingClickedRow);
+                        m_selectedOrder.push_back(m_pendingClickedRow);
+                        m_selectedIndex = m_pendingClickedRow;
+                        m_anchorRow = m_pendingClickedRow;
+                        Invalidate();
+
+                        NMHDR nmhdr = { 0 };
+                        nmhdr.hwndFrom = m_hWnd;
+                        nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+                        nmhdr.code     = NM_CLICK;
+                        SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+                    }
+                }
+
                 m_bIsItemDragging = true;
 
                 std::vector<DragGhostItem> ghostItems;
@@ -1873,10 +2384,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 m_ptMarqueeStart = m_ptDragStart;
                 m_marqueeStartScrollY = m_scrollY;
                 m_marqueeStartScrollX = m_scrollX;
-                if (!m_bPendingCtrl && !m_bPendingShift)
-                {
-                    m_selectedIndices.clear();
-                }
+                m_marqueeInitialSelection = m_selectedIndices;
                 UpdateMarqueeSelection(x, y);
                 CheckAutoScroll(x, y);
                 return 0;
@@ -1914,27 +2422,23 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 m_hoveredRow = -1;
                 m_hoveredCol = -1;
 
-                int xAccum = -m_scrollX;
+                int xAccum = GetGutterWidth() - m_scrollX;
                 bool nearBoundary = false;
                 if (m_columns.size() > 1)
                 {
                     for (size_t c = 0; c < m_columns.size() - 1; ++c)
                     {
                         xAccum += m_columns[c].width;
-                        if (abs(x - xAccum) <= 2) { nearBoundary = true; break; }
+                        if (abs(x - xAccum) <= 2 && x >= GetGutterWidth()) { nearBoundary = true; break; }
                     }
                 }
 
-                if (!nearBoundary)
+                if (!nearBoundary && x >= GetGutterWidth())
                 {
-                    int xPos = -m_scrollX;
+                    int xPos = GetGutterWidth() - m_scrollX;
                     for (size_t c = 0; c < m_columns.size(); ++c)
                     {
                         int colWidth = m_columns[c].width;
-                        if (c == m_columns.size() - 1)
-                        {
-                            colWidth = cw - xPos;
-                        }
                         int nextX = xPos + colWidth;
                         if (x >= xPos && x < nextX)
                         {
@@ -1948,25 +2452,34 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             else
             {
                 m_hoverHeaderColIndex = -1;
-                m_hoveredRow = m_scrollY + (y - m_headerHeight) / m_rowHeight;
-                if (m_hoveredRow >= 0 && m_hoveredRow < GetItemCount())
+
+                int totalColsW = 0;
+                for (const auto& col : m_columns) totalColsW += col.width;
+                int rightOfCols = GetGutterWidth() - m_scrollX + totalColsW;
+
+                if (x < rightOfCols)
                 {
-                    int xPos = -m_scrollX;
-                    m_hoveredCol = -1;
-                    for (size_t c = 0; c < m_columns.size(); ++c)
+                    m_hoveredRow = m_scrollY + (y - m_headerHeight) / m_rowHeight;
+                    if (m_hoveredRow >= 0 && m_hoveredRow < GetItemCount())
                     {
-                        int colWidth = m_columns[c].width;
-                        if (c == m_columns.size() - 1)
+                        int xPos = GetGutterWidth() - m_scrollX;
+                        m_hoveredCol = -1;
+                        for (size_t c = 0; c < m_columns.size(); ++c)
                         {
-                            colWidth = cw - xPos;
+                            int colWidth = m_columns[c].width;
+                            int nextX = xPos + colWidth;
+                            if (x >= xPos && x < nextX && x >= GetGutterWidth())
+                            {
+                                m_hoveredCol = (int)c;
+                                break;
+                            }
+                            xPos = nextX;
                         }
-                        int nextX = xPos + colWidth;
-                        if (x >= xPos && x < nextX)
-                        {
-                            m_hoveredCol = (int)c;
-                            break;
-                        }
-                        xPos = nextX;
+                    }
+                    else
+                    {
+                        m_hoveredRow = -1;
+                        m_hoveredCol = -1;
                     }
                 }
                 else
@@ -1976,29 +2489,49 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 }
             }
 
+            bool newGutterHdrHover = (y <= m_headerHeight && m_bShowSelectionGutter && x < GetGutterWidth());
+            bool oldGutterHdrHover = m_bHoverGutterHeader;
+
+            bool oldHoverCopyBtn = m_bHoverCopyBtn;
+            bool newHoverCopyBtn = false;
+            if (m_inlineCopyCol >= 0 && m_hoveredRow >= 0 && m_hoveredCol == m_inlineCopyCol)
+            {
+                int xPos = GetGutterWidth() - m_scrollX;
+                for (int c = 0; c < m_inlineCopyCol; ++c) xPos += m_columns[c].width;
+                int colWidth = m_columns[m_inlineCopyCol].width;
+                RECT rcBtn;
+                rcBtn.right = xPos + colWidth - 4;
+                rcBtn.left = rcBtn.right - 20;
+                rcBtn.top = m_headerHeight + (m_hoveredRow - m_scrollY) * m_rowHeight + (m_rowHeight - 18) / 2;
+                rcBtn.bottom = rcBtn.top + 18;
+                if (PtInRect(&rcBtn, pt))
+                {
+                    newHoverCopyBtn = true;
+                }
+            }
+
             bool oldDropdownHover = m_hoverHeaderInDropdown;
             bool newDropdownHover = false;
             if (newHover != -1)
             {
-                int xPos = -m_scrollX;
+                int xPos = GetGutterWidth() - m_scrollX;
                 for (int c = 0; c < newHover; ++c)
                 {
                     xPos += m_columns[c].width;
                 }
                 int colWidth = m_columns[newHover].width;
-                if (newHover == (int)m_columns.size() - 1)
-                {
-                    colWidth = cw - xPos;
-                }
                 int colRight = xPos + colWidth;
                 newDropdownHover = (x >= colRight - 20);
             }
 
             if (newHover != oldHover || newDropdownHover != oldDropdownHover ||
-                m_hoveredRow != oldHoveredRow || m_hoveredCol != oldHoveredCol)
+                m_hoveredRow != oldHoveredRow || m_hoveredCol != oldHoveredCol ||
+                newGutterHdrHover != oldGutterHdrHover || newHoverCopyBtn != oldHoverCopyBtn)
             {
                 m_hoverHeaderColIndex = newHover;
                 m_hoverHeaderInDropdown = newDropdownHover;
+                m_bHoverGutterHeader = newGutterHdrHover;
+                m_bHoverCopyBtn = newHoverCopyBtn;
                 Invalidate();
 
                 TRACKMOUSEEVENT tme = { sizeof(tme) };
@@ -2016,8 +2549,11 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         m_hScroll.OnMouseLeave(m_hWnd);
         m_hoverHeaderColIndex = -1;
         m_pressedHeaderColIndex = -1;
+        m_bHoverGutterHeader = false;
+        m_bPressedGutterHeader = false;
         m_hoveredRow = -1;
         m_hoveredCol = -1;
+        m_bHoverCopyBtn = false;
         Invalidate();
         return 0;
     }
@@ -2030,6 +2566,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             {
                 m_isMarqueeSelecting = false;
                 m_bPotentialDrag = false;
+                m_marqueeInitialSelection.clear();
                 StopAutoScroll();
                 Invalidate();
             }
@@ -2101,9 +2638,11 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                         int rStart = (std::min)(anchor, m_pendingClickedRow);
                         int rEnd   = (std::max)(anchor, m_pendingClickedRow);
                         m_selectedIndices.clear();
+                        m_selectedOrder.clear();
                         for (int r = rStart; r <= rEnd; ++r)
                         {
                             m_selectedIndices.insert(r);
+                            m_selectedOrder.push_back(r);
                         }
                         m_selectedIndex = m_pendingClickedRow;
                         Invalidate();
@@ -2111,7 +2650,9 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                     else
                     {
                         m_selectedIndices.clear();
+                        m_selectedOrder.clear();
                         m_selectedIndices.insert(m_pendingClickedRow);
+                        m_selectedOrder.push_back(m_pendingClickedRow);
                         m_selectedIndex = m_pendingClickedRow;
                         m_anchorRow = m_pendingClickedRow;
                         Invalidate();
@@ -2136,6 +2677,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         {
             m_isMarqueeSelecting = false;
             m_bPotentialDrag = false;
+            m_marqueeInitialSelection.clear();
             StopAutoScroll();
             ReleaseCapture();
             Invalidate();
@@ -2167,9 +2709,11 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                         int rStart = (std::min)(anchor, m_pendingClickedRow);
                         int rEnd   = (std::max)(anchor, m_pendingClickedRow);
                         m_selectedIndices.clear();
+                        m_selectedOrder.clear();
                         for (int r = rStart; r <= rEnd; ++r)
                         {
                             m_selectedIndices.insert(r);
+                            m_selectedOrder.push_back(r);
                         }
                         m_selectedIndex = m_pendingClickedRow;
                         Invalidate();
@@ -2177,7 +2721,9 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                     else
                     {
                         m_selectedIndices.clear();
+                        m_selectedOrder.clear();
                         m_selectedIndices.insert(m_pendingClickedRow);
+                        m_selectedOrder.push_back(m_pendingClickedRow);
                         m_selectedIndex = m_pendingClickedRow;
                         m_anchorRow = m_pendingClickedRow;
                         Invalidate();
@@ -2210,6 +2756,38 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             m_isResizing = false;
             ReleaseCapture();
         }
+        else if (m_bPressedGutterHeader)
+        {
+            m_bPressedGutterHeader = false;
+            ReleaseCapture();
+
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+
+            if (x < GetGutterWidth() && y <= m_headerHeight)
+            {
+                int totalItems = GetItemCount();
+                int checkedCount = GetCheckedCount();
+                if (checkedCount == totalItems && totalItems > 0)
+                {
+                    SetAllItemsChecked(false);
+                }
+                else
+                {
+                    SetAllItemsChecked(true);
+                }
+
+                NMCELLCLICK nmcc = { 0 };
+                nmcc.hdr.hwndFrom = m_hWnd;
+                nmcc.hdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+                nmcc.hdr.code     = NM_CELLCLICK;
+                nmcc.itemIndex    = -1;
+                nmcc.subItemIndex = -1;
+                SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmcc.hdr.idFrom, (LPARAM)&nmcc);
+            }
+            Invalidate();
+            return 0;
+        }
         else if (m_pressedHeaderColIndex != -1)
         {
             int x = GET_X_LPARAM(lParam);
@@ -2219,7 +2797,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             GetClientRect(m_hWnd, &rcClient);
             int cw = rcClient.right;
 
-            int xPos = -m_scrollX;
+            int xPos = GetGutterWidth() - m_scrollX;
             int targetCol = -1;
             bool targetInDropdown = false;
             if (y <= m_headerHeight)
@@ -2227,12 +2805,8 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 for (size_t c = 0; c < m_columns.size(); ++c)
                 {
                     int colWidth = m_columns[c].width;
-                    if (c == m_columns.size() - 1)
-                    {
-                        colWidth = cw - xPos;
-                    }
                     int nextX = xPos + colWidth;
-                    if (x >= xPos && x < nextX)
+                    if (x >= xPos && x < nextX && x >= GetGutterWidth())
                     {
                         targetCol = (int)c;
                         targetInDropdown = (x >= nextX - 20);
@@ -2242,7 +2816,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 }
             }
 
-            if (targetCol == m_pressedHeaderColIndex)
+            if (targetCol == m_pressedHeaderColIndex && targetCol >= 0 && targetCol < (int)m_columns.size())
             {
                 if (m_pressedHeaderInDropdown && targetInDropdown)
                 {
@@ -2250,7 +2824,10 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 }
                 else if (!m_pressedHeaderInDropdown && !targetInDropdown)
                 {
-                    SortByColumn(m_pressedHeaderColIndex);
+                    if (!m_bAllowRearrange)
+                    {
+                        SortByColumn(m_pressedHeaderColIndex);
+                    }
                 }
             }
 
@@ -2259,6 +2836,37 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             ReleaseCapture();
             RECT rcHeader = { 0, 0, cw, m_headerHeight };
             InvalidateRect(m_hWnd, &rcHeader, TRUE);
+        }
+        else if (m_pressedRow != -1 && m_pressedCol == -1)
+        {
+            // Row checkbox in Selection Gutter clicked
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+
+            int oldPressedRow = m_pressedRow;
+            m_pressedRow = -1;
+            m_pressedCol = -1;
+            ReleaseCapture();
+            Invalidate();
+
+            if (y > m_headerHeight && x < GetGutterWidth())
+            {
+                int clickedRow = m_scrollY + (y - m_headerHeight) / m_rowHeight;
+                if (clickedRow == oldPressedRow && clickedRow >= 0 && clickedRow < GetItemCount())
+                {
+                    bool bNowChecked = !IsItemChecked(clickedRow);
+                    SetItemChecked(clickedRow, bNowChecked);
+
+                    NMCELLCLICK nmcc = { 0 };
+                    nmcc.hdr.hwndFrom = m_hWnd;
+                    nmcc.hdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+                    nmcc.hdr.code     = NM_CELLCLICK;
+                    nmcc.itemIndex    = clickedRow;
+                    nmcc.subItemIndex = -1;
+                    SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmcc.hdr.idFrom, (LPARAM)&nmcc);
+                }
+            }
+            return 0;
         }
         else if (m_pressedRow != -1 && m_pressedCol != -1)
         {
@@ -2281,17 +2889,13 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 int clickedRow = m_scrollY + (y - m_headerHeight) / m_rowHeight;
                 if (clickedRow == oldPressedRow)
                 {
-                    int xPos = -m_scrollX;
+                    int xPos = GetGutterWidth() - m_scrollX;
                     int clickedCol = -1;
                     for (size_t c = 0; c < m_columns.size(); ++c)
                     {
                         int colWidth = m_columns[c].width;
-                        if (c == m_columns.size() - 1)
-                        {
-                            colWidth = cw - xPos;
-                        }
                         int nextX = xPos + colWidth;
-                        if (x >= xPos && x < nextX)
+                        if (x >= xPos && x < nextX && x >= GetGutterWidth())
                         {
                             clickedCol = (int)c;
                             break;
@@ -2630,20 +3234,79 @@ void CustomListControl::UpdateMarqueeSelection(int currentX, int currentY)
     m_rcMarquee.bottom = currentY;
 
     int itemCount = GetItemCount();
-    bool bCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-    if (!bCtrl && !m_bPendingCtrl)
-    {
-        m_selectedIndices.clear();
-    }
+    bool bCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0 || m_bPendingCtrl;
+    bool bShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0 || m_bPendingShift;
 
+    // Build the set of rows currently intersecting the rubber-band box
+    std::unordered_set<int> boxIntersects;
     for (int r = 0; r < itemCount; ++r)
     {
         int rowTopWorld = r * m_rowHeight;
         int rowBottomWorld = rowTopWorld + m_rowHeight;
         if (rowBottomWorld >= topWorldY && rowTopWorld <= bottomWorldY)
         {
-            m_selectedIndices.insert(r);
-            m_selectedIndex = r;
+            boxIntersects.insert(r);
+        }
+    }
+
+    m_selectedIndices.clear();
+    m_selectedOrder.clear();
+
+    if (bCtrl)
+    {
+        // Ctrl + Marquee: XOR Toggle Mode against initial selection snapshot
+        // If row was initially selected and is in the marquee box -> Unselect (exclude)
+        // If row was NOT initially selected and is in the marquee box -> Select (include)
+        // If row is OUTSIDE the marquee box -> Retain its initial selection state
+        for (int r = 0; r < itemCount; ++r)
+        {
+            bool wasInitiallySelected = (m_marqueeInitialSelection.count(r) > 0);
+            bool isInBox = (boxIntersects.count(r) > 0);
+
+            bool isNowSelected = wasInitiallySelected ^ isInBox; // XOR
+            if (isNowSelected)
+            {
+                m_selectedIndices.insert(r);
+                m_selectedOrder.push_back(r);
+                m_selectedIndex = r;
+            }
+        }
+        if (m_selectedIndices.empty())
+        {
+            m_selectedIndex = -1;
+        }
+    }
+    else if (bShift)
+    {
+        // Shift + Marquee: Union additive mode (keep all initial, add anything in box)
+        for (int r = 0; r < itemCount; ++r)
+        {
+            bool wasInitiallySelected = (m_marqueeInitialSelection.count(r) > 0);
+            bool isInBox = (boxIntersects.count(r) > 0);
+
+            if (wasInitiallySelected || isInBox)
+            {
+                m_selectedIndices.insert(r);
+                m_selectedOrder.push_back(r);
+                m_selectedIndex = r;
+            }
+        }
+    }
+    else
+    {
+        // Normal Marquee: Pure replacement (only select what is currently inside the box)
+        for (int r = 0; r < itemCount; ++r)
+        {
+            if (boxIntersects.count(r) > 0)
+            {
+                m_selectedIndices.insert(r);
+                m_selectedOrder.push_back(r);
+                m_selectedIndex = r;
+            }
+        }
+        if (m_selectedIndices.empty())
+        {
+            m_selectedIndex = -1;
         }
     }
 

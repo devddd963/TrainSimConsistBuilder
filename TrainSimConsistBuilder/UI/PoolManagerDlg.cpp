@@ -10,8 +10,11 @@
 #include "CustomTitleBar.h"
 #include "ModernContextMenu.h"
 #include "CustomDropDownMenu.h"
+#include "../SRC/TrainConfig.h"
 #include <windowsx.h>
 #include <dwmapi.h>
+#include <shellapi.h>
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -165,7 +168,7 @@ static void DrawModernButton(HDC hdc, const RECT& rc, const wchar_t* text, bool 
 
         int gap = 6;
         int totalW = iconW + gap + textW;
-        int minMargin = 6;
+        int minMargin = 4;
 
         int startX = rc.left + (rc.right - rc.left - totalW) / 2;
         if (startX < rc.left + minMargin)
@@ -178,7 +181,7 @@ static void DrawModernButton(HDC hdc, const RECT& rc, const wchar_t* text, bool 
         DrawTextW(hdc, iconGlyph, -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         SelectObject(hdc, hFont);
-        RECT rcText = { startX + iconW + gap, rc.top, rc.right - minMargin, rc.bottom };
+        RECT rcText = { startX + iconW + gap, rc.top, rc.right - 2, rc.bottom };
         DrawTextW(hdc, text, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
     else if (hasIcon)
@@ -603,9 +606,13 @@ struct ClickableControl
         // Tab 1 Controls (Unit Replacement Groups)
         BTN_GROUP_NEW,
         BTN_GROUP_RENAME,
+        BTN_GROUP_CLONE,
+        BTN_GROUP_UP,
+        BTN_GROUP_DOWN,
         BTN_GROUP_DELETE,
         BTN_GROUP_COLLAPSE_TOGGLE,
         BTN_GROUP_PASTE_CLIPBOARD,
+        BTN_GROUP_COPY_UNITS,
         BTN_GROUP_CLEAR_UNITS,
         BTN_GROUP_EXPAND_ALL,
         BTN_GROUP_COLLAPSE_ALL,
@@ -615,6 +622,14 @@ struct ClickableControl
         BTN_GROUP_COPY_SELECTED,
         BTN_GROUP_DELETE_SELECTED,
         BTN_GROUP_FLIP_SELECTED,
+        BTN_GROUP_CATEGORY_PILL,
+        BTN_GROUP_CATEGORY_ADD,
+        BTN_GROUP_CATEGORY_DEL,
+        BTN_GROUP_CATEGORY_EMPTY,
+        BTN_GROUP_EMPTY_ACTIVE_CATEGORY,
+        BTN_GROUP_CATEGORY_EDIT,
+        BTN_GROUP_CYCLE_MODE,
+        BTN_GROUP_CYCLE_FLIP,
 
         // Common Controls
         BTN_CLOSE,
@@ -625,7 +640,87 @@ struct ClickableControl
     RECT rc = { 0 };
     int poolIdx = -1; // Also used for groupIdx in Tab 1
     int unitIdx = -1;
+    std::wstring strParam;
 };
+
+static int AutoPopulatePresetFromStockLibrary(PoolManager::PoolPreset* pPreset, const TrainConfigManager::TrainConfig* pConfig)
+{
+    if (!pPreset) return 0;
+    int populatedCount = 0;
+    EnterCriticalSection(&g_StockCacheCS);
+
+    for (size_t p = 0; p < pPreset->pools.size(); ++p)
+    {
+        auto& pool = pPreset->pools[p];
+        if (!pool.units.empty()) continue; // Skip pools that already have units
+
+        std::wstring tagFilter = L"";
+        if (pConfig && p < pConfig->pools.size())
+        {
+            tagFilter = pConfig->pools[p].filterTag;
+        }
+
+        std::vector<std::wstring> tags;
+        if (!tagFilter.empty())
+        {
+            std::wstringstream ss(tagFilter);
+            std::wstring item;
+            while (std::getline(ss, item, L','))
+            {
+                size_t s = item.find_first_not_of(L" \t");
+                size_t e = item.find_last_not_of(L" \t");
+                if (s != std::wstring::npos) tags.push_back(item.substr(s, e - s + 1));
+            }
+        }
+
+        for (const auto& item : g_StockCache)
+        {
+            bool match = false;
+            std::wstring lFile = item.szFileName;
+            std::transform(lFile.begin(), lFile.end(), lFile.begin(), ::towlower);
+            std::wstring lFolder = item.szFolder;
+            std::transform(lFolder.begin(), lFolder.end(), lFolder.begin(), ::towlower);
+
+            if (!tags.empty())
+            {
+                for (const auto& tag : tags)
+                {
+                    std::wstring lTag = tag;
+                    std::transform(lTag.begin(), lTag.end(), lTag.begin(), ::towlower);
+                    if (lFile.find(lTag) != std::wstring::npos || lFolder.find(lTag) != std::wstring::npos)
+                    {
+                        match = true;
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                std::wstring lPool = pool.name;
+                std::transform(lPool.begin(), lPool.end(), lPool.begin(), ::towlower);
+                if (lFile.find(lPool) != std::wstring::npos) match = true;
+            }
+
+            if (match)
+            {
+                PoolManager::PoolUnit pu;
+                pu.szFileName = item.szFileName;
+                pu.szFolder = item.szFolder;
+                std::wstring ext = item.szExtension;
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+                pu.isEngine = (ext == L".eng");
+                pu.flipMode = PoolManager::UnitFlipMode::Auto;
+                pool.units.push_back(pu);
+                populatedCount++;
+                if (pool.units.size() >= 12) break;
+            }
+        }
+    }
+
+    LeaveCriticalSection(&g_StockCacheCS);
+    PoolManager::PersistPoolPresets();
+    return populatedCount;
+}
 
 struct WizardDlgState
 {
@@ -633,6 +728,9 @@ struct WizardDlgState
     HWND hParent = NULL;
     HWND hTitleBar = NULL;
     int activeTab = 0; // 0 = Consist Assembly Pools, 1 = Unit Replacement Groups
+    std::wstring selectedCategoryFilter = L""; // Empty when no categories created
+    std::wstring activeTrainConfigPath = L"";
+    std::wstring activeTrainConfigID = L"";
 
     HFONT hFontTitle = NULL;
     HFONT hFontSub = NULL;
@@ -657,8 +755,10 @@ struct WizardDlgState
     int dragOverGroupIdx = -1;
 
     // Card Drag-and-Drop Re-order state (Tab 0)
+    bool isCardDragging = false;
     int draggingPoolIdx = -1;
     int cardDropTargetIdx = -1;
+    RECT rcCardDropIndicator = { 0 };
     bool isPotentialCardDrag = false;
     int potentialCardDragIdx = -1;
     POINT ptCardDragStart = { 0, 0 };
@@ -736,6 +836,19 @@ struct WizardDlgState
     POINT ptGroupMarqueeCurrent = { 0, 0 };
     int marqueeGroupIdx = -1;
     std::unordered_set<int> marqueeGroupInitialSelection;
+
+    // Unit Drag-and-Drop state (Tab 0 & Tab 1)
+    bool isPotentialUnitDrag = false;
+    bool isUnitDragging = false;
+    POINT ptUnitDragStart = { 0, 0 };
+    int unitDragSourcePoolOrGrp = -1;
+    int unitDragSourceUnitIdx = -1;
+    bool unitDragIsCtrl = false;
+    bool unitDragIsShift = false;
+    std::vector<int> unitDragIndices;
+    int unitDropTargetPoolOrGrp = -1;
+    int unitDropTargetUnitIdx = -1;
+    RECT rcDropIndicator = { 0 };
 };
 
 static void ExecuteStepAction(ClickableControl::Type type, int poolIdx, int step)
@@ -773,6 +886,237 @@ static void ExecuteStepAction(ClickableControl::Type type, int poolIdx, int step
     PoolManager::PersistPoolPresets();
 }
 
+static void DrawSolidYellowDropIndicator(HDC hdc, const RECT& rc)
+{
+    if (rc.right <= rc.left && rc.bottom <= rc.top) return;
+
+    COLORREF yellowCol = RGB(255, 215, 0);
+    HBRUSH hbrYellow = CreateSolidBrush(yellowCol);
+    HPEN hpenYellow = CreatePen(PS_SOLID, 1, yellowCol);
+    HGDIOBJ holdBr = SelectObject(hdc, hbrYellow);
+    HGDIOBJ holdPen = SelectObject(hdc, hpenYellow);
+
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+
+    if (w >= h)
+    {
+        // Horizontal bar with left & right arrow caps (like consist unit table)
+        int midY = (rc.top + rc.bottom) / 2;
+        int barH = 3;
+        RECT rcBar = { rc.left, midY - barH / 2, rc.right, midY + barH / 2 + 1 };
+        FillRect(hdc, &rcBar, hbrYellow);
+
+        // Left triangle ►
+        POINT ptLeft[3] = { { rc.left, midY - 6 }, { rc.left, midY + 6 }, { rc.left + 8, midY } };
+        Polygon(hdc, ptLeft, 3);
+
+        // Right triangle ◄
+        POINT ptRight[3] = { { rc.right, midY - 6 }, { rc.right, midY + 6 }, { rc.right - 8, midY } };
+        Polygon(hdc, ptRight, 3);
+    }
+    else
+    {
+        // Vertical bar with top & bottom arrow caps (for unit chips)
+        int midX = (rc.left + rc.right) / 2;
+        int barW = 3;
+        RECT rcBar = { midX - barW / 2, rc.top, midX + barW / 2 + 1, rc.bottom };
+        FillRect(hdc, &rcBar, hbrYellow);
+
+        // Top triangle ▼
+        POINT ptTop[3] = { { midX - 6, rc.top }, { midX + 6, rc.top }, { midX, rc.top + 7 } };
+        Polygon(hdc, ptTop, 3);
+
+        // Bottom triangle ▲
+        POINT ptBottom[3] = { { midX - 6, rc.bottom }, { midX + 6, rc.bottom }, { midX, rc.bottom - 7 } };
+        Polygon(hdc, ptBottom, 3);
+    }
+
+    SelectObject(hdc, holdBr);
+    SelectObject(hdc, holdPen);
+    DeleteObject(hbrYellow);
+    DeleteObject(hpenYellow);
+}
+
+static int GetPoolUnitDropTarget(const WizardDlgState* pState, int hitPool, POINT ptClient, RECT& outDropIndicator)
+{
+    outDropIndicator = { 0, 0, 0, 0 };
+    PoolManager::PoolPreset* pPreset = PoolManager::GetActivePreset();
+    if (!pPreset || hitPool < 0 || hitPool >= (int)pPreset->pools.size())
+        return 0;
+
+    const auto& pool = pPreset->pools[hitPool];
+    int unitCount = (int)pool.units.size();
+    if (unitCount == 0)
+    {
+        for (const auto& pbh : pState->poolUnitsBoxHits)
+        {
+            if (pbh.poolIdx == hitPool)
+            {
+                outDropIndicator = { pbh.rcUnitsBox.left + 10, pbh.rcUnitsBox.top + 10, pbh.rcUnitsBox.right - 10, pbh.rcUnitsBox.top + 14 };
+                break;
+            }
+        }
+        return 0;
+    }
+
+    // 1. Direct hit on a unit chip
+    for (const auto& uch : pState->unitChipHits)
+    {
+        if (uch.poolIdx == hitPool)
+        {
+            if (PtInRect(&uch.rcChip, ptClient))
+            {
+                int midY = (uch.rcChip.top + uch.rcChip.bottom) / 2;
+                if (ptClient.y < midY)
+                {
+                    outDropIndicator = { uch.rcChip.left - 2, uch.rcChip.top - 2, uch.rcChip.right + 2, uch.rcChip.top + 2 };
+                    return uch.unitIdx;
+                }
+                else
+                {
+                    outDropIndicator = { uch.rcChip.left - 2, uch.rcChip.bottom - 2, uch.rcChip.right + 2, uch.rcChip.bottom + 2 };
+                    return uch.unitIdx + 1;
+                }
+            }
+        }
+    }
+
+    // 2. Cursor in units box or between chips: find closest chip
+    for (const auto& pbh : pState->poolUnitsBoxHits)
+    {
+        if (pbh.poolIdx == hitPool)
+        {
+            if (PtInRect(&pbh.rcUnitsBox, ptClient))
+            {
+                int minDistance = 999999;
+                const WizardDlgState::UnitChipHit* pClosest = nullptr;
+
+                for (const auto& uch : pState->unitChipHits)
+                {
+                    if (uch.poolIdx == hitPool)
+                    {
+                        int cx = (uch.rcChip.left + uch.rcChip.right) / 2;
+                        int cy = (uch.rcChip.top + uch.rcChip.bottom) / 2;
+                        int dist = (ptClient.x - cx) * (ptClient.x - cx) + (ptClient.y - cy) * (ptClient.y - cy);
+                        if (dist < minDistance)
+                        {
+                            minDistance = dist;
+                            pClosest = &uch;
+                        }
+                    }
+                }
+
+                if (pClosest)
+                {
+                    int cy = (pClosest->rcChip.top + pClosest->rcChip.bottom) / 2;
+                    if (ptClient.y < cy)
+                    {
+                        outDropIndicator = { pClosest->rcChip.left - 2, pClosest->rcChip.top - 2, pClosest->rcChip.right + 2, pClosest->rcChip.top + 2 };
+                        return pClosest->unitIdx;
+                    }
+                    else
+                    {
+                        outDropIndicator = { pClosest->rcChip.left - 2, pClosest->rcChip.bottom - 2, pClosest->rcChip.right + 2, pClosest->rcChip.bottom + 2 };
+                        return pClosest->unitIdx + 1;
+                    }
+                }
+                return unitCount;
+            }
+        }
+    }
+
+    return unitCount;
+}
+
+static int GetGroupUnitDropTarget(const WizardDlgState* pState, int hitGroup, POINT ptClient, RECT& outDropIndicator)
+{
+    outDropIndicator = { 0, 0, 0, 0 };
+    if (hitGroup < 0 || hitGroup >= (int)PoolManager::g_ReplacementGroupsCache.size())
+        return 0;
+
+    const auto& grp = PoolManager::g_ReplacementGroupsCache[hitGroup];
+    int unitCount = (int)grp.units.size();
+    if (unitCount == 0)
+    {
+        for (const auto& gbh : pState->groupUnitsBoxHits)
+        {
+            if (gbh.groupIdx == hitGroup)
+            {
+                outDropIndicator = { gbh.rcUnitsBox.left + 10, gbh.rcUnitsBox.top + 10, gbh.rcUnitsBox.right - 10, gbh.rcUnitsBox.top + 14 };
+                break;
+            }
+        }
+        return 0;
+    }
+
+    for (const auto& guch : pState->groupUnitChipHits)
+    {
+        if (guch.groupIdx == hitGroup)
+        {
+            if (PtInRect(&guch.rcChip, ptClient))
+            {
+                int midY = (guch.rcChip.top + guch.rcChip.bottom) / 2;
+                if (ptClient.y < midY)
+                {
+                    outDropIndicator = { guch.rcChip.left - 2, guch.rcChip.top - 2, guch.rcChip.right + 2, guch.rcChip.top + 2 };
+                    return guch.unitIdx;
+                }
+                else
+                {
+                    outDropIndicator = { guch.rcChip.left - 2, guch.rcChip.bottom - 2, guch.rcChip.right + 2, guch.rcChip.bottom + 2 };
+                    return guch.unitIdx + 1;
+                }
+            }
+        }
+    }
+
+    for (const auto& gbh : pState->groupUnitsBoxHits)
+    {
+        if (gbh.groupIdx == hitGroup)
+        {
+            if (PtInRect(&gbh.rcUnitsBox, ptClient))
+            {
+                int minDistance = 999999;
+                const WizardDlgState::GroupUnitChipHit* pClosest = nullptr;
+
+                for (const auto& guch : pState->groupUnitChipHits)
+                {
+                    if (guch.groupIdx == hitGroup)
+                    {
+                        int cx = (guch.rcChip.left + guch.rcChip.right) / 2;
+                        int cy = (guch.rcChip.top + guch.rcChip.bottom) / 2;
+                        int dist = (ptClient.x - cx) * (ptClient.x - cx) + (ptClient.y - cy) * (ptClient.y - cy);
+                        if (dist < minDistance)
+                        {
+                            minDistance = dist;
+                            pClosest = &guch;
+                        }
+                    }
+                }
+
+                if (pClosest)
+                {
+                    int cy = (pClosest->rcChip.top + pClosest->rcChip.bottom) / 2;
+                    if (ptClient.y < cy)
+                    {
+                        outDropIndicator = { pClosest->rcChip.left - 2, pClosest->rcChip.top - 2, pClosest->rcChip.right + 2, pClosest->rcChip.top + 2 };
+                        return pClosest->unitIdx;
+                    }
+                    else
+                    {
+                        outDropIndicator = { pClosest->rcChip.left - 2, pClosest->rcChip.bottom - 2, pClosest->rcChip.right + 2, pClosest->rcChip.bottom + 2 };
+                        return pClosest->unitIdx + 1;
+                    }
+                }
+                return unitCount;
+            }
+        }
+    }
+
+    return unitCount;
+}
+
 static void RestoreParentWindowFocus(HWND hParent)
 {
     if (hParent && IsWindow(hParent))
@@ -787,6 +1131,22 @@ static void RestoreParentWindowFocus(HWND hParent)
         SetActiveWindow(hParent);
         BringWindowToTop(hParent);
         SetFocus(hParent);
+    }
+}
+
+static void SyncActiveTrainConfigBinding(WizardDlgState* pState)
+{
+    if (!pState || pState->activeTrainConfigPath.empty()) return;
+    TrainConfigManager::TrainConfig cfg;
+    if (TrainConfigManager::LoadTrainConfig(pState->activeTrainConfigPath, cfg))
+    {
+        PoolManager::PoolPreset* pPreset = PoolManager::GetActivePreset();
+        if (pPreset)
+        {
+            TrainConfigManager::TrainBinding binding;
+            TrainConfigManager::ExtractBindingFromPreset(cfg, *pPreset, binding);
+            TrainConfigManager::SaveTrainBinding(cfg, binding);
+        }
     }
 }
 
@@ -888,6 +1248,7 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
     case WM_CREATE:
     {
+        TrainConfigManager::InitializeTrainConfigs();
         pState->hFontTitle     = CreateCustomFont(13, FW_SEMIBOLD, L"Segoe UI");
         pState->hFontSub       = CreateCustomFont(9, FW_NORMAL, L"Segoe UI");
         pState->hFontMain      = CreateCustomFont(10, FW_NORMAL, L"Segoe UI");
@@ -1054,37 +1415,43 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             int btnY = toolbarY + (toolbarH - btnH) / 2;
 
             // [+ Add Pool] and [Expand All] / [Collapse All] Buttons (Right cluster)
-            int addPoolW = (w < 880) ? 84 : 96;
-            int expandAllW = (w < 880) ? 80 : 92;
-            int collapseAllW = (w < 880) ? 84 : 96;
-            int curRight = w - 20;
+            int addPoolW = (w < 920) ? 80 : 92;
+            int expandAllW = (w < 920) ? 76 : 88;
+            int collapseAllW = (w < 920) ? 80 : 92;
+            int curRight = w - 16;
 
             RECT rcBtnAddPool = { curRight - addPoolW, btnY, curRight, btnY + btnH };
             ClickableControl ccAddPool = { ClickableControl::BTN_ADD_POOL, rcBtnAddPool };
             int idxAddPool = (int)pState->clickControls.size();
             pState->clickControls.push_back(ccAddPool);
-            DrawModernButton(hmemDC, rcBtnAddPool, (w < 880) ? L"Add" : L"Add Pool", pState->hoveredControlIdx == idxAddPool, pState->pressedControlIdx == idxAddPool, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
+            DrawModernButton(hmemDC, rcBtnAddPool, (w < 920) ? L"Add" : L"Add Pool", pState->hoveredControlIdx == idxAddPool, pState->pressedControlIdx == idxAddPool, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
 
-            curRight -= (addPoolW + 6);
+            curRight -= (addPoolW + 5);
             RECT rcBtnExpAll = { curRight - expandAllW, btnY, curRight, btnY + btnH };
             ClickableControl ccExpAll = { ClickableControl::BTN_POOLS_EXPAND_ALL, rcBtnExpAll };
             int idxExpAll = (int)pState->clickControls.size();
             pState->clickControls.push_back(ccExpAll);
-            DrawModernButton(hmemDC, rcBtnExpAll, (w < 880) ? L"Expand" : L"Expand All", pState->hoveredControlIdx == idxExpAll, pState->pressedControlIdx == idxExpAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
+            DrawModernButton(hmemDC, rcBtnExpAll, (w < 920) ? L"Expand" : L"Expand All", pState->hoveredControlIdx == idxExpAll, pState->pressedControlIdx == idxExpAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
 
-            curRight -= (expandAllW + 6);
+            curRight -= (expandAllW + 5);
             RECT rcBtnColAll = { curRight - collapseAllW, btnY, curRight, btnY + btnH };
             ClickableControl ccColAll = { ClickableControl::BTN_POOLS_COLLAPSE_ALL, rcBtnColAll };
             int idxColAll = (int)pState->clickControls.size();
             pState->clickControls.push_back(ccColAll);
-            DrawModernButton(hmemDC, rcBtnColAll, (w < 880) ? L"Collapse" : L"Collapse All", pState->hoveredControlIdx == idxColAll, pState->pressedControlIdx == idxColAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
+            DrawModernButton(hmemDC, rcBtnColAll, (w < 920) ? L"Collapse" : L"Collapse All", pState->hoveredControlIdx == idxColAll, pState->pressedControlIdx == idxColAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
 
-            int rightClusterLeft = curRight - 12;
+            int rightClusterLeft = rcBtnColAll.left - 14;
 
             // Preset Dropdown and Action Buttons (Left cluster)
-            int comboMaxW = 180;
             int availForLeft = rightClusterLeft - 70;
-            int comboW = (availForLeft < 480) ? (std::max)(110, availForLeft - 260) : comboMaxW;
+            int btnNewW = (availForLeft < 500) ? 52 : 64;
+            int btnRenameW = (availForLeft < 500) ? 68 : 80;
+            int btnCloneW = (availForLeft < 500) ? 60 : 72;
+            int btnDelW = (availForLeft < 500) ? 60 : 72;
+
+            int actionButtonsTotalW = btnNewW + btnRenameW + btnCloneW + btnDelW + 20;
+            int comboMaxW = 180;
+            int comboW = (std::max)(110, (std::min)(comboMaxW, availForLeft - actionButtonsTotalW - 10));
             RECT rcCombo = { 70, toolbarY + 9, 70 + comboW, toolbarY + toolbarH - 9 };
             pState->rcPresetDropdown = rcCombo;
 
@@ -1131,10 +1498,6 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
             // Preset action buttons: [+ New], [✏️ Rename], [Clone], [Delete]
             int btnX = rcCombo.right + 8;
-            int btnNewW = (availForLeft < 480) ? 52 : 64;
-            int btnRenameW = (availForLeft < 480) ? 68 : 84;
-            int btnCloneW = (availForLeft < 480) ? 60 : 74;
-            int btnDelW = (availForLeft < 480) ? 60 : 74;
 
             if (btnX + btnNewW <= rightClusterLeft)
             {
@@ -1173,6 +1536,7 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                 int idxDel = (int)pState->clickControls.size();
                 pState->clickControls.push_back(ccDel);
                 DrawModernButton(hmemDC, rcBtnDel, L"Delete", pState->hoveredControlIdx == idxDel, pState->pressedControlIdx == idxDel, false, pState->hFontMain, pState->hFontIconSmall, L"\xE74D");
+                btnX += btnDelW + 6;
             }
 
             // 2. Scrollable Content Area: Pool Cards
@@ -1217,7 +1581,7 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     int cardH = pool.isCollapsed ? 33 : (92 + unitsAreaH + 40);
                     RECT rcCard = { cardMargin, cardY, cardMargin + cardW, cardY + cardH };
 
-                    bool isHoverPool = (pState->dragOverPoolIdx == (int)p);
+                    bool isHoverPool = (pState->dragOverPoolIdx == (int)p || (pState->isUnitDragging && pState->unitDropTargetPoolOrGrp == (int)p));
                     COLORREF cBg = isHoverPool ? RGB(32, 40, 52) : PoolTheme::CardBackground;
                     COLORREF cBorder = isHoverPool ? accentCol : PoolTheme::CardBorder;
 
@@ -1395,26 +1759,38 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                         }
                         else
                         {
-                            int chipColW = (rcUnitsBox.right - rcUnitsBox.left - 24) / 2;
+                            int colTotalW = (rcUnitsBox.right - rcUnitsBox.left - 24) / 2;
                             int chipH = 24;
+                            int numW = 20;
                             for (int u = 0; u < unitCount; ++u)
                             {
                                 const auto& unit = pool.units[u];
                                 int col = u % 2;
                                 int row = u / 2;
-                                int chipX = rcUnitsBox.left + 8 + col * (chipColW + 8);
+                                int colX = rcUnitsBox.left + 8 + col * (colTotalW + 8);
                                 int chipY = rcUnitsBox.top + 8 + row * (chipH + 4);
-                                RECT rcChip = { chipX, chipY, chipX + chipColW, chipY + chipH };
+
+                                // Number label outside card towards left
+                                RECT rcNum = { colX, chipY, colX + numW - 4, chipY + chipH };
+                                SelectObject(hmemDC, pState->hFontBadge);
+                                SetTextColor(hmemDC, RGB(255, 255, 255));
+                                std::wstring numStr = std::to_wstring(u + 1) + L".";
+                                DrawTextW(hmemDC, numStr.c_str(), -1, &rcNum, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                                int chipX = colX + numW;
+                                int chipW = colTotalW - numW;
+                                RECT rcChip = { chipX, chipY, chipX + chipW, chipY + chipH };
 
                                 WizardDlgState::UnitChipHit uch;
                                 uch.poolIdx = (int)p;
                                 uch.unitIdx = u;
-                                uch.rcChip = rcChip;
+                                uch.rcChip = { colX, chipY, chipX + chipW, chipY + chipH };
                                 pState->unitChipHits.push_back(uch);
 
                                 bool isSel = (pState->selectedPoolIdx == (int)p && pState->selectedUnitIndices.count(u) > 0);
-                                COLORREF chipBg = isSel ? RGB(0, 90, 160) : PoolTheme::ChipBackground;
-                                COLORREF chipBdr = isSel ? RGB(0, 160, 255) : PoolTheme::ChipBorder;
+                                bool isMissing = unit.szFolder.empty();
+                                COLORREF chipBg = isSel ? RGB(0, 90, 160) : (isMissing ? RGB(55, 20, 20) : PoolTheme::ChipBackground);
+                                COLORREF chipBdr = isSel ? RGB(0, 160, 255) : (isMissing ? RGB(200, 50, 50) : PoolTheme::ChipBorder);
 
                                 HBRUSH hbrChip = CreateSolidBrush(chipBg);
                                 HPEN hpenChip = CreatePen(PS_SOLID, 1, chipBdr);
@@ -1426,15 +1802,25 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
                                 // Unit Icon
                                 SelectObject(hmemDC, pState->hFontIconSmall);
-                                SetTextColor(hmemDC, isSel ? RGB(255, 255, 255) : (unit.isEngine ? RGB(96, 205, 255) : RGB(220, 180, 100)));
-                                RECT rcUIcon = { rcChip.left + 6, rcChip.top, rcChip.left + 22, rcChip.bottom };
-                                DrawTextW(hmemDC, unit.isEngine ? L"\xE7C0" : L"\xE707", -1, &rcUIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                                if (isMissing && !isSel)
+                                {
+                                    SetTextColor(hmemDC, RGB(255, 90, 90));
+                                    RECT rcUIcon = { rcChip.left + 6, rcChip.top, rcChip.left + 22, rcChip.bottom };
+                                    DrawTextW(hmemDC, L"\xE7BA", -1, &rcUIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                                }
+                                else
+                                {
+                                    SetTextColor(hmemDC, isSel ? RGB(255, 255, 255) : (unit.isEngine ? RGB(96, 205, 255) : RGB(220, 180, 100)));
+                                    RECT rcUIcon = { rcChip.left + 6, rcChip.top, rcChip.left + 22, rcChip.bottom };
+                                    DrawTextW(hmemDC, unit.isEngine ? L"\xE7C0" : L"\xE707", -1, &rcUIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                                }
 
                                 // Unit Name
                                 SelectObject(hmemDC, pState->hFontSmall);
-                                SetTextColor(hmemDC, RGB(245, 245, 245));
+                                SetTextColor(hmemDC, (isMissing && !isSel) ? RGB(255, 120, 120) : RGB(245, 245, 245));
+                                std::wstring uDisplayName = isMissing ? (unit.szFileName + L" (Missing)") : unit.szFileName;
                                 RECT rcUName = { rcChip.left + 24, rcChip.top, rcChip.right - 80, rcChip.bottom };
-                                DrawTextW(hmemDC, unit.szFileName.c_str(), -1, &rcUName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                                DrawTextW(hmemDC, uDisplayName.c_str(), -1, &rcUName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
                                 // Unit Flip Mode Pill
                                 RECT rcFlipPill = { rcChip.right - 76, rcChip.top + 2, rcChip.right - 24, rcChip.bottom - 2 };
@@ -1485,6 +1871,16 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                 }
             }
 
+            if (pState->isUnitDragging && pState->unitDropTargetPoolOrGrp >= 0)
+            {
+                DrawSolidYellowDropIndicator(hmemDC, pState->rcDropIndicator);
+            }
+
+            if (pState->isCardDragging && pState->cardDropTargetIdx >= 0)
+            {
+                DrawSolidYellowDropIndicator(hmemDC, pState->rcCardDropIndicator);
+            }
+
             SelectClipRgn(hmemDC, NULL);
             DeleteObject(hRgnClip);
 
@@ -1532,35 +1928,74 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             MoveToEx(hmemDC, 0, toolbarY + toolbarH, NULL);
             LineTo(hmemDC, w, toolbarY + toolbarH);
 
-            // Right: [+ Add Group], [Expand All], [Collapse All] Buttons
+            // Right: [+ Add Group], [Expand All], [Collapse All], [Empty Category] Buttons
             int btnH = 30;
             int btnY = toolbarY + (toolbarH - btnH) / 2;
-            int addGroupW = (w < 880) ? 90 : 104;
-            int expandAllW = (w < 880) ? 80 : 92;
-            int collapseAllW = (w < 880) ? 84 : 96;
             int curRight = w - 20;
 
-            RECT rcBtnAddGrp = { curRight - addGroupW, btnY, curRight, btnY + btnH };
-            ClickableControl ccAddGrp = { ClickableControl::BTN_GROUP_NEW, rcBtnAddGrp };
-            int idxAddGrp = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccAddGrp);
-            DrawModernButton(hmemDC, rcBtnAddGrp, (w < 880) ? L"Add Group" : L"Add Group", pState->hoveredControlIdx == idxAddGrp, pState->pressedControlIdx == idxAddGrp, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
+            std::vector<std::wstring> allCategories = PoolManager::GetReplacementGroupCategories();
+            if (pState->selectedCategoryFilter.empty() && !allCategories.empty())
+            {
+                pState->selectedCategoryFilter = allCategories[0];
+            }
+            else if (!pState->selectedCategoryFilter.empty())
+            {
+                bool found = false;
+                for (const auto& c : allCategories)
+                {
+                    if (_wcsicmp(c.c_str(), pState->selectedCategoryFilter.c_str()) == 0) { found = true; break; }
+                }
+                if (!found)
+                {
+                    pState->selectedCategoryFilter = allCategories.empty() ? L"" : allCategories[0];
+                }
+            }
 
-            curRight -= (addGroupW + 6);
-            RECT rcBtnExpAll = { curRight - expandAllW, btnY, curRight, btnY + btnH };
-            ClickableControl ccExpAll = { ClickableControl::BTN_GROUP_EXPAND_ALL, rcBtnExpAll };
-            int idxExpAll = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccExpAll);
-            DrawModernButton(hmemDC, rcBtnExpAll, (w < 880) ? L"Expand" : L"Expand All", pState->hoveredControlIdx == idxExpAll, pState->pressedControlIdx == idxExpAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
+            if (!allCategories.empty())
+            {
+                int addGroupW = (w < 880) ? 96 : 108;
+                RECT rcBtnAddGrp = { curRight - addGroupW, btnY, curRight, btnY + btnH };
+                ClickableControl ccAddGrp = { ClickableControl::BTN_GROUP_NEW, rcBtnAddGrp };
+                int idxAddGrp = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccAddGrp);
+                DrawModernButton(hmemDC, rcBtnAddGrp, L"Add Group", pState->hoveredControlIdx == idxAddGrp, pState->pressedControlIdx == idxAddGrp, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
 
-            curRight -= (expandAllW + 6);
-            RECT rcBtnColAll = { curRight - collapseAllW, btnY, curRight, btnY + btnH };
-            ClickableControl ccColAll = { ClickableControl::BTN_GROUP_COLLAPSE_ALL, rcBtnColAll };
-            int idxColAll = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccColAll);
-            DrawModernButton(hmemDC, rcBtnColAll, (w < 880) ? L"Collapse" : L"Collapse All", pState->hoveredControlIdx == idxColAll, pState->pressedControlIdx == idxColAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
+                curRight -= (addGroupW + 6);
+                int expColW = (w < 880) ? 76 : 88;
+                RECT rcBtnExpAll = { curRight - expColW, btnY, curRight, btnY + btnH };
+                ClickableControl ccExpAll = { ClickableControl::BTN_GROUP_EXPAND_ALL, rcBtnExpAll };
+                int idxExpAll = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccExpAll);
+                DrawModernButton(hmemDC, rcBtnExpAll, (w < 880) ? L"Expand" : L"Expand All", pState->hoveredControlIdx == idxExpAll, pState->pressedControlIdx == idxExpAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
 
-            int maxTitleRight = curRight - 12;
+                curRight -= (expColW + 6);
+                RECT rcBtnColAll = { curRight - expColW, btnY, curRight, btnY + btnH };
+                ClickableControl ccColAll = { ClickableControl::BTN_GROUP_COLLAPSE_ALL, rcBtnColAll };
+                int idxColAll = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccColAll);
+                DrawModernButton(hmemDC, rcBtnColAll, (w < 880) ? L"Collapse" : L"Collapse All", pState->hoveredControlIdx == idxColAll, pState->pressedControlIdx == idxColAll, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
+
+                // Empty Category button
+                int emptyCatW = (w < 880) ? 96 : 112;
+                RECT rcBtnEmpCat = { curRight - emptyCatW, btnY, curRight, btnY + btnH };
+                ClickableControl ccEmpCat = { ClickableControl::BTN_GROUP_EMPTY_ACTIVE_CATEGORY, rcBtnEmpCat };
+                int idxEmpCat = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccEmpCat);
+                DrawModernButton(hmemDC, rcBtnEmpCat, L"Empty Category", pState->hoveredControlIdx == idxEmpCat, pState->pressedControlIdx == idxEmpCat, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE75C");
+                curRight -= (emptyCatW + 6);
+            }
+            else
+            {
+                int addCatW = 146;
+                RECT rcBtnAddCat = { curRight - addCatW, btnY, curRight, btnY + btnH };
+                ClickableControl ccAddCat = { ClickableControl::BTN_GROUP_CATEGORY_ADD, rcBtnAddCat };
+                int idxAddCat = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccAddCat);
+                DrawModernButton(hmemDC, rcBtnAddCat, L"Add Category", pState->hoveredControlIdx == idxAddCat, pState->pressedControlIdx == idxAddCat, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
+                curRight -= (addCatW + 6);
+            }
+
+            int maxTitleRight = curRight - 16;
 
             // Left: Icon + Title + Subtitle
             SelectObject(hmemDC, pState->hFontIcon);
@@ -1571,28 +2006,123 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             SelectObject(hmemDC, pState->hFontMainBold);
             SetTextColor(hmemDC, textPrimary);
             RECT rcTitle = { 46, toolbarY + 5, maxTitleRight, toolbarY + 24 };
-            DrawTextW(hmemDC, L"Unit Replacement Batches / Palettes", -1, &rcTitle, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            DrawTextW(hmemDC, L"Favourite Unit Groups / Palettes", -1, &rcTitle, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             SelectObject(hmemDC, pState->hFontSmall);
             SetTextColor(hmemDC, textSecondary);
             RECT rcSub = { 46, toolbarY + 24, maxTitleRight, toolbarY + 42 };
-            DrawTextW(hmemDC, L"Curated stock groups for instant right-click unit replacement in Consist Editor", -1, &rcSub, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            DrawTextW(hmemDC, L"Curated stock groups organized by category for instant consist replacement & injection", -1, &rcSub, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-            // 2. Scrollable Content Area: Group Cards
-            int contentY = toolbarY + toolbarH + 1;
+            // -----------------------------------------------------------------
+            // 2. Category Filter Ribbon (Y = 112 to 150, Height = 38px)
+            // -----------------------------------------------------------------
+            int catRibbonY = toolbarY + toolbarH + 1;
+            int catRibbonH = 38;
+            RECT rcCatRibbon = { 0, catRibbonY, w, catRibbonY + catRibbonH };
+            HBRUSH hbrCat = CreateSolidBrush(RGB(24, 24, 28));
+            FillRect(hmemDC, &rcCatRibbon, hbrCat);
+            DeleteObject(hbrCat);
+
+            HPEN hPenCatDiv = CreatePen(PS_SOLID, 1, RGB(42, 42, 46));
+            SelectObject(hmemDC, hPenCatDiv);
+            MoveToEx(hmemDC, 0, catRibbonY + catRibbonH - 1, NULL);
+            LineTo(hmemDC, w, catRibbonY + catRibbonH - 1);
+            DeleteObject(hPenCatDiv);
+
+            int pillX = 20;
+            int pillY = catRibbonY + 6;
+            int pillH = 24;
+
+            // Individual Category Pills
+            for (const auto& catName : allCategories)
+            {
+                int catCount = 0;
+                for (const auto& grp : PoolManager::g_ReplacementGroupsCache)
+                {
+                    if (_wcsicmp(grp.category.c_str(), catName.c_str()) == 0) catCount++;
+                }
+
+                std::wstring catPillText = catName + L" (" + std::to_wstring(catCount) + L")";
+                SelectObject(hmemDC, pState->hFontSmall);
+                SIZE catSz = { 0 };
+                GetTextExtentPoint32W(hmemDC, catPillText.c_str(), (int)catPillText.length(), &catSz);
+                int catPillW = catSz.cx + 20;
+                if (pillX + catPillW > w - 130) break; // Leave room for + Category button
+
+                bool isCatActive = (_wcsicmp(pState->selectedCategoryFilter.c_str(), catName.c_str()) == 0);
+                RECT rcCatPill = { pillX, pillY, pillX + catPillW, pillY + pillH };
+
+                ClickableControl ccCatPill = { ClickableControl::BTN_GROUP_CATEGORY_PILL, rcCatPill, -1, -1, catName };
+                int idxCatPill = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccCatPill);
+                DrawModernButton(hmemDC, rcCatPill, catPillText.c_str(), pState->hoveredControlIdx == idxCatPill, pState->pressedControlIdx == idxCatPill, isCatActive, isCatActive ? pState->hFontMainBold : pState->hFontSmall);
+                pillX += catPillW + 4;
+
+                // For active categories, render a small inline [✕] delete button
+                if (isCatActive)
+                {
+                    RECT rcDelCat = { pillX, pillY, pillX + 22, pillY + pillH };
+                    ClickableControl ccDelCat = { ClickableControl::BTN_GROUP_CATEGORY_DEL, rcDelCat, -1, -1, catName };
+                    int idxDelCat = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccDelCat);
+                    DrawModernButton(hmemDC, rcDelCat, L"✕", pState->hoveredControlIdx == idxDelCat, pState->pressedControlIdx == idxDelCat, false, pState->hFontBadge);
+                    pillX += 26;
+                }
+                else
+                {
+                    pillX += 4;
+                }
+            }
+
+            // [+ Add Category] Button at the end of ribbon (only shown when categories exist)
+            if (!allCategories.empty())
+            {
+                std::wstring addCatText = L"Add Category";
+                SelectObject(hmemDC, pState->hFontSmall);
+                SIZE addCatSz = { 0 };
+                GetTextExtentPoint32W(hmemDC, addCatText.c_str(), (int)addCatText.length(), &addCatSz);
+                int addCatW = addCatSz.cx + 28;
+                if (pillX + addCatW <= w - 20)
+                {
+                    RECT rcAddCat = { pillX, pillY, pillX + addCatW, pillY + pillH };
+                    ClickableControl ccAddCat = { ClickableControl::BTN_GROUP_CATEGORY_ADD, rcAddCat };
+                    int idxAddCat = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccAddCat);
+                    DrawModernButton(hmemDC, rcAddCat, addCatText.c_str(), pState->hoveredControlIdx == idxAddCat, pState->pressedControlIdx == idxAddCat, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE710");
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // 3. Scrollable Content Area: Group Cards
+            // -----------------------------------------------------------------
+            int contentY = catRibbonY + catRibbonH + 1;
             int footerH = 56;
             int contentH = h - footerH - contentY;
             RECT rcContentClip = { 0, contentY, w - 1, contentY + contentH };
 
-            int totalContentH = 8;
-            if (!PoolManager::g_ReplacementGroupsCache.empty())
+            // Determine visible group indices based on active category filter
+            std::vector<size_t> visibleGroupIndices;
+            if (!pState->selectedCategoryFilter.empty())
             {
                 for (size_t g = 0; g < PoolManager::g_ReplacementGroupsCache.size(); ++g)
                 {
                     const auto& grp = PoolManager::g_ReplacementGroupsCache[g];
+                    if (_wcsicmp(grp.category.c_str(), pState->selectedCategoryFilter.c_str()) == 0)
+                    {
+                        visibleGroupIndices.push_back(g);
+                    }
+                }
+            }
+
+            int totalContentH = 8;
+            if (!visibleGroupIndices.empty())
+            {
+                for (size_t gIdx : visibleGroupIndices)
+                {
+                    const auto& grp = PoolManager::g_ReplacementGroupsCache[gIdx];
                     int unitCount = (int)grp.units.size();
                     int unitsAreaH = (unitCount == 0) ? 42 : (28 + ((unitCount + 1) / 2) * 28 + 10);
-                    int cardH = grp.isCollapsed ? 34 : (46 + unitsAreaH + 16);
+                    int cardH = grp.isCollapsed ? 34 : (46 + unitsAreaH + 40);
                     totalContentH += cardH + 14;
                 }
             }
@@ -1614,9 +2144,9 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             int cardMargin = 20;
             int cardW = w - (cardMargin * 2) - 14;
 
-            if (PoolManager::g_ReplacementGroupsCache.empty())
+            if (allCategories.empty())
             {
-                // Sleek Empty State Card
+                // Sleek Initial Empty State Card: No categories yet
                 RECT rcEmpty = { cardMargin + 40, contentY + 40, cardMargin + cardW - 40, contentY + 220 };
                 HBRUSH hbrEmpty = CreateSolidBrush(RGB(24, 24, 24));
                 HPEN hpenEmpty = CreatePen(PS_SOLID, 1, RGB(42, 42, 42));
@@ -1634,30 +2164,65 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                 SelectObject(hmemDC, pState->hFontTitle);
                 SetTextColor(hmemDC, RGB(255, 255, 255));
                 RECT rcETitle = { rcEmpty.left + 20, rcEmpty.top + 60, rcEmpty.right - 20, rcEmpty.top + 86 };
-                DrawTextW(hmemDC, L"No Unit Replacement Groups Defined", -1, &rcETitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(hmemDC, L"No Categories Created Yet", -1, &rcETitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                 SelectObject(hmemDC, pState->hFontSmall);
                 SetTextColor(hmemDC, RGB(160, 160, 160));
                 RECT rcEDesc = { rcEmpty.left + 30, rcEmpty.top + 90, rcEmpty.right - 30, rcEmpty.top + 130 };
-                DrawTextW(hmemDC, L"Create favorite batches or palettes (e.g. 'WAP-7 Locomotives', 'LHB AC Coaches') to replace selected consist units with a single right-click.", -1, &rcEDesc, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+                DrawTextW(hmemDC, L"Create a category first (e.g. 'Electric Locomotives', 'Passenger Coaches', 'Freight Wagons') to begin organizing your favourite unit groups.", -1, &rcEDesc, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
 
-                RECT rcEBtn = { (rcEmpty.left + rcEmpty.right) / 2 - 100, rcEmpty.top + 138, (rcEmpty.left + rcEmpty.right) / 2 + 100, rcEmpty.top + 170 };
+                RECT rcEBtn = { (rcEmpty.left + rcEmpty.right) / 2 - 110, rcEmpty.top + 138, (rcEmpty.left + rcEmpty.right) / 2 + 110, rcEmpty.top + 170 };
+                ClickableControl ccEAdd = { ClickableControl::BTN_GROUP_CATEGORY_ADD, rcEBtn };
+                int idxEAdd = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccEAdd);
+                DrawModernButton(hmemDC, rcEBtn, L"Create Category", pState->hoveredControlIdx == idxEAdd, pState->pressedControlIdx == idxEAdd, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
+            }
+            else if (visibleGroupIndices.empty())
+            {
+                // Sleek Empty State Card for current category
+                RECT rcEmpty = { cardMargin + 40, contentY + 40, cardMargin + cardW - 40, contentY + 220 };
+                HBRUSH hbrEmpty = CreateSolidBrush(RGB(24, 24, 24));
+                HPEN hpenEmpty = CreatePen(PS_SOLID, 1, RGB(42, 42, 42));
+                SelectObject(hmemDC, hbrEmpty);
+                SelectObject(hmemDC, hpenEmpty);
+                RoundRect(hmemDC, rcEmpty.left, rcEmpty.top, rcEmpty.right, rcEmpty.bottom, 12, 12);
+                DeleteObject(hbrEmpty);
+                DeleteObject(hpenEmpty);
+
+                SelectObject(hmemDC, pState->hFontIcon);
+                SetTextColor(hmemDC, RGB(100, 180, 255));
+                RECT rcEIcon = { rcEmpty.left, rcEmpty.top + 24, rcEmpty.right, rcEmpty.top + 56 };
+                DrawTextW(hmemDC, L"\xE8D7", -1, &rcEIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                SelectObject(hmemDC, pState->hFontTitle);
+                SetTextColor(hmemDC, RGB(255, 255, 255));
+                RECT rcETitle = { rcEmpty.left + 20, rcEmpty.top + 60, rcEmpty.right - 20, rcEmpty.top + 86 };
+                std::wstring emptyTitle = L"Category '" + pState->selectedCategoryFilter + L"' is Empty";
+                DrawTextW(hmemDC, emptyTitle.c_str(), -1, &rcETitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                SelectObject(hmemDC, pState->hFontSmall);
+                SetTextColor(hmemDC, RGB(160, 160, 160));
+                RECT rcEDesc = { rcEmpty.left + 30, rcEmpty.top + 90, rcEmpty.right - 30, rcEmpty.top + 130 };
+                DrawTextW(hmemDC, L"Drag and drop rolling stock units from the Stock Library, or click below to add a new favourite unit group in this category.", -1, &rcEDesc, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+
+                std::wstring addBtnLabel = L"Add Group in " + pState->selectedCategoryFilter;
+                RECT rcEBtn = { (rcEmpty.left + rcEmpty.right) / 2 - 120, rcEmpty.top + 138, (rcEmpty.left + rcEmpty.right) / 2 + 120, rcEmpty.top + 170 };
                 ClickableControl ccEAdd = { ClickableControl::BTN_GROUP_NEW, rcEBtn };
                 int idxEAdd = (int)pState->clickControls.size();
                 pState->clickControls.push_back(ccEAdd);
-                DrawModernButton(hmemDC, rcEBtn, L"Add First Group", pState->hoveredControlIdx == idxEAdd, pState->pressedControlIdx == idxEAdd, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
+                DrawModernButton(hmemDC, rcEBtn, addBtnLabel.c_str(), pState->hoveredControlIdx == idxEAdd, pState->pressedControlIdx == idxEAdd, true, pState->hFontMainBold, pState->hFontIconSmall, L"\xE710");
             }
             else
             {
-                for (size_t g = 0; g < PoolManager::g_ReplacementGroupsCache.size(); ++g)
+                for (size_t g : visibleGroupIndices)
                 {
                     const auto& grp = PoolManager::g_ReplacementGroupsCache[g];
                     int unitCount = (int)grp.units.size();
                     int unitsAreaH = (unitCount == 0) ? 42 : (28 + ((unitCount + 1) / 2) * 28 + 10);
-                    int cardH = grp.isCollapsed ? 34 : (46 + unitsAreaH + 16);
+                    int cardH = grp.isCollapsed ? 34 : (46 + unitsAreaH + 40);
                     RECT rcCard = { cardMargin, cardY, cardMargin + cardW, cardY + cardH };
 
-                    bool isHoverGroup = (pState->dragOverGroupIdx == (int)g);
+                    bool isHoverGroup = (pState->dragOverGroupIdx == (int)g || (pState->isUnitDragging && pState->unitDropTargetPoolOrGrp == (int)g));
                     COLORREF cBg = isHoverGroup ? RGB(32, 40, 52) : PoolTheme::CardBackground;
                     COLORREF cBorder = isHoverGroup ? accentCol : PoolTheme::CardBorder;
 
@@ -1685,49 +2250,145 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     pState->clickControls.push_back(ccColToggle);
                     DrawModernButton(hmemDC, rcChevronBtn, L"", pState->hoveredControlIdx == idxCol, pState->pressedControlIdx == idxCol, false, pState->hFontSmall, pState->hFontIconSmall, grp.isCollapsed ? L"__TRI_DOWN__" : L"__TRI_UP__");
 
-                    // Group Name & Unit Count Badge
-                    RECT rcGroupTitle = { rcCard.left + 36, rcCard.top, rcCard.right - 302, rcCard.top + 34 };
-                    std::wstring titleText = grp.name + L"  (" + std::to_wstring(unitCount) + (unitCount == 1 ? L" unit)" : L" units)");
-                    SelectObject(hmemDC, pState->hFontMainBold);
-                    SetTextColor(hmemDC, textPrimary);
-                    DrawTextW(hmemDC, titleText.c_str(), -1, &rcGroupTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                    // Header right buttons: [📋 Paste], [🗑️ Clear], [Rename], [Delete]
+                    // Header right buttons: [Rename], [Clone], [▲ Up], [▼ Down], [🗑️ Delete]
                     int hBtnR = rcCard.right - 8;
                     int hBtnY = rcCard.top + 5;
                     int hBtnH = 24;
 
-                    hBtnR -= 32;
-                    RECT rcBtnGDel = { hBtnR, hBtnY, hBtnR + 28, hBtnY + hBtnH };
+                    hBtnR -= 30;
+                    RECT rcBtnGDel = { hBtnR, hBtnY, hBtnR + 26, hBtnY + hBtnH };
                     ClickableControl ccGDel = { ClickableControl::BTN_GROUP_DELETE, rcBtnGDel, (int)g, -1 };
                     int idxGDel = (int)pState->clickControls.size();
                     pState->clickControls.push_back(ccGDel);
                     DrawModernButton(hmemDC, rcBtnGDel, L"", pState->hoveredControlIdx == idxGDel, pState->pressedControlIdx == idxGDel, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE74D");
 
-                    hBtnR -= 80;
-                    RECT rcBtnGRename = { hBtnR, hBtnY, hBtnR + 76, hBtnY + hBtnH };
+                    hBtnR -= 28;
+                    RECT rcBtnGDn = { hBtnR, hBtnY, hBtnR + 24, hBtnY + hBtnH };
+                    ClickableControl ccGDn = { ClickableControl::BTN_GROUP_DOWN, rcBtnGDn, (int)g, -1 };
+                    int idxGDn = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccGDn);
+                    DrawModernButton(hmemDC, rcBtnGDn, L"", pState->hoveredControlIdx == idxGDn, pState->pressedControlIdx == idxGDn, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
+
+                    hBtnR -= 28;
+                    RECT rcBtnGUp = { hBtnR, hBtnY, hBtnR + 24, hBtnY + hBtnH };
+                    ClickableControl ccGUp = { ClickableControl::BTN_GROUP_UP, rcBtnGUp, (int)g, -1 };
+                    int idxGUp = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccGUp);
+                    DrawModernButton(hmemDC, rcBtnGUp, L"", pState->hoveredControlIdx == idxGUp, pState->pressedControlIdx == idxGUp, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
+
+                    hBtnR -= 64;
+                    RECT rcBtnGClone = { hBtnR, hBtnY, hBtnR + 60, hBtnY + hBtnH };
+                    ClickableControl ccGClone = { ClickableControl::BTN_GROUP_CLONE, rcBtnGClone, (int)g, -1 };
+                    int idxGClone = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccGClone);
+                    DrawModernButton(hmemDC, rcBtnGClone, L"Clone", pState->hoveredControlIdx == idxGClone, pState->pressedControlIdx == idxGClone, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE8C8");
+
+                    hBtnR -= 74;
+                    RECT rcBtnGRename = { hBtnR, hBtnY, hBtnR + 70, hBtnY + hBtnH };
                     ClickableControl ccGRename = { ClickableControl::BTN_GROUP_RENAME, rcBtnGRename, (int)g, -1 };
                     int idxGRename = (int)pState->clickControls.size();
                     pState->clickControls.push_back(ccGRename);
                     DrawModernButton(hmemDC, rcBtnGRename, L"Rename", pState->hoveredControlIdx == idxGRename, pState->pressedControlIdx == idxGRename, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE70F");
 
-                    hBtnR -= 76;
-                    RECT rcBtnGClear = { hBtnR, hBtnY, hBtnR + 72, hBtnY + hBtnH };
-                    ClickableControl ccGClear = { ClickableControl::BTN_GROUP_CLEAR_UNITS, rcBtnGClear, (int)g, -1 };
-                    int idxGClear = (int)pState->clickControls.size();
-                    pState->clickControls.push_back(ccGClear);
-                    DrawModernButton(hmemDC, rcBtnGClear, L"Clear", pState->hoveredControlIdx == idxGClear, pState->pressedControlIdx == idxGClear, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE75C");
+                    // Available area on the left of action buttons
+                    int maxLeftContentR = hBtnR - 8;
+                    int titleLeft = rcCard.left + 36;
 
-                    hBtnR -= 100;
-                    RECT rcBtnGPaste = { hBtnR, hBtnY, hBtnR + 96, hBtnY + hBtnH };
-                    ClickableControl ccGPaste = { ClickableControl::BTN_GROUP_PASTE_CLIPBOARD, rcBtnGPaste, (int)g, -1 };
-                    int idxGPaste = (int)pState->clickControls.size();
-                    pState->clickControls.push_back(ccGPaste);
-                    DrawModernButton(hmemDC, rcBtnGPaste, L"Paste Units", pState->hoveredControlIdx == idxGPaste, pState->pressedControlIdx == idxGPaste, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE77F");
+                    // Measure Unit Count string
+                    std::wstring cntText = L"(" + std::to_wstring(unitCount) + (unitCount == 1 ? L" unit)" : L" units)");
+                    SelectObject(hmemDC, pState->hFontSmall);
+                    SIZE cntSz = { 0 };
+                    GetTextExtentPoint32W(hmemDC, cntText.c_str(), (int)cntText.length(), &cntSz);
+                    int cntW = cntSz.cx;
+
+                    // Measure Category Badge
+                    std::wstring catDisplay = grp.category.empty() ? L"General" : grp.category;
+                    std::wstring catBadgeText = L"🏷️ " + catDisplay;
+                    SelectObject(hmemDC, pState->hFontBadge);
+                    SIZE catBadgeSz = { 0 };
+                    GetTextExtentPoint32W(hmemDC, catBadgeText.c_str(), (int)catBadgeText.length(), &catBadgeSz);
+                    int catBadgeW = catBadgeSz.cx + 14;
+
+                    // Mode & Flip sizes
+                    int modeW = 72;
+                    int flipW = 66;
+
+                    const wchar_t* modeStr = (grp.pickMode == PoolManager::PoolPickMode::Random) ? L"Random" : L"Order";
+                    const wchar_t* modeGlyph = (grp.pickMode == PoolManager::PoolPickMode::Random) ? L"\xE8B9" : L"\xE8D7";
+
+                    const wchar_t* flipText = L"Fwd";
+                    const wchar_t* flipGlyph = L"\xE76C";
+                    if (grp.flipPolicy == PoolManager::PoolFlipPolicy::AllowRandom) { flipText = L"Rnd"; flipGlyph = L"\xE8B9"; }
+                    else if (grp.flipPolicy == PoolManager::PoolFlipPolicy::AlwaysFlipped) { flipText = L"Rev"; flipGlyph = L"\xE76B"; }
+
+                    // Measure Title
+                    std::wstring titleText = grp.name;
+                    SelectObject(hmemDC, pState->hFontMainBold);
+                    SIZE tSz = { 0 };
+                    GetTextExtentPoint32W(hmemDC, titleText.c_str(), (int)titleText.length(), &tSz);
+
+                    int totalPillsW = (cntW + 8) + (catBadgeW + 6) + (modeW + 6) + flipW;
+                    int availW = maxLeftContentR - titleLeft;
+                    int maxAllowedTitleW = availW - totalPillsW;
+                    if (maxAllowedTitleW < 60) maxAllowedTitleW = (availW > 120 ? (availW / 2) : 60);
+
+                    int titleW = (std::min)((int)tSz.cx, maxAllowedTitleW);
+                    if (titleW < 40) titleW = 40;
+
+                    int curX = titleLeft;
+
+                    // 1. Group Title
+                    RECT rcGroupTitle = { curX, rcCard.top, curX + titleW, rcCard.top + 34 };
+                    SetTextColor(hmemDC, textPrimary);
+                    DrawTextW(hmemDC, titleText.c_str(), -1, &rcGroupTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                    curX += titleW + 8;
+
+                    // 2. Unit Count
+                    if (curX + cntW <= maxLeftContentR)
+                    {
+                        RECT rcCntBadge = { curX, rcCard.top, curX + cntW, rcCard.top + 34 };
+                        SelectObject(hmemDC, pState->hFontSmall);
+                        SetTextColor(hmemDC, textSecondary);
+                        DrawTextW(hmemDC, cntText.c_str(), -1, &rcCntBadge, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        curX += cntW + 8;
+                    }
+
+                    // 3. Category Badge (Clickable to change category)
+                    if (curX + catBadgeW <= maxLeftContentR)
+                    {
+                        RECT rcCatBadge = { curX, rcCard.top + 5, curX + catBadgeW, rcCard.top + 29 };
+                        ClickableControl ccCatEdit = { ClickableControl::BTN_GROUP_CATEGORY_EDIT, rcCatBadge, (int)g, -1 };
+                        int idxCatEdit = (int)pState->clickControls.size();
+                        pState->clickControls.push_back(ccCatEdit);
+                        DrawModernButton(hmemDC, rcCatBadge, catBadgeText.c_str(), pState->hoveredControlIdx == idxCatEdit, pState->pressedControlIdx == idxCatEdit, false, pState->hFontBadge);
+                        curX += catBadgeW + 6;
+                    }
+
+                    // 4. Pick Mode Button [Random / Order]
+                    if (curX + modeW <= maxLeftContentR)
+                    {
+                        RECT rcMode = { curX, rcCard.top + 5, curX + modeW, rcCard.top + 29 };
+                        ClickableControl ccMode = { ClickableControl::BTN_GROUP_CYCLE_MODE, rcMode, (int)g, -1 };
+                        int idxMode = (int)pState->clickControls.size();
+                        pState->clickControls.push_back(ccMode);
+                        DrawModernButton(hmemDC, rcMode, modeStr, pState->hoveredControlIdx == idxMode, pState->pressedControlIdx == idxMode, false, pState->hFontSmall, pState->hFontIconSmall, modeGlyph);
+                        curX += modeW + 6;
+                    }
+
+                    // 5. Flip Policy Button [Fwd / Rev / Rnd]
+                    if (curX + flipW <= maxLeftContentR)
+                    {
+                        RECT rcFlip = { curX, rcCard.top + 5, curX + flipW, rcCard.top + 29 };
+                        ClickableControl ccFlip = { ClickableControl::BTN_GROUP_CYCLE_FLIP, rcFlip, (int)g, -1 };
+                        int idxFlip = (int)pState->clickControls.size();
+                        pState->clickControls.push_back(ccFlip);
+                        DrawModernButton(hmemDC, rcFlip, flipText, pState->hoveredControlIdx == idxFlip, pState->pressedControlIdx == idxFlip, false, pState->hFontSmall, pState->hFontIconSmall, flipGlyph);
+                        curX += flipW + 6;
+                    }
 
                     if (!grp.isCollapsed)
                     {
-                        // Units Area Box (Simple & Rule-Free)
+                        // Units Area Box
                         int boxY = rcCard.top + 38;
                         RECT rcUnitsBox = { rcCard.left + 14, boxY, rcCard.right - 14, boxY + unitsAreaH };
 
@@ -1748,30 +2409,42 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                         {
                             SelectObject(hmemDC, pState->hFontSmall);
                             SetTextColor(hmemDC, PoolTheme::TextMuted);
-                            DrawTextW(hmemDC, L"Drag and drop rolling stock units here from Stock Library, or click [📋 Paste Units]", -1, &rcUnitsBox, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                            DrawTextW(hmemDC, L"Drag and drop rolling stock units here from Stock Library or click Paste below", -1, &rcUnitsBox, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
                         }
                         else
                         {
-                            int chipColW = (rcUnitsBox.right - rcUnitsBox.left - 24) / 2;
+                            int colTotalW = (rcUnitsBox.right - rcUnitsBox.left - 24) / 2;
                             int chipH = 24;
+                            int numW = 20;
                             for (int u = 0; u < unitCount; ++u)
                             {
                                 const auto& unit = grp.units[u];
                                 int col = u % 2;
                                 int row = u / 2;
-                                int chipX = rcUnitsBox.left + 8 + col * (chipColW + 8);
+                                int colX = rcUnitsBox.left + 8 + col * (colTotalW + 8);
                                 int chipY = rcUnitsBox.top + 8 + row * (chipH + 4);
-                                RECT rcChip = { chipX, chipY, chipX + chipColW, chipY + chipH };
+
+                                // Number label outside card towards left
+                                RECT rcNum = { colX, chipY, colX + numW - 4, chipY + chipH };
+                                SelectObject(hmemDC, pState->hFontBadge);
+                                SetTextColor(hmemDC, RGB(255, 255, 255));
+                                std::wstring numStr = std::to_wstring(u + 1) + L".";
+                                DrawTextW(hmemDC, numStr.c_str(), -1, &rcNum, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                                int chipX = colX + numW;
+                                int chipW = colTotalW - numW;
+                                RECT rcChip = { chipX, chipY, chipX + chipW, chipY + chipH };
 
                                 WizardDlgState::GroupUnitChipHit guch;
                                 guch.groupIdx = (int)g;
                                 guch.unitIdx = u;
-                                guch.rcChip = rcChip;
+                                guch.rcChip = { colX, chipY, chipX + chipW, chipY + chipH };
                                 pState->groupUnitChipHits.push_back(guch);
 
                                 bool isSel = (pState->selectedGroupIdx == (int)g && pState->selectedGroupUnitIndices.count(u) > 0);
-                                COLORREF chipBg = isSel ? RGB(0, 90, 160) : PoolTheme::ChipBackground;
-                                COLORREF chipBdr = isSel ? RGB(0, 160, 255) : PoolTheme::ChipBorder;
+                                bool isMissing = unit.szFolder.empty();
+                                COLORREF chipBg = isSel ? RGB(0, 90, 160) : (isMissing ? RGB(55, 20, 20) : PoolTheme::ChipBackground);
+                                COLORREF chipBdr = isSel ? RGB(0, 160, 255) : (isMissing ? RGB(200, 50, 50) : PoolTheme::ChipBorder);
 
                                 HBRUSH hbrChip = CreateSolidBrush(chipBg);
                                 HPEN hpenChip = CreatePen(PS_SOLID, 1, chipBdr);
@@ -1783,15 +2456,25 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
                                 // Unit Icon
                                 SelectObject(hmemDC, pState->hFontIconSmall);
-                                SetTextColor(hmemDC, isSel ? RGB(255, 255, 255) : (unit.isEngine ? RGB(96, 205, 255) : RGB(220, 180, 100)));
-                                RECT rcUIcon = { rcChip.left + 6, rcChip.top, rcChip.left + 22, rcChip.bottom };
-                                DrawTextW(hmemDC, unit.isEngine ? L"\xE7C0" : L"\xE707", -1, &rcUIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                                if (isMissing && !isSel)
+                                {
+                                    SetTextColor(hmemDC, RGB(255, 90, 90));
+                                    RECT rcUIcon = { rcChip.left + 6, rcChip.top, rcChip.left + 22, rcChip.bottom };
+                                    DrawTextW(hmemDC, L"\xE7BA", -1, &rcUIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                                }
+                                else
+                                {
+                                    SetTextColor(hmemDC, isSel ? RGB(255, 255, 255) : (unit.isEngine ? RGB(96, 205, 255) : RGB(220, 180, 100)));
+                                    RECT rcUIcon = { rcChip.left + 6, rcChip.top, rcChip.left + 22, rcChip.bottom };
+                                    DrawTextW(hmemDC, unit.isEngine ? L"\xE7C0" : L"\xE707", -1, &rcUIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                                }
 
                                 // Unit Name & folder
                                 SelectObject(hmemDC, pState->hFontSmall);
-                                SetTextColor(hmemDC, RGB(245, 245, 245));
+                                SetTextColor(hmemDC, (isMissing && !isSel) ? RGB(255, 120, 120) : RGB(245, 245, 245));
+                                std::wstring uDisplayName = isMissing ? (unit.szFileName + L" (Missing)") : unit.szFileName;
                                 RECT rcUName = { rcChip.left + 24, rcChip.top, rcChip.right - 80, rcChip.bottom };
-                                DrawTextW(hmemDC, unit.szFileName.c_str(), -1, &rcUName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                                DrawTextW(hmemDC, uDisplayName.c_str(), -1, &rcUName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
                                 // Unit Flip Mode Pill
                                 RECT rcFlipPill = { rcChip.right - 76, rcChip.top + 2, rcChip.right - 24, rcChip.bottom - 2 };
@@ -1812,16 +2495,45 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                                 DrawModernButton(hmemDC, rcRem, L"✕", pState->hoveredControlIdx == idxRem, pState->pressedControlIdx == idxRem, false, pState->hFontBadge);
                             }
                         }
+
+                        // Group Action Toolbar (Below Units Box - Full parity with Pool Card)
+                        int actY = boxY + unitsAreaH + 6;
+                        int actX = rcCard.left + 14;
+
+                        RECT rcPaste = { actX, actY, actX + 110, actY + 24 };
+                        ClickableControl ccPaste = { ClickableControl::BTN_GROUP_PASTE_CLIPBOARD, rcPaste, (int)g, -1 };
+                        int idxPaste = (int)pState->clickControls.size();
+                        pState->clickControls.push_back(ccPaste);
+                        DrawModernButton(hmemDC, rcPaste, L"Paste Units", pState->hoveredControlIdx == idxPaste, pState->pressedControlIdx == idxPaste, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE77F");
+
+                        actX += 116;
+                        RECT rcCopyAll = { actX, actY, actX + 90, actY + 24 };
+                        ClickableControl ccCopyAll = { ClickableControl::BTN_GROUP_COPY_UNITS, rcCopyAll, (int)g, -1 };
+                        int idxCopyAll = (int)pState->clickControls.size();
+                        pState->clickControls.push_back(ccCopyAll);
+                        DrawModernButton(hmemDC, rcCopyAll, L"Copy All", pState->hoveredControlIdx == idxCopyAll, pState->pressedControlIdx == idxCopyAll, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE8C8");
+
+                        actX += 96;
+                        RECT rcClear = { actX, actY, actX + 88, actY + 24 };
+                        ClickableControl ccClear = { ClickableControl::BTN_GROUP_CLEAR_UNITS, rcClear, (int)g, -1 };
+                        int idxClear = (int)pState->clickControls.size();
+                        pState->clickControls.push_back(ccClear);
+                        DrawModernButton(hmemDC, rcClear, L"Clear All", pState->hoveredControlIdx == idxClear, pState->pressedControlIdx == idxClear, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE75C");
                     }
 
                     cardY += cardH + 14;
                 }
             }
 
+            if (pState->isUnitDragging && pState->unitDropTargetPoolOrGrp >= 0)
+            {
+                DrawSolidYellowDropIndicator(hmemDC, pState->rcDropIndicator);
+            }
+
             SelectClipRgn(hmemDC, NULL);
             DeleteObject(hRgnClip);
 
-            // 3. Tab 1 Footer Bar (Y = h - footerH to h)
+            // 4. Tab 1 Footer Bar (Y = h - footerH to h)
             RECT rcFooter = { 0, h - footerH, w, h };
             HBRUSH hbrFoot = CreateSolidBrush(PoolTheme::FooterBackground);
             FillRect(hmemDC, &rcFooter, hbrFoot);
@@ -1842,7 +2554,7 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             SelectObject(hmemDC, pState->hFontSmall);
             SetTextColor(hmemDC, textSecondary);
             RECT rcTipText = { 46, h - footerH, w - 130, h };
-            DrawTextW(hmemDC, L"Tip: Right-click any selected unit(s) in Consist Editor to swap with these replacement groups directly.", -1, &rcTipText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(hmemDC, L"Tip: Right-click any consist unit(s) to swap with these categorized groups instantly.", -1, &rcTipText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
             // Right: [Close] button
             RECT rcClose = { w - 110, h - footerH + 11, w - 20, h - 13 };
@@ -1873,6 +2585,243 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         {
             pState->scrollY = pState->m_vScroll.GetPos();
             InvalidateRect(hWnd, NULL, FALSE);
+            return 0;
+        }
+
+        // 1. Check if potential unit drag crossed the 4px threshold
+        if (pState->isPotentialUnitDrag && !pState->isUnitDragging)
+        {
+            if (abs(pt.x - pState->ptUnitDragStart.x) > 4 || abs(pt.y - pState->ptUnitDragStart.y) > 4)
+            {
+                pState->isUnitDragging = true;
+                SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+
+                std::vector<DragGhostItem> ghostItems;
+                if (pState->activeTab == 0)
+                {
+                    PoolManager::PoolPreset* pPreset = PoolManager::GetActivePreset();
+                    if (pPreset && pState->unitDragSourcePoolOrGrp >= 0 && pState->unitDragSourcePoolOrGrp < (int)pPreset->pools.size())
+                    {
+                        const auto& pool = pPreset->pools[pState->unitDragSourcePoolOrGrp];
+                        std::vector<int> sorted = pState->unitDragIndices;
+                        std::sort(sorted.begin(), sorted.end());
+                        for (int u : sorted)
+                        {
+                            if (u >= 0 && u < (int)pool.units.size())
+                            {
+                                DragGhostItem item;
+                                item.name = pool.units[u].szFileName;
+                                item.isEngine = pool.units[u].isEngine;
+                                item.subtitle = pool.units[u].szFolder;
+                                ghostItems.push_back(item);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    if (pState->unitDragSourcePoolOrGrp >= 0 && pState->unitDragSourcePoolOrGrp < (int)PoolManager::g_ReplacementGroupsCache.size())
+                    {
+                        const auto& grp = PoolManager::g_ReplacementGroupsCache[pState->unitDragSourcePoolOrGrp];
+                        std::vector<int> sorted = pState->unitDragIndices;
+                        std::sort(sorted.begin(), sorted.end());
+                        for (int u : sorted)
+                        {
+                            if (u >= 0 && u < (int)grp.units.size())
+                            {
+                                DragGhostItem item;
+                                item.name = grp.units[u].szFileName;
+                                item.isEngine = grp.units[u].isEngine;
+                                item.subtitle = grp.units[u].szFolder;
+                                ghostItems.push_back(item);
+                            }
+                        }
+                    }
+                }
+
+                POINT ptScreen = pt;
+                ClientToScreen(hWnd, &ptScreen);
+                FluentDragGhost::Show(hWnd, ptScreen, ghostItems);
+            }
+        }
+
+        // 2. Active unit dragging motion & drop targeting
+        if (pState->isUnitDragging)
+        {
+            SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+            POINT ptScreen = pt;
+            ClientToScreen(hWnd, &ptScreen);
+
+            // Auto-scroll near boundaries
+            int autoDelta = 0;
+            if (pState->m_vScroll.CheckAutoScroll(pt, 32, 16, autoDelta))
+            {
+                pState->m_vScroll.SetPos(pState->m_vScroll.GetPos() + autoDelta);
+                pState->scrollY = pState->m_vScroll.GetPos();
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+
+            if (pState->activeTab == 0)
+            {
+                PoolManager::PoolPreset* pPreset = PoolManager::GetActivePreset();
+                int hitPool = -1;
+                for (const auto& ch : pState->cardHits)
+                {
+                    if (PtInRect(&ch.rcCard, pt))
+                    {
+                        hitPool = ch.poolIdx;
+                        break;
+                    }
+                }
+
+                if (hitPool != -1 && pPreset && hitPool < (int)pPreset->pools.size())
+                {
+                    RECT rcInd = { 0 };
+                    int dropIdx = GetPoolUnitDropTarget(pState, hitPool, pt, rcInd);
+                    pState->unitDropTargetPoolOrGrp = hitPool;
+                    pState->unitDropTargetUnitIdx = dropIdx;
+                    pState->rcDropIndicator = rcInd;
+
+                    bool isSame = (pState->unitDragSourcePoolOrGrp == hitPool);
+                    const auto& pool = pPreset->pools[hitPool];
+                    std::wstring actionText = isSame ? L"Reorder in " + pool.name : L"Move to " + pool.name;
+                    FluentDragGhost::Move(ptScreen, true, actionText);
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+                else
+                {
+                    pState->unitDropTargetPoolOrGrp = -1;
+                    pState->unitDropTargetUnitIdx = -1;
+                    pState->rcDropIndicator = { 0, 0, 0, 0 };
+                    FluentDragGhost::Move(ptScreen, false);
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+            else
+            {
+                int hitGroup = -1;
+                for (const auto& gch : pState->groupCardHits)
+                {
+                    if (PtInRect(&gch.rcCard, pt))
+                    {
+                        hitGroup = gch.groupIdx;
+                        break;
+                    }
+                }
+
+                if (hitGroup != -1 && hitGroup < (int)PoolManager::g_ReplacementGroupsCache.size())
+                {
+                    RECT rcInd = { 0 };
+                    int dropIdx = GetGroupUnitDropTarget(pState, hitGroup, pt, rcInd);
+                    pState->unitDropTargetPoolOrGrp = hitGroup;
+                    pState->unitDropTargetUnitIdx = dropIdx;
+                    pState->rcDropIndicator = rcInd;
+
+                    bool isSame = (pState->unitDragSourcePoolOrGrp == hitGroup);
+                    const auto& grp = PoolManager::g_ReplacementGroupsCache[hitGroup];
+                    std::wstring actionText = isSame ? L"Reorder in " + grp.name : L"Move to " + grp.name;
+                    FluentDragGhost::Move(ptScreen, true, actionText);
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+                else
+                {
+                    pState->unitDropTargetPoolOrGrp = -1;
+                    pState->unitDropTargetUnitIdx = -1;
+                    pState->rcDropIndicator = { 0, 0, 0, 0 };
+                    FluentDragGhost::Move(ptScreen, false);
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+            return 0;
+        }
+
+        // 1b. Check if potential card drag crossed the 4px threshold (Tab 0 only)
+        if (pState->activeTab == 0 && pState->isPotentialCardDrag && !pState->isCardDragging)
+        {
+            if (abs(pt.x - pState->ptCardDragStart.x) > 4 || abs(pt.y - pState->ptCardDragStart.y) > 4)
+            {
+                pState->isCardDragging = true;
+                SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+
+                PoolManager::PoolPreset* pPreset = PoolManager::GetActivePreset();
+                std::vector<DragGhostItem> ghostItems;
+                if (pPreset && pState->draggingPoolIdx >= 0 && pState->draggingPoolIdx < (int)pPreset->pools.size())
+                {
+                    const auto& pool = pPreset->pools[pState->draggingPoolIdx];
+                    DragGhostItem item;
+                    item.type = GhostItemType::PoolCard;
+                    item.name = L"#" + std::to_wstring(pState->draggingPoolIdx + 1) + L"  " + pool.name;
+                    item.subtitle = std::to_wstring(pool.units.size()) + L" units • " +
+                                    (pool.pickMode == PoolManager::PoolPickMode::Random ? L"Random" : L"Sequential") +
+                                    L" • Min: " + std::to_wstring(pool.minCount) + L" Max: " + std::to_wstring(pool.maxCount);
+                    item.isEngine = true;
+                    ghostItems.push_back(item);
+                }
+
+                POINT ptScreen = pt;
+                ClientToScreen(hWnd, &ptScreen);
+                FluentDragGhost::Show(hWnd, ptScreen, ghostItems);
+            }
+        }
+
+        // 2b. Active card dragging motion & drop targeting (Tab 0 only)
+        if (pState->activeTab == 0 && pState->isCardDragging)
+        {
+            SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+            POINT ptScreen = pt;
+            ClientToScreen(hWnd, &ptScreen);
+
+            // Auto-scroll near boundaries
+            int autoDelta = 0;
+            if (pState->m_vScroll.CheckAutoScroll(pt, 32, 16, autoDelta))
+            {
+                pState->m_vScroll.SetPos(pState->m_vScroll.GetPos() + autoDelta);
+                pState->scrollY = pState->m_vScroll.GetPos();
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+
+            PoolManager::PoolPreset* pPreset = PoolManager::GetActivePreset();
+            int targetSlot = -1;
+            RECT rcInd = { 0, 0, 0, 0 };
+
+            if (pPreset && !pState->cardHits.empty())
+            {
+                int cardCount = (int)pState->cardHits.size();
+                int srcIdx = pState->draggingPoolIdx;
+
+                for (int i = 0; i < cardCount; ++i)
+                {
+                    const auto& ch = pState->cardHits[i];
+                    int midY = (ch.rcCard.top + ch.rcCard.bottom) / 2;
+
+                    if (pt.y < midY)
+                    {
+                        targetSlot = i;
+                        int indY = ch.rcCard.top - 7;
+                        rcInd = { ch.rcCard.left, indY, ch.rcCard.right, indY + 4 };
+                        break;
+                    }
+                }
+
+                if (targetSlot == -1)
+                {
+                    targetSlot = cardCount;
+                    const auto& lastCh = pState->cardHits.back();
+                    int indY = lastCh.rcCard.bottom + 5;
+                    rcInd = { lastCh.rcCard.left, indY, lastCh.rcCard.right, indY + 4 };
+                }
+
+                pState->cardDropTargetIdx = targetSlot;
+                pState->rcCardDropIndicator = rcInd;
+
+                std::wstring actionText = L"Move Pool to position #" + std::to_wstring(targetSlot < cardCount ? (targetSlot + 1) : targetSlot);
+                if (targetSlot == srcIdx || targetSlot == srcIdx + 1)
+                {
+                    actionText = L"Current position";
+                }
+                FluentDragGhost::Move(ptScreen, true, actionText);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
             return 0;
         }
 
@@ -1937,104 +2886,7 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             return 0;
         }
 
-
-
-        // Unit chip clicks on Tab 0
-        if (pState->activeTab == 0)
-        {
-            for (const auto& chip : pState->unitChipHits)
-            {
-                if (PtInRect(&chip.rcChip, pt))
-                {
-                    bool isCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-                    bool isShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-
-                    if (chip.poolIdx != pState->selectedPoolIdx)
-                    {
-                        pState->selectedPoolIdx = chip.poolIdx;
-                        pState->selectedUnitIndices.clear();
-                        pState->selectedUnitIndices.insert(chip.unitIdx);
-                        pState->anchorUnitIdx = chip.unitIdx;
-                    }
-                    else
-                    {
-                        if (isShift)
-                        {
-                            int start = (pState->anchorUnitIdx >= 0) ? pState->anchorUnitIdx : chip.unitIdx;
-                            int minU = (std::min)(start, chip.unitIdx);
-                            int maxU = (std::max)(start, chip.unitIdx);
-                            if (!isCtrl) pState->selectedUnitIndices.clear();
-                            for (int u = minU; u <= maxU; ++u) pState->selectedUnitIndices.insert(u);
-                        }
-                        else if (isCtrl)
-                        {
-                            if (pState->selectedUnitIndices.count(chip.unitIdx) > 0)
-                                pState->selectedUnitIndices.erase(chip.unitIdx);
-                            else
-                                pState->selectedUnitIndices.insert(chip.unitIdx);
-                            pState->anchorUnitIdx = chip.unitIdx;
-                        }
-                        else
-                        {
-                            pState->selectedUnitIndices.clear();
-                            pState->selectedUnitIndices.insert(chip.unitIdx);
-                            pState->anchorUnitIdx = chip.unitIdx;
-                        }
-                    }
-                    InvalidateRect(hWnd, NULL, FALSE);
-                    return 0;
-                }
-            }
-        }
-        // Unit chip clicks on Tab 1
-        else
-        {
-            for (const auto& chip : pState->groupUnitChipHits)
-            {
-                if (PtInRect(&chip.rcChip, pt))
-                {
-                    bool isCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-                    bool isShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-
-                    if (chip.groupIdx != pState->selectedGroupIdx)
-                    {
-                        pState->selectedGroupIdx = chip.groupIdx;
-                        pState->selectedGroupUnitIndices.clear();
-                        pState->selectedGroupUnitIndices.insert(chip.unitIdx);
-                        pState->anchorGroupUnitIdx = chip.unitIdx;
-                    }
-                    else
-                    {
-                        if (isShift)
-                        {
-                            int start = (pState->anchorGroupUnitIdx >= 0) ? pState->anchorGroupUnitIdx : chip.unitIdx;
-                            int minU = (std::min)(start, chip.unitIdx);
-                            int maxU = (std::max)(start, chip.unitIdx);
-                            if (!isCtrl) pState->selectedGroupUnitIndices.clear();
-                            for (int u = minU; u <= maxU; ++u) pState->selectedGroupUnitIndices.insert(u);
-                        }
-                        else if (isCtrl)
-                        {
-                            if (pState->selectedGroupUnitIndices.count(chip.unitIdx) > 0)
-                                pState->selectedGroupUnitIndices.erase(chip.unitIdx);
-                            else
-                                pState->selectedGroupUnitIndices.insert(chip.unitIdx);
-                            pState->anchorGroupUnitIdx = chip.unitIdx;
-                        }
-                        else
-                        {
-                            pState->selectedGroupUnitIndices.clear();
-                            pState->selectedGroupUnitIndices.insert(chip.unitIdx);
-                            pState->anchorGroupUnitIdx = chip.unitIdx;
-                        }
-                    }
-                    InvalidateRect(hWnd, NULL, FALSE);
-                    return 0;
-                }
-            }
-        }
-
-        // Standard Button Clicks
+        // 1. Check ClickableControls first (buttons, flip toggle, remove, etc.)
         for (int i = 0; i < (int)pState->clickControls.size(); ++i)
         {
             if (PtInRect(&pState->clickControls[i].rc, pt))
@@ -2057,8 +2909,96 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     return 0;
                 }
 
+                SetCapture(hWnd);
                 InvalidateRect(hWnd, NULL, FALSE);
                 return 0;
+            }
+        }
+
+        // 2. Check Unit chip clicks (Potential unit drag initiation)
+        if (pState->activeTab == 0)
+        {
+            for (const auto& chip : pState->unitChipHits)
+            {
+                if (PtInRect(&chip.rcChip, pt))
+                {
+                    bool isCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                    bool isShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+
+                    pState->isPotentialUnitDrag = true;
+                    pState->isUnitDragging = false;
+                    pState->ptUnitDragStart = pt;
+                    pState->unitDragSourcePoolOrGrp = chip.poolIdx;
+                    pState->unitDragSourceUnitIdx = chip.unitIdx;
+                    pState->unitDragIsCtrl = isCtrl;
+                    pState->unitDragIsShift = isShift;
+                    pState->unitDropTargetPoolOrGrp = -1;
+                    pState->unitDropTargetUnitIdx = -1;
+                    pState->rcDropIndicator = { 0, 0, 0, 0 };
+
+                    if (pState->selectedPoolIdx == chip.poolIdx && pState->selectedUnitIndices.count(chip.unitIdx) > 0)
+                    {
+                        pState->unitDragIndices.assign(pState->selectedUnitIndices.begin(), pState->selectedUnitIndices.end());
+                    }
+                    else
+                    {
+                        pState->unitDragIndices = { chip.unitIdx };
+                    }
+
+                    SetCapture(hWnd);
+                    return 0;
+                }
+            }
+
+            // Pool card header click -> Potential pool card drag initiation (Tab 0 only)
+            for (const auto& ch : pState->cardHits)
+            {
+                if (PtInRect(&ch.rcHeader, pt))
+                {
+                    pState->isPotentialCardDrag = true;
+                    pState->isCardDragging = false;
+                    pState->potentialCardDragIdx = ch.poolIdx;
+                    pState->draggingPoolIdx = ch.poolIdx;
+                    pState->ptCardDragStart = pt;
+                    pState->cardDropTargetIdx = -1;
+                    pState->rcCardDropIndicator = { 0, 0, 0, 0 };
+                    SetCapture(hWnd);
+                    return 0;
+                }
+            }
+        }
+        else
+        {
+            for (const auto& chip : pState->groupUnitChipHits)
+            {
+                if (PtInRect(&chip.rcChip, pt))
+                {
+                    bool isCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                    bool isShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+
+                    pState->isPotentialUnitDrag = true;
+                    pState->isUnitDragging = false;
+                    pState->ptUnitDragStart = pt;
+                    pState->unitDragSourcePoolOrGrp = chip.groupIdx;
+                    pState->unitDragSourceUnitIdx = chip.unitIdx;
+                    pState->unitDragIsCtrl = isCtrl;
+                    pState->unitDragIsShift = isShift;
+                    pState->unitDropTargetPoolOrGrp = -1;
+                    pState->unitDropTargetUnitIdx = -1;
+                    pState->rcDropIndicator = { 0, 0, 0, 0 };
+
+                    if (pState->selectedGroupIdx == chip.groupIdx && pState->selectedGroupUnitIndices.count(chip.unitIdx) > 0)
+                    {
+                        pState->unitDragIndices.assign(pState->selectedGroupUnitIndices.begin(), pState->selectedGroupUnitIndices.end());
+                    }
+                    else
+                    {
+                        pState->unitDragIndices = { chip.unitIdx };
+                    }
+
+                    SetCapture(hWnd);
+                    return 0;
+                }
             }
         }
 
@@ -2082,6 +3022,214 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             pState->repeatAction = ClickableControl::NONE;
             pState->repeatPoolIdx = -1;
             pState->repeatHoldCount = 0;
+        }
+
+        // Handle Active Unit Drag Drop
+        if (pState->isUnitDragging)
+        {
+            // Snapshot local parameters BEFORE releasing capture
+            int srcPoolOrGrp = pState->unitDragSourcePoolOrGrp;
+            int dstPoolOrGrp = pState->unitDropTargetPoolOrGrp;
+            int dstUnitIdx   = pState->unitDropTargetUnitIdx;
+            std::vector<int> moving = pState->unitDragIndices;
+            int curTab = pState->activeTab;
+
+            pState->isPotentialUnitDrag = false;
+            pState->isUnitDragging = false;
+            pState->unitDragSourcePoolOrGrp = -1;
+            pState->unitDropTargetPoolOrGrp = -1;
+            pState->unitDropTargetUnitIdx = -1;
+            pState->rcDropIndicator = { 0, 0, 0, 0 };
+
+            FluentDragGhost::Hide();
+            if (GetCapture() == hWnd) ReleaseCapture();
+
+            if (dstPoolOrGrp >= 0 && dstUnitIdx >= 0 && !moving.empty())
+            {
+                if (curTab == 0)
+                {
+                    if (PoolManager::MoveUnitsAcrossPools(srcPoolOrGrp, moving, dstPoolOrGrp, dstUnitIdx))
+                    {
+                        pState->selectedPoolIdx = dstPoolOrGrp;
+                        pState->selectedUnitIndices.clear();
+
+                        int finalDst = dstUnitIdx;
+                        if (srcPoolOrGrp == dstPoolOrGrp)
+                        {
+                            int beforeCount = 0;
+                            for (int idx : moving) { if (idx < dstUnitIdx) beforeCount++; }
+                            finalDst -= beforeCount;
+                        }
+                        if (finalDst < 0) finalDst = 0;
+
+                        for (size_t k = 0; k < moving.size(); ++k)
+                        {
+                            pState->selectedUnitIndices.insert(finalDst + (int)k);
+                        }
+                        pState->anchorUnitIdx = finalDst;
+                    }
+                }
+                else
+                {
+                    if (PoolManager::MoveUnitsAcrossReplacementGroups(srcPoolOrGrp, moving, dstPoolOrGrp, dstUnitIdx))
+                    {
+                        pState->selectedGroupIdx = dstPoolOrGrp;
+                        pState->selectedGroupUnitIndices.clear();
+
+                        int finalDst = dstUnitIdx;
+                        if (srcPoolOrGrp == dstPoolOrGrp)
+                        {
+                            int beforeCount = 0;
+                            for (int idx : moving) { if (idx < dstUnitIdx) beforeCount++; }
+                            finalDst -= beforeCount;
+                        }
+                        if (finalDst < 0) finalDst = 0;
+
+                        for (size_t k = 0; k < moving.size(); ++k)
+                        {
+                            pState->selectedGroupUnitIndices.insert(finalDst + (int)k);
+                        }
+                        pState->anchorGroupUnitIdx = finalDst;
+                    }
+                }
+            }
+
+            InvalidateRect(hWnd, NULL, FALSE);
+            return 0;
+        }
+
+        // Handle Active Pool Card Drag Drop (Tab 0 only)
+        if (pState->activeTab == 0 && pState->isCardDragging)
+        {
+            // Snapshot local parameters BEFORE releasing capture
+            int srcIdx = pState->draggingPoolIdx;
+            int dstIdx = pState->cardDropTargetIdx;
+
+            pState->isPotentialCardDrag = false;
+            pState->isCardDragging = false;
+            pState->draggingPoolIdx = -1;
+            pState->cardDropTargetIdx = -1;
+            pState->rcCardDropIndicator = { 0, 0, 0, 0 };
+
+            FluentDragGhost::Hide();
+            if (GetCapture() == hWnd) ReleaseCapture();
+
+            if (srcIdx >= 0 && dstIdx >= 0)
+            {
+                PoolManager::PoolPreset* pPreset = PoolManager::GetActivePreset();
+                if (pPreset && srcIdx < (int)pPreset->pools.size())
+                {
+                    int finalDst = dstIdx;
+                    if (srcIdx < dstIdx)
+                    {
+                        finalDst = dstIdx - 1;
+                    }
+                    if (finalDst >= 0 && finalDst < (int)pPreset->pools.size() && finalDst != srcIdx)
+                    {
+                        PoolManager::MovePool(srcIdx, finalDst);
+                    }
+                }
+            }
+
+            InvalidateRect(hWnd, NULL, FALSE);
+            return 0;
+        }
+        else if (pState->isPotentialCardDrag)
+        {
+            pState->isPotentialCardDrag = false;
+            pState->isCardDragging = false;
+            pState->draggingPoolIdx = -1;
+            pState->cardDropTargetIdx = -1;
+            pState->rcCardDropIndicator = { 0, 0, 0, 0 };
+            if (GetCapture() == hWnd) ReleaseCapture();
+        }
+        else if (pState->isPotentialUnitDrag)
+        {
+            pState->isPotentialUnitDrag = false;
+            if (GetCapture() == hWnd) ReleaseCapture();
+
+            if (pState->activeTab == 0)
+            {
+                int poolIdx = pState->unitDragSourcePoolOrGrp;
+                int unitIdx = pState->unitDragSourceUnitIdx;
+                bool isCtrl = pState->unitDragIsCtrl;
+                bool isShift = pState->unitDragIsShift;
+
+                if (poolIdx != pState->selectedPoolIdx)
+                {
+                    pState->selectedPoolIdx = poolIdx;
+                    pState->selectedUnitIndices.clear();
+                    pState->selectedUnitIndices.insert(unitIdx);
+                    pState->anchorUnitIdx = unitIdx;
+                }
+                else
+                {
+                    if (isShift)
+                    {
+                        int start = (pState->anchorUnitIdx >= 0) ? pState->anchorUnitIdx : unitIdx;
+                        int minU = (std::min)(start, unitIdx);
+                        int maxU = (std::max)(start, unitIdx);
+                        if (!isCtrl) pState->selectedUnitIndices.clear();
+                        for (int u = minU; u <= maxU; ++u) pState->selectedUnitIndices.insert(u);
+                    }
+                    else if (isCtrl)
+                    {
+                        if (pState->selectedUnitIndices.count(unitIdx) > 0)
+                            pState->selectedUnitIndices.erase(unitIdx);
+                        else
+                            pState->selectedUnitIndices.insert(unitIdx);
+                        pState->anchorUnitIdx = unitIdx;
+                    }
+                    else
+                    {
+                        pState->selectedUnitIndices.clear();
+                        pState->selectedUnitIndices.insert(unitIdx);
+                        pState->anchorUnitIdx = unitIdx;
+                    }
+                }
+            }
+            else
+            {
+                int groupIdx = pState->unitDragSourcePoolOrGrp;
+                int unitIdx = pState->unitDragSourceUnitIdx;
+                bool isCtrl = pState->unitDragIsCtrl;
+                bool isShift = pState->unitDragIsShift;
+
+                if (groupIdx != pState->selectedGroupIdx)
+                {
+                    pState->selectedGroupIdx = groupIdx;
+                    pState->selectedGroupUnitIndices.clear();
+                    pState->selectedGroupUnitIndices.insert(unitIdx);
+                    pState->anchorGroupUnitIdx = unitIdx;
+                }
+                else
+                {
+                    if (isShift)
+                    {
+                        int start = (pState->anchorGroupUnitIdx >= 0) ? pState->anchorGroupUnitIdx : unitIdx;
+                        int minU = (std::min)(start, unitIdx);
+                        int maxU = (std::max)(start, unitIdx);
+                        if (!isCtrl) pState->selectedGroupUnitIndices.clear();
+                        for (int u = minU; u <= maxU; ++u) pState->selectedGroupUnitIndices.insert(u);
+                    }
+                    else if (isCtrl)
+                    {
+                        if (pState->selectedGroupUnitIndices.count(unitIdx) > 0)
+                            pState->selectedGroupUnitIndices.erase(unitIdx);
+                        else
+                            pState->selectedGroupUnitIndices.insert(unitIdx);
+                        pState->anchorGroupUnitIdx = unitIdx;
+                    }
+                    else
+                    {
+                        pState->selectedGroupUnitIndices.clear();
+                        pState->selectedGroupUnitIndices.insert(unitIdx);
+                        pState->anchorGroupUnitIdx = unitIdx;
+                    }
+                }
+            }
+            InvalidateRect(hWnd, NULL, FALSE);
+            return 0;
         }
 
         if (GetCapture() == hWnd) ReleaseCapture();
@@ -2111,8 +3259,9 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                 {
                 case ClickableControl::COMBO_PRESET_CLICK:
                 {
-                    if (PoolManager::g_PoolPresetsCache.empty()) break;
                     std::vector<DropDownItem> items;
+                    items.push_back(DropDownItem::Header(L"PRESETS"));
+
                     for (size_t i = 0; i < PoolManager::g_PoolPresetsCache.size(); ++i)
                     {
                         const auto& p = PoolManager::g_PoolPresetsCache[i];
@@ -2123,10 +3272,13 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                         bool isCurrent = ((int)i == PoolManager::g_ActivePresetIndex);
                         items.push_back(DropDownItem::Action((int)i + 1, isCurrent ? L"\xE73E" : L"\xE71D", label, tag, isCurrent, true));
                     }
+
                     int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, ctrl.rc, items, PoolManager::g_ActivePresetIndex + 1);
-                    if (chosen > 0)
+                    if (chosen >= 1 && chosen <= (int)PoolManager::g_PoolPresetsCache.size())
                     {
                         PoolManager::g_ActivePresetIndex = chosen - 1;
+                        pState->activeTrainConfigPath = L"";
+                        pState->activeTrainConfigID = L"";
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
                     break;
@@ -2377,15 +3529,156 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                 }
 
                 // ================= TAB 1 ACTIONS (Unit Replacement Groups) =================
+                case ClickableControl::BTN_GROUP_CATEGORY_PILL:
+                {
+                    pState->selectedCategoryFilter = ctrl.strParam;
+                    pState->m_vScroll.SetPos(0);
+                    pState->scrollY = 0;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+
+                case ClickableControl::BTN_GROUP_CATEGORY_ADD:
+                {
+                    std::wstring newCat;
+                    if (ShowModernInputPrompt(hWnd, L"Add Category", L"Enter new category name (e.g. 'Electric Locomotives', 'Coaches', 'Freight'):", L"", newCat))
+                    {
+                        if (!newCat.empty())
+                        {
+                            if (PoolManager::AddReplacementGroupCategory(newCat))
+                            {
+                                pState->selectedCategoryFilter = newCat;
+                                pState->m_vScroll.SetPos(0);
+                                pState->scrollY = 0;
+                                InvalidateRect(hWnd, NULL, FALSE);
+                            }
+                            else
+                            {
+                                ShowModernMessageBox(hWnd, L"A category with that name already exists or the name is invalid.", L"Add Category", MB_OK | MB_ICONINFORMATION);
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                case ClickableControl::BTN_GROUP_CATEGORY_DEL:
+                {
+                    std::wstring catName = ctrl.strParam;
+                    if (!catName.empty())
+                    {
+                        std::wstring promptMsg = L"Are you sure you want to delete category '" + catName + L"'?\n\nThis will permanently delete this category AND all favourite unit groups inside it.";
+                        if (ShowModernMessageBox(hWnd, promptMsg.c_str(), L"Delete Category", MB_YESNO | MB_ICONWARNING) == IDYES)
+                        {
+                            PoolManager::DeleteReplacementGroupCategory(catName);
+                            std::vector<std::wstring> remaining = PoolManager::GetReplacementGroupCategories();
+                            pState->selectedCategoryFilter = remaining.empty() ? L"" : remaining[0];
+                            pState->m_vScroll.SetPos(0);
+                            pState->scrollY = 0;
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
+                    }
+                    break;
+                }
+
+                case ClickableControl::BTN_GROUP_EMPTY_ACTIVE_CATEGORY:
+                {
+                    if (!pState->selectedCategoryFilter.empty())
+                    {
+                        std::wstring promptMsg = L"Are you sure you want to empty category '" + pState->selectedCategoryFilter + L"'?\n\nThis will remove all favourite unit groups in this category.";
+                        if (ShowModernMessageBox(hWnd, promptMsg.c_str(), L"Empty Category", MB_YESNO | MB_ICONQUESTION) == IDYES)
+                        {
+                            PoolManager::EmptyReplacementGroupCategory(pState->selectedCategoryFilter);
+                            pState->selectedGroupUnitIndices.clear();
+                            pState->selectedGroupIdx = -1;
+                            pState->m_vScroll.SetPos(0);
+                            pState->scrollY = 0;
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
+                    }
+                    break;
+                }
+
+                case ClickableControl::BTN_GROUP_CATEGORY_EDIT:
+                {
+                    int gIdx = ctrl.poolIdx;
+                    if (gIdx >= 0 && gIdx < (int)PoolManager::g_ReplacementGroupsCache.size())
+                    {
+                        std::vector<DropDownItem> items;
+                        std::vector<std::wstring> cats = PoolManager::GetReplacementGroupCategories();
+                        std::wstring curCat = PoolManager::g_ReplacementGroupsCache[gIdx].category;
+
+                        int selIndex = 1;
+                        for (size_t c = 0; c < cats.size(); ++c)
+                        {
+                            bool isCur = (_wcsicmp(cats[c].c_str(), curCat.c_str()) == 0);
+                            if (isCur) selIndex = (int)c + 1;
+                            items.push_back(DropDownItem::Action((int)c + 1, isCur ? L"\xE73E" : L"\xE8D7", cats[c], L"", isCur, true));
+                        }
+                        int newCatActionId = (int)cats.size() + 1;
+                        items.push_back(DropDownItem::Action(newCatActionId, L"\xE710", L"New Category...", L"Create and assign", false, true));
+
+                        int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, ctrl.rc, items, selIndex);
+                        if (chosen > 0 && chosen <= (int)cats.size())
+                        {
+                            PoolManager::SetReplacementGroupCategory(gIdx, cats[chosen - 1]);
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
+                        else if (chosen == newCatActionId)
+                        {
+                            std::wstring newCat;
+                            if (ShowModernInputPrompt(hWnd, L"New Category", L"Enter new category name for this group:", L"", newCat))
+                            {
+                                if (!newCat.empty())
+                                {
+                                    PoolManager::AddReplacementGroupCategory(newCat);
+                                    PoolManager::SetReplacementGroupCategory(gIdx, newCat);
+                                    pState->selectedCategoryFilter = newCat;
+                                    InvalidateRect(hWnd, NULL, FALSE);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+
                 case ClickableControl::BTN_GROUP_NEW:
                 {
+                    std::vector<std::wstring> allCats = PoolManager::GetReplacementGroupCategories();
+                    if (allCats.empty())
+                    {
+                        std::wstring newCat;
+                        if (ShowModernInputPrompt(hWnd, L"Create Category First", L"You must create a category first before adding favourite groups (e.g. 'Locomotives', 'Coaches'):", L"", newCat))
+                        {
+                            if (!newCat.empty())
+                            {
+                                PoolManager::AddReplacementGroupCategory(newCat);
+                                pState->selectedCategoryFilter = newCat;
+                            }
+                            else
+                            {
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+
+                    std::wstring targetCat = pState->selectedCategoryFilter;
+                    if (targetCat.empty())
+                    {
+                        allCats = PoolManager::GetReplacementGroupCategories();
+                        if (!allCats.empty()) targetCat = allCats[0];
+                    }
+
                     std::wstring defName = L"Group #" + std::to_wstring(PoolManager::g_ReplacementGroupsCache.size() + 1);
                     std::wstring groupName;
-                    if (ShowModernInputPrompt(hWnd, L"Create Replacement Group", L"Enter a descriptive name for this group (e.g. 'WAP-7 Locomotives'):", defName, groupName))
+                    if (ShowModernInputPrompt(hWnd, L"Create Favourite Group", L"Enter a descriptive name for this group in '" + targetCat + L"':", defName, groupName))
                     {
                         if (!groupName.empty())
                         {
-                            PoolManager::AddReplacementGroup(groupName);
+                            PoolManager::AddReplacementGroup(groupName, targetCat);
                             InvalidateRect(hWnd, NULL, FALSE);
                         }
                     }
@@ -2399,7 +3692,7 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     {
                         std::wstring curName = PoolManager::g_ReplacementGroupsCache[gIdx].name;
                         std::wstring newName;
-                        if (ShowModernInputPrompt(hWnd, L"Rename Replacement Group", L"Enter new group name:", curName, newName))
+                        if (ShowModernInputPrompt(hWnd, L"Rename Favourite Group", L"Enter new group name:", curName, newName))
                         {
                             if (!newName.empty())
                             {
@@ -2411,12 +3704,45 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     break;
                 }
 
+                case ClickableControl::BTN_GROUP_CLONE:
+                {
+                    int newIdx = PoolManager::CloneReplacementGroup(ctrl.poolIdx);
+                    if (newIdx >= 0) InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+
+                case ClickableControl::BTN_GROUP_UP:
+                    if (PoolManager::MoveReplacementGroup(ctrl.poolIdx, ctrl.poolIdx - 1))
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+
+                case ClickableControl::BTN_GROUP_DOWN:
+                    if (PoolManager::MoveReplacementGroup(ctrl.poolIdx, ctrl.poolIdx + 1))
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+
                 case ClickableControl::BTN_GROUP_DELETE:
                 {
                     int gIdx = ctrl.poolIdx;
                     PoolManager::RemoveReplacementGroup(gIdx);
                     pState->selectedGroupUnitIndices.clear();
                     pState->selectedGroupIdx = -1;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+
+                case ClickableControl::BTN_GROUP_CYCLE_MODE:
+                {
+                    int gIdx = ctrl.poolIdx;
+                    PoolManager::CycleReplacementGroupPickMode(gIdx);
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+
+                case ClickableControl::BTN_GROUP_CYCLE_FLIP:
+                {
+                    int gIdx = ctrl.poolIdx;
+                    PoolManager::CycleReplacementGroupFlipPolicy(gIdx);
                     InvalidateRect(hWnd, NULL, FALSE);
                     break;
                 }
@@ -2448,6 +3774,11 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     InvalidateRect(hWnd, NULL, FALSE);
                     break;
                 }
+
+                case ClickableControl::BTN_GROUP_COPY_UNITS:
+                    if (PoolManager::CopyReplacementGroupUnitsToClipboard(ctrl.poolIdx))
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    break;
 
                 case ClickableControl::BTN_GROUP_PASTE_CLIPBOARD:
                 {
@@ -2552,6 +3883,60 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         }
         else
         {
+            // Check if right-clicked on category filter pill
+            for (const auto& ctrl : pState->clickControls)
+            {
+                if (ctrl.type == ClickableControl::BTN_GROUP_CATEGORY_PILL && PtInRect(&ctrl.rc, pt))
+                {
+                    std::wstring catName = ctrl.strParam;
+                    std::vector<DropDownItem> items;
+                    items.push_back(DropDownItem::Action(1, L"\xE70F", L"Rename Category...", L"", false, true));
+                    items.push_back(DropDownItem::Action(2, L"\xE75C", L"Empty Category", L"Delete all groups in category", false, true));
+                    items.push_back(DropDownItem::Action(3, L"\xE74D", L"Delete Category", L"Delete category and all groups in it", false, true));
+
+                    int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, ctrl.rc, items, 0);
+                    if (chosen == 1)
+                    {
+                        std::wstring newName;
+                        if (ShowModernInputPrompt(hWnd, L"Rename Category", L"Enter new category name:", catName, newName))
+                        {
+                            if (!newName.empty())
+                            {
+                                if (PoolManager::RenameReplacementGroupCategory(catName, newName))
+                                {
+                                    if (_wcsicmp(pState->selectedCategoryFilter.c_str(), catName.c_str()) == 0)
+                                        pState->selectedCategoryFilter = newName;
+                                    InvalidateRect(hWnd, NULL, FALSE);
+                                }
+                            }
+                        }
+                    }
+                    else if (chosen == 2)
+                    {
+                        std::wstring promptMsg = L"Are you sure you want to empty category '" + catName + L"'?\n\nThis will delete all favourite unit groups in this category.";
+                        if (ShowModernMessageBox(hWnd, promptMsg.c_str(), L"Empty Category", MB_YESNO | MB_ICONQUESTION) == IDYES)
+                        {
+                            PoolManager::EmptyReplacementGroupCategory(catName);
+                            pState->selectedGroupUnitIndices.clear();
+                            pState->selectedGroupIdx = -1;
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
+                    }
+                    else if (chosen == 3)
+                    {
+                        std::wstring promptMsg = L"Are you sure you want to delete category '" + catName + L"'?\n\nThis will permanently delete this category AND all favourite unit groups inside it.";
+                        if (ShowModernMessageBox(hWnd, promptMsg.c_str(), L"Delete Category", MB_YESNO | MB_ICONWARNING) == IDYES)
+                        {
+                            PoolManager::DeleteReplacementGroupCategory(catName);
+                            std::vector<std::wstring> remaining = PoolManager::GetReplacementGroupCategories();
+                            pState->selectedCategoryFilter = remaining.empty() ? L"" : remaining[0];
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
+                    }
+                    return 0;
+                }
+            }
+
             for (const auto& chip : pState->groupUnitChipHits)
             {
                 if (PtInRect(&chip.rcChip, pt))
@@ -2733,6 +4118,25 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         }
         else if (wParam == VK_ESCAPE)
         {
+            if (pState->isUnitDragging || pState->isCardDragging)
+            {
+                FluentDragGhost::Hide();
+                if (GetCapture() == hWnd) ReleaseCapture();
+                pState->isPotentialUnitDrag = false;
+                pState->isUnitDragging = false;
+                pState->isPotentialCardDrag = false;
+                pState->isCardDragging = false;
+                pState->draggingPoolIdx = -1;
+                pState->cardDropTargetIdx = -1;
+                pState->rcCardDropIndicator = { 0, 0, 0, 0 };
+                pState->unitDragSourcePoolOrGrp = -1;
+                pState->unitDropTargetPoolOrGrp = -1;
+                pState->unitDropTargetUnitIdx = -1;
+                pState->rcDropIndicator = { 0, 0, 0, 0 };
+                InvalidateRect(hWnd, NULL, FALSE);
+                return 0;
+            }
+
             if (!pState->selectedUnitIndices.empty() || !pState->selectedGroupUnitIndices.empty())
             {
                 pState->selectedUnitIndices.clear();
@@ -2743,6 +4147,28 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
             DestroyWindow(hWnd);
             return 0;
+        }
+        break;
+    }
+
+    case WM_CANCELMODE:
+    case WM_CAPTURECHANGED:
+    {
+        if (pState && (pState->isUnitDragging || pState->isCardDragging))
+        {
+            FluentDragGhost::Hide();
+            pState->isPotentialUnitDrag = false;
+            pState->isUnitDragging = false;
+            pState->isPotentialCardDrag = false;
+            pState->isCardDragging = false;
+            pState->draggingPoolIdx = -1;
+            pState->cardDropTargetIdx = -1;
+            pState->rcCardDropIndicator = { 0, 0, 0, 0 };
+            pState->unitDragSourcePoolOrGrp = -1;
+            pState->unitDropTargetPoolOrGrp = -1;
+            pState->unitDropTargetUnitIdx = -1;
+            pState->rcDropIndicator = { 0, 0, 0, 0 };
+            InvalidateRect(hWnd, NULL, FALSE);
         }
         break;
     }
@@ -3022,7 +4448,9 @@ bool PoolManager_HandleDragHover(POINT ptScreen)
             return false;
         }
 
-        int cardY = contentY - pState->scrollY + 8;
+        int catRibbonH = 38;
+        int tab1ContentY = contentY + catRibbonH;
+        int cardY = tab1ContentY - pState->scrollY + 8;
         int cardMargin = 20;
         int cardW = w - (cardMargin * 2) - 14;
 
@@ -3032,9 +4460,13 @@ bool PoolManager_HandleDragHover(POINT ptScreen)
         for (size_t g = 0; g < PoolManager::g_ReplacementGroupsCache.size(); ++g)
         {
             const auto& grp = PoolManager::g_ReplacementGroupsCache[g];
+            std::wstring gc = grp.category.empty() ? L"General" : grp.category;
+            if (!pState->selectedCategoryFilter.empty() && _wcsicmp(gc.c_str(), pState->selectedCategoryFilter.c_str()) != 0)
+                continue;
+
             int unitCount = (int)grp.units.size();
             int unitsAreaH = (unitCount == 0) ? 42 : (28 + ((unitCount + 1) / 2) * 28 + 10);
-            int cardH = grp.isCollapsed ? 34 : (46 + unitsAreaH + 16);
+            int cardH = grp.isCollapsed ? 34 : (46 + unitsAreaH + 40);
             RECT rcCard = { cardMargin, cardY, cardMargin + cardW, cardY + cardH };
 
             if (PtInRect(&rcCard, ptClient))
@@ -3150,7 +4582,9 @@ bool PoolManager_HandleDragDrop(POINT ptScreen, const std::vector<ConsistReader:
             return false;
         }
 
-        int cardY = contentY - pState->scrollY + 8;
+        int catRibbonH = 38;
+        int tab1ContentY = contentY + catRibbonH;
+        int cardY = tab1ContentY - pState->scrollY + 8;
         int cardMargin = 20;
         int cardW = w - (cardMargin * 2) - 14;
 
@@ -3158,9 +4592,13 @@ bool PoolManager_HandleDragDrop(POINT ptScreen, const std::vector<ConsistReader:
         for (size_t g = 0; g < PoolManager::g_ReplacementGroupsCache.size(); ++g)
         {
             const auto& grp = PoolManager::g_ReplacementGroupsCache[g];
+            std::wstring gc = grp.category.empty() ? L"General" : grp.category;
+            if (!pState->selectedCategoryFilter.empty() && _wcsicmp(gc.c_str(), pState->selectedCategoryFilter.c_str()) != 0)
+                continue;
+
             int unitCount = (int)grp.units.size();
             int unitsAreaH = (unitCount == 0) ? 42 : (28 + ((unitCount + 1) / 2) * 28 + 10);
-            int cardH = grp.isCollapsed ? 34 : (46 + unitsAreaH + 16);
+            int cardH = grp.isCollapsed ? 34 : (46 + unitsAreaH + 40);
             RECT rcCard = { cardMargin, cardY, cardMargin + cardW, cardY + cardH };
 
             if (PtInRect(&rcCard, ptClient))

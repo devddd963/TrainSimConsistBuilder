@@ -1,4 +1,5 @@
 #include "ActivityConsistWriter.h"
+#include "AppLogging.h"
 #include <windows.h>
 #include <fstream>
 #include <sstream>
@@ -285,6 +286,9 @@ namespace ActivityConsistWriter {
             outFile.write(finalContent.data(), finalContent.size());
             outFile.close();
         }
+
+        LOG_INFO("ActivityConsistWriter: Successfully saved activity consist '%ls' (#%d) in '%ls'",
+            targetObjectId.c_str(), targetObjectIndex, actFilePath.c_str());
 
         result.success = true;
         return result;

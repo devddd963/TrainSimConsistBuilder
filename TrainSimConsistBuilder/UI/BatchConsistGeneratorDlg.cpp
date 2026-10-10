@@ -7,6 +7,7 @@
 #include "ModernMessageBox.h"
 #include "../SRC/BatchConsistGenerator.h"
 #include "../SRC/PoolManager.h"
+#include "../SRC/TrainConfig.h"
 #include "../SRC/TrainSimConsistBuilder.h"
 #include "../SRC/AssetsParser.h"
 #include <windowsx.h>
@@ -589,7 +590,10 @@ struct ExportDialogState
 
     // Preset & Pool Multi-Select Filtering
     int selectedPresetIdx = 0;
-    std::vector<int> selectedPoolIndices; // Subset of pool indices within preset. Empty = All pools in preset
+    std::vector<int> selectedPresetIndices;
+    std::vector<int> selectedBlueprintIndices;
+    std::vector<std::pair<int, int>> selectedPresetPools;    // (presetIdx, poolIdx)
+    std::vector<std::pair<int, int>> selectedBlueprintPools; // (blueprintIdx, poolIdx)
 
     // Mode: 0 = Auto-Numbered, 1 = Manual List
     int namingMode = 0;
@@ -631,7 +635,6 @@ struct ExportDialogState
         TARGET_NONE,
         TARGET_CLOSE,
         TARGET_PRESET_DROPDOWN,
-        TARGET_POOLS_DROPDOWN,
         TARGET_MANAGE_POOLS_BTN,
         TARGET_COUNT_MINUS,
         TARGET_COUNT_PLUS,
@@ -692,114 +695,391 @@ static PoolManager::PoolPreset GetEffectivePreset(const ExportDialogState* pStat
 {
     if (!pState) return PoolManager::PoolPreset();
     PoolManager::PoolPreset eff = pState->preset;
-    if (!pState->selectedPoolIndices.empty() && pState->selectedPoolIndices.size() < pState->preset.pools.size())
+
+    if (pState->selectedPresetIndices.size() == 1 && pState->selectedBlueprintIndices.empty())
     {
-        eff.pools.clear();
-        for (int idx : pState->selectedPoolIndices)
+        int pIdx = pState->selectedPresetIndices[0];
+        if (pIdx >= 0 && pIdx < (int)PoolManager::g_PoolPresetsCache.size())
         {
-            if (idx >= 0 && idx < (int)pState->preset.pools.size())
+            eff = PoolManager::g_PoolPresetsCache[pIdx];
+            std::vector<PoolManager::ConsistPool> filtered;
+            for (size_t plIdx = 0; plIdx < eff.pools.size(); ++plIdx)
             {
-                eff.pools.push_back(pState->preset.pools[idx]);
+                auto key = std::make_pair(pIdx, (int)plIdx);
+                if (std::find(pState->selectedPresetPools.begin(), pState->selectedPresetPools.end(), key) != pState->selectedPresetPools.end())
+                {
+                    filtered.push_back(eff.pools[plIdx]);
+                }
             }
+            if (!filtered.empty())
+            {
+                eff.pools = filtered;
+            }
+        }
+    }
+    else if (pState->selectedBlueprintIndices.size() == 1 && pState->selectedPresetIndices.empty())
+    {
+        int bIdx = pState->selectedBlueprintIndices[0];
+        if (bIdx >= 0 && bIdx < (int)TrainConfigManager::g_LoadedConfigsCache.size())
+        {
+            const auto& cfg = TrainConfigManager::g_LoadedConfigsCache[bIdx];
+            TrainConfigManager::TrainBinding binding;
+            TrainConfigManager::LoadTrainBinding(cfg, binding);
+            PoolManager::PoolPreset bpPreset;
+            TrainConfigManager::BuildPresetFromConfigAndBinding(cfg, binding, bpPreset);
+            std::vector<PoolManager::ConsistPool> filtered;
+            for (size_t plIdx = 0; plIdx < bpPreset.pools.size(); ++plIdx)
+            {
+                auto key = std::make_pair(bIdx, (int)plIdx);
+                if (std::find(pState->selectedBlueprintPools.begin(), pState->selectedBlueprintPools.end(), key) != pState->selectedBlueprintPools.end())
+                {
+                    filtered.push_back(bpPreset.pools[plIdx]);
+                }
+            }
+            if (!filtered.empty())
+            {
+                bpPreset.pools = filtered;
+            }
+            eff = bpPreset;
         }
     }
     return eff;
 }
 
+static std::vector<PoolManager::PoolPreset> GetEffectivePresetsList(const ExportDialogState* pState)
+{
+    std::vector<PoolManager::PoolPreset> list;
+    if (!pState) return list;
+
+    for (int pIdx : pState->selectedPresetIndices)
+    {
+        if (pIdx >= 0 && pIdx < (int)PoolManager::g_PoolPresetsCache.size())
+        {
+            auto p = PoolManager::g_PoolPresetsCache[pIdx];
+            std::vector<PoolManager::ConsistPool> filtered;
+            for (size_t plIdx = 0; plIdx < p.pools.size(); ++plIdx)
+            {
+                auto key = std::make_pair(pIdx, (int)plIdx);
+                if (std::find(pState->selectedPresetPools.begin(), pState->selectedPresetPools.end(), key) != pState->selectedPresetPools.end())
+                {
+                    filtered.push_back(p.pools[plIdx]);
+                }
+            }
+            if (!filtered.empty())
+            {
+                p.pools = filtered;
+                list.push_back(p);
+            }
+            else if (pState->selectedPresetPools.empty())
+            {
+                list.push_back(p);
+            }
+        }
+    }
+
+    for (int bIdx : pState->selectedBlueprintIndices)
+    {
+        if (bIdx >= 0 && bIdx < (int)TrainConfigManager::g_LoadedConfigsCache.size())
+        {
+            const auto& cfg = TrainConfigManager::g_LoadedConfigsCache[bIdx];
+            TrainConfigManager::TrainBinding binding;
+            TrainConfigManager::LoadTrainBinding(cfg, binding);
+            PoolManager::PoolPreset bpPreset;
+            TrainConfigManager::BuildPresetFromConfigAndBinding(cfg, binding, bpPreset);
+            if (!bpPreset.pools.empty())
+            {
+                std::vector<PoolManager::ConsistPool> filtered;
+                for (size_t plIdx = 0; plIdx < bpPreset.pools.size(); ++plIdx)
+                {
+                    auto key = std::make_pair(bIdx, (int)plIdx);
+                    if (std::find(pState->selectedBlueprintPools.begin(), pState->selectedBlueprintPools.end(), key) != pState->selectedBlueprintPools.end())
+                    {
+                        filtered.push_back(bpPreset.pools[plIdx]);
+                    }
+                }
+                if (!filtered.empty())
+                {
+                    bpPreset.pools = filtered;
+                    list.push_back(bpPreset);
+                }
+                else if (pState->selectedBlueprintPools.empty())
+                {
+                    list.push_back(bpPreset);
+                }
+            }
+        }
+    }
+
+    if (list.empty())
+    {
+        auto eff = GetEffectivePreset(pState);
+        if (!eff.pools.empty())
+        {
+            list.push_back(eff);
+        }
+    }
+
+    return list;
+}
+
 static void ShowPresetDropdown(HWND hWnd, ExportDialogState* pState, const RECT& rcAnchor)
 {
     PoolManager::InitializePoolPresets();
-    if (PoolManager::g_PoolPresetsCache.empty()) return;
+    TrainConfigManager::ScanTrainConfigs();
+    if (PoolManager::g_PoolPresetsCache.empty() && TrainConfigManager::g_LoadedConfigsCache.empty()) return;
 
     std::vector<DropDownItem> items;
-    int currentSelId = 1;
-    for (size_t i = 0; i < PoolManager::g_PoolPresetsCache.size(); ++i)
-    {
-        const auto& p = PoolManager::g_PoolPresetsCache[i];
-        int totalU = 0;
-        for (const auto& pl : p.pools) totalU += (int)pl.units.size();
 
-        std::wstring label = p.presetName.empty() ? (L"Preset " + std::to_wstring(i + 1)) : p.presetName;
-        std::wstring tag = std::to_wstring(p.pools.size()) + L" pools • " + std::to_wstring(totalU) + L" units";
-        bool isCurrent = ((int)i == pState->selectedPresetIdx);
-        if (isCurrent) currentSelId = (int)i + 1;
-        items.push_back(DropDownItem::Action((int)i + 1, isCurrent ? L"\xE73E" : L"\xE71D", label, tag, isCurrent, true));
+    // Section 1: Custom Presets
+    if (!PoolManager::g_PoolPresetsCache.empty())
+    {
+        items.push_back(DropDownItem::Header(L"CUSTOM PRESETS"));
+
+        for (size_t i = 0; i < PoolManager::g_PoolPresetsCache.size(); ++i)
+        {
+            const auto& p = PoolManager::g_PoolPresetsCache[i];
+            int totalU = 0;
+            for (const auto& pl : p.pools) totalU += (int)pl.units.size();
+
+            int presPoolCount = (int)p.pools.size();
+            int checkedInPreset = 0;
+            for (int plIdx = 0; plIdx < presPoolCount; ++plIdx)
+            {
+                if (std::find(pState->selectedPresetPools.begin(), pState->selectedPresetPools.end(), std::make_pair((int)i, plIdx)) != pState->selectedPresetPools.end())
+                {
+                    checkedInPreset++;
+                }
+            }
+
+            bool presAll = (presPoolCount > 0 && checkedInPreset == presPoolCount);
+            bool presIndet = (checkedInPreset > 0 && !presAll);
+
+            std::wstring label = p.presetName.empty() ? (L"Preset " + std::to_wstring(i + 1)) : p.presetName;
+            std::wstring presGroup = L"PRESET:" + std::to_wstring(i);
+            std::wstring secText = std::to_wstring(presPoolCount) + L" pools • " + std::to_wstring(totalU) + L" units";
+
+            // Level 0: Preset Group Header with Checkbox
+            items.push_back(DropDownItem::GroupHeader(label, L"\xE71D", presPoolCount, false, (int)(1000 + i), presAll, presIndet, secText, L"", 0, presGroup));
+
+            // Level 1: Child Pools
+            for (int plIdx = 0; plIdx < presPoolCount; ++plIdx)
+            {
+                const auto& pl = p.pools[plIdx];
+                std::wstring plLabel = std::to_wstring(plIdx + 1) + L". " + (pl.name.empty() ? L"Pool #" + std::to_wstring(plIdx + 1) : pl.name);
+                std::wstring modeStr = (pl.pickMode == PoolManager::PoolPickMode::Random) ? L"Rnd" : L"Seq";
+                std::wstring plTag = std::to_wstring(pl.units.size()) + L" units • [" + modeStr + L", Min:" + std::to_wstring(pl.minCount) + L", Max:" + std::to_wstring(pl.maxCount) + L"]";
+                bool isChecked = (std::find(pState->selectedPresetPools.begin(), pState->selectedPresetPools.end(), std::make_pair((int)i, plIdx)) != pState->selectedPresetPools.end());
+                int poolId = 2 + (int)i * 100 + plIdx;
+                items.push_back(DropDownItem::Action(poolId, L"", plLabel, plTag, isChecked, true, presGroup, L"", 1));
+            }
+        }
     }
 
-    int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, rcAnchor, items, currentSelId);
-    if (chosen > 0)
+    // Section 2: Train Blueprints
+    if (!TrainConfigManager::g_LoadedConfigsCache.empty())
     {
-        int selIdx = chosen - 1;
-        pState->selectedPresetIdx = selIdx;
-        PoolManager::g_ActivePresetIndex = selIdx;
-        pState->preset = PoolManager::g_PoolPresetsCache[selIdx];
-        pState->selectedPoolIndices.clear();
+        items.push_back(DropDownItem::Separator());
+        items.push_back(DropDownItem::Header(L"TRAIN BLUEPRINTS (.train)"));
 
-        pState->baseName = pState->preset.presetName;
-        for (auto& ch : pState->baseName)
+        std::vector<std::wstring> categoryOrder;
+        std::map<std::wstring, std::vector<size_t>> categorizedConfigs;
+        for (size_t c = 0; c < TrainConfigManager::g_LoadedConfigsCache.size(); ++c)
         {
-            if (ch == L' ' || ch == L'-') ch = L'_';
-        }
-        if (pState->baseName.empty()) pState->baseName = L"Consist";
-
-        int sumMax = 0;
-        for (const auto& pl : pState->preset.pools)
-        {
-            sumMax += pl.maxCount;
-        }
-        pState->autoFixedUnits = (sumMax > 0) ? sumMax : 6;
-        pState->SyncAutoUnits();
-
-        if (pState->hEditBaseName && IsWindow(pState->hEditBaseName))
-        {
-            SetWindowTextW(pState->hEditBaseName, pState->baseName.c_str());
+            const auto& cfg = TrainConfigManager::g_LoadedConfigsCache[c];
+            std::wstring cat = cfg.category.empty() ? L"General" : cfg.category;
+            if (categorizedConfigs.find(cat) == categorizedConfigs.end())
+            {
+                categoryOrder.push_back(cat);
+            }
+            categorizedConfigs[cat].push_back(c);
         }
 
-        InvalidateRect(hWnd, NULL, TRUE);
-    }
-}
+        for (size_t catIdx = 0; catIdx < categoryOrder.size(); ++catIdx)
+        {
+            const auto& cat = categoryOrder[catIdx];
+            const auto& cfgIndices = categorizedConfigs[cat];
 
-static void ShowPoolMultiDropdown(HWND hWnd, ExportDialogState* pState, const RECT& rcAnchor)
-{
-    if (pState->preset.pools.empty())
-    {
-        ShowModernMessageBox(hWnd, L"Selected preset has no pools defined.", L"Pools", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
+            int totalPoolsInCat = 0;
+            int totalCheckedInCat = 0;
 
-    size_t numPools = pState->preset.pools.size();
-    bool isAllSelected = (numPools > 0 && (pState->selectedPoolIndices.empty() || pState->selectedPoolIndices.size() >= numPools));
-    bool hasAnySelected = (!pState->selectedPoolIndices.empty() && !isAllSelected);
+            struct BpInfo {
+                size_t cIdx;
+                PoolManager::PoolPreset preset;
+                int poolCount = 0;
+                int checkedCount = 0;
+            };
+            std::vector<BpInfo> bpInfos;
 
-    std::vector<DropDownItem> items;
-    items.push_back(DropDownItem::Header(1, L"\xE735", L"Entire Preset (All Pools)", L"", isAllSelected, hasAnySelected));
+            for (size_t cIdx : cfgIndices)
+            {
+                const auto& cfg = TrainConfigManager::g_LoadedConfigsCache[cIdx];
+                TrainConfigManager::TrainBinding binding;
+                TrainConfigManager::LoadTrainBinding(cfg, binding);
+                PoolManager::PoolPreset bpPreset;
+                TrainConfigManager::BuildPresetFromConfigAndBinding(cfg, binding, bpPreset);
 
-    for (size_t i = 0; i < numPools; ++i)
-    {
-        const auto& pl = pState->preset.pools[i];
-        std::wstring label = std::to_wstring(i + 1) + L". " + (pl.name.empty() ? L"Pool #" + std::to_wstring(i + 1) : pl.name);
-        std::wstring modeStr = (pl.pickMode == PoolManager::PoolPickMode::Random) ? L"Rnd" : L"Seq";
-        std::wstring tag = std::to_wstring(pl.units.size()) + L" units • [" + modeStr + L", Min:" + std::to_wstring(pl.minCount) + L", Max:" + std::to_wstring(pl.maxCount) + L"]";
-        bool isChecked = isAllSelected || (std::find(pState->selectedPoolIndices.begin(), pState->selectedPoolIndices.end(), (int)i) != pState->selectedPoolIndices.end());
-        items.push_back(DropDownItem::Action((int)i + 2, L"", label, tag, isChecked, true));
+                BpInfo info;
+                info.cIdx = cIdx;
+                info.preset = bpPreset;
+                info.poolCount = (int)bpPreset.pools.size();
+                info.checkedCount = 0;
+                for (int plIdx = 0; plIdx < info.poolCount; ++plIdx)
+                {
+                    if (std::find(pState->selectedBlueprintPools.begin(), pState->selectedBlueprintPools.end(), std::make_pair((int)cIdx, plIdx)) != pState->selectedBlueprintPools.end())
+                    {
+                        info.checkedCount++;
+                    }
+                }
+                totalPoolsInCat += info.poolCount;
+                totalCheckedInCat += info.checkedCount;
+                bpInfos.push_back(info);
+            }
+
+            bool catAll = (totalPoolsInCat > 0 && totalCheckedInCat == totalPoolsInCat);
+            bool catIndet = (totalCheckedInCat > 0 && !catAll);
+
+            // Level 0: Category GroupHeader
+            items.push_back(DropDownItem::GroupHeader(cat, L"\xE8B7", (int)cfgIndices.size(), false, (int)(10000 + catIdx), catAll, catIndet, std::to_wstring(cfgIndices.size()) + L" Blueprints", L"", 0));
+
+            for (const auto& info : bpInfos)
+            {
+                size_t cIdx = info.cIdx;
+                const auto& cfg = TrainConfigManager::g_LoadedConfigsCache[cIdx];
+                bool bpAll = (info.poolCount > 0 && info.checkedCount == info.poolCount);
+                bool bpIndet = (info.checkedCount > 0 && !bpAll);
+
+                std::wstring bpGroup = L"BP:" + std::to_wstring(cIdx);
+                std::wstring bpSecText = cfg.category;
+                if (cfg.maxSpeedKmph > 0) bpSecText += L" • " + std::to_wstring((int)cfg.maxSpeedKmph) + L" km/h";
+
+                // Level 1: Blueprint GroupHeader
+                items.push_back(DropDownItem::GroupHeader(cfg.name, L"\xE7C0", info.poolCount, false, (int)(20000 + cIdx), bpAll, bpIndet, bpSecText, cat, 1, bpGroup));
+
+                // Level 2: Blueprint Child Pools
+                for (int plIdx = 0; plIdx < info.poolCount; ++plIdx)
+                {
+                    const auto& pl = info.preset.pools[plIdx];
+                    std::wstring plLabel = std::to_wstring(plIdx + 1) + L". " + (pl.name.empty() ? L"Pool #" + std::to_wstring(plIdx + 1) : pl.name);
+                    std::wstring modeStr = (pl.pickMode == PoolManager::PoolPickMode::Random) ? L"Rnd" : L"Seq";
+                    std::wstring plTag = std::to_wstring(pl.units.size()) + L" units • [" + modeStr + L", Min:" + std::to_wstring(pl.minCount) + L", Max:" + std::to_wstring(pl.maxCount) + L"]";
+                    bool isChecked = (std::find(pState->selectedBlueprintPools.begin(), pState->selectedBlueprintPools.end(), std::make_pair((int)cIdx, plIdx)) != pState->selectedBlueprintPools.end());
+                    int bpPoolItemId = 100000 + (int)cIdx * 100 + plIdx;
+                    items.push_back(DropDownItem::Action(bpPoolItemId, L"", plLabel, plTag, isChecked, true, bpGroup, cat, 2));
+                }
+            }
+        }
     }
 
     CustomDropDownMenu::ShowMultiSelect(hWnd, rcAnchor, items, [hWnd, pState](const std::vector<DropDownItem>& updatedItems) {
-        pState->selectedPoolIndices.clear();
-        for (size_t k = 1; k < updatedItems.size(); ++k)
+        pState->selectedPresetPools.clear();
+        pState->selectedBlueprintPools.clear();
+        pState->selectedPresetIndices.clear();
+        pState->selectedBlueprintIndices.clear();
+
+        for (const auto& itm : updatedItems)
         {
-            if (updatedItems[k].isChecked)
+            if (itm.isChecked && !itm.isGroupHeader && !itm.isHeader && !itm.isSeparator)
             {
-                pState->selectedPoolIndices.push_back((int)k - 1);
+                if (itm.id >= 2 && itm.id < 100000)
+                {
+                    int raw = itm.id - 2;
+                    int pIdx = raw / 100;
+                    int plIdx = raw % 100;
+                    pState->selectedPresetPools.push_back({ pIdx, plIdx });
+                    if (std::find(pState->selectedPresetIndices.begin(), pState->selectedPresetIndices.end(), pIdx) == pState->selectedPresetIndices.end())
+                    {
+                        pState->selectedPresetIndices.push_back(pIdx);
+                    }
+                }
+                else if (itm.id >= 100000)
+                {
+                    int raw = itm.id - 100000;
+                    int cIdx = raw / 100;
+                    int plIdx = raw % 100;
+                    pState->selectedBlueprintPools.push_back({ cIdx, plIdx });
+                    if (std::find(pState->selectedBlueprintIndices.begin(), pState->selectedBlueprintIndices.end(), cIdx) == pState->selectedBlueprintIndices.end())
+                    {
+                        pState->selectedBlueprintIndices.push_back(cIdx);
+                    }
+                }
             }
         }
 
-        // Recalculate auto fixed units default from effective preset
-        auto eff = GetEffectivePreset(pState);
-        int sumMax = 0;
-        for (const auto& pl : eff.pools) sumMax += pl.maxCount;
-        pState->autoFixedUnits = (sumMax > 0) ? sumMax : 6;
-        pState->SyncAutoUnits();
+        if (pState->selectedPresetIndices.size() == 1 && pState->selectedBlueprintIndices.empty())
+        {
+            int selIdx = pState->selectedPresetIndices[0];
+            pState->selectedPresetIdx = selIdx;
+            PoolManager::g_ActivePresetIndex = selIdx;
+            pState->preset = PoolManager::g_PoolPresetsCache[selIdx];
+
+            pState->baseName = pState->preset.presetName;
+            for (auto& ch : pState->baseName)
+            {
+                if (ch == L' ' || ch == L'-') ch = L'_';
+            }
+            if (pState->baseName.empty()) pState->baseName = L"Consist";
+
+            auto eff = GetEffectivePreset(pState);
+            int sumMax = 0;
+            for (const auto& pl : eff.pools) sumMax += pl.maxCount;
+            pState->autoFixedUnits = (sumMax > 0) ? sumMax : 6;
+            pState->SyncAutoUnits();
+
+            if (pState->hEditBaseName && IsWindow(pState->hEditBaseName))
+            {
+                SetWindowTextW(pState->hEditBaseName, pState->baseName.c_str());
+            }
+        }
+        else if (pState->selectedBlueprintIndices.size() == 1 && pState->selectedPresetIndices.empty())
+        {
+            int cfgIdx = pState->selectedBlueprintIndices[0];
+            const auto& cfg = TrainConfigManager::g_LoadedConfigsCache[cfgIdx];
+            TrainConfigManager::TrainBinding binding;
+            TrainConfigManager::LoadTrainBinding(cfg, binding);
+
+            PoolManager::PoolPreset newPreset;
+            TrainConfigManager::BuildPresetFromConfigAndBinding(cfg, binding, newPreset);
+
+            pState->preset = newPreset;
+
+            pState->baseName = cfg.name;
+            for (auto& ch : pState->baseName)
+            {
+                if (ch == L' ' || ch == L'-') ch = L'_';
+            }
+            if (pState->baseName.empty()) pState->baseName = L"Consist";
+
+            auto eff = GetEffectivePreset(pState);
+            int sumMax = 0;
+            for (const auto& pl : eff.pools) sumMax += pl.maxCount;
+            pState->autoFixedUnits = (sumMax > 0) ? sumMax : 6;
+            pState->SyncAutoUnits();
+
+            if (pState->hEditBaseName && IsWindow(pState->hEditBaseName))
+            {
+                SetWindowTextW(pState->hEditBaseName, pState->baseName.c_str());
+            }
+        }
+        else if (!pState->selectedPresetIndices.empty() || !pState->selectedBlueprintIndices.empty())
+        {
+            pState->baseName = L"Batch_Consist";
+            int totalMax = 0;
+            int countSources = (int)(pState->selectedPresetIndices.size() + pState->selectedBlueprintIndices.size());
+            auto effList = GetEffectivePresetsList(pState);
+            for (const auto& ep : effList)
+            {
+                int sm = 0;
+                for (const auto& pl : ep.pools) sm += pl.maxCount;
+                totalMax += (sm > 0 ? sm : 6);
+            }
+            pState->autoFixedUnits = (countSources > 0 && totalMax > 0) ? (totalMax / countSources) : 6;
+            pState->SyncAutoUnits();
+
+            if (pState->hEditBaseName && IsWindow(pState->hEditBaseName))
+            {
+                SetWindowTextW(pState->hEditBaseName, pState->baseName.c_str());
+            }
+        }
 
         InvalidateRect(hWnd, NULL, TRUE);
     });
@@ -1162,10 +1442,6 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     ShowPresetDropdown(hWnd, pState, item.rc);
                     return 0;
 
-                case ExportDialogState::TARGET_POOLS_DROPDOWN:
-                    ShowPoolMultiDropdown(hWnd, pState, item.rc);
-                    return 0;
-
                 case ExportDialogState::TARGET_COUNT_MINUS:
                     if (pState->count > 1)
                     {
@@ -1413,10 +1689,10 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                         return 0;
                     }
 
-                    auto effPreset = GetEffectivePreset(pState);
-                    if (effPreset.pools.empty())
+                    auto effPresetsList = GetEffectivePresetsList(pState);
+                    if (effPresetsList.empty())
                     {
-                        ShowModernMessageBox(hWnd, L"No pools selected for generation. Please select at least one pool from the Pools dropdown.", L"Validation", MB_OK | MB_ICONWARNING);
+                        ShowModernMessageBox(hWnd, L"No presets or train blueprints selected for generation.", L"Validation", MB_OK | MB_ICONWARNING);
                         return 0;
                     }
 
@@ -1469,7 +1745,7 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                     std::vector<std::wstring> createdFiles;
                     std::wstring outErr;
                     bool ok = BatchConsistGenerator::BatchGenerateConsists(
-                        effPreset, specs, pState->targetFolder, pState->overwriteExisting, createdFiles, outErr
+                        effPresetsList, specs, pState->targetFolder, pState->overwriteExisting, createdFiles, outErr
                     );
 
                     if (ok)
@@ -1570,22 +1846,18 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             pState->hitItems.push_back({ target, rc });
         };
 
-        // Right of Toolbar: Preset Selector Dropdown, Pools Multi-Dropdown & Manage Pools Button
+        // Right of Toolbar: Unified Preset & Pool Selector Dropdown & Manage Pools Button
         int managePoolsW = (w < 880) ? 106 : 120;
         int tbBtnH = 32;
         int tbBtnY = toolbarY + (toolbarH - tbBtnH) / 2;
         RECT rcManagePoolsBtn = { w - 20 - managePoolsW, tbBtnY, w - 20, tbBtnY + tbBtnH };
 
-        int poolPickerW = (w < 880) ? 140 : 180;
-        RECT rcPoolPicker = { rcManagePoolsBtn.left - 8 - poolPickerW, tbBtnY, rcManagePoolsBtn.left - 8, tbBtnY + tbBtnH };
-
-        int presetPickerW = (w < 880) ? 140 : 180;
-        RECT rcPresetPicker = { rcPoolPicker.left - 8 - presetPickerW, tbBtnY, rcPoolPicker.left - 8, tbBtnY + tbBtnH };
+        int presetPickerW = (w < 880) ? 260 : 330;
+        RECT rcPresetPicker = { rcManagePoolsBtn.left - 10 - presetPickerW, tbBtnY, rcManagePoolsBtn.left - 10, tbBtnY + tbBtnH };
 
         // Left of Toolbar: Preset & Selection Summary Info
+        auto effPresetsList = GetEffectivePresetsList(pState);
         auto effPreset = GetEffectivePreset(pState);
-        int totalUnitsInSelected = 0;
-        for (const auto& pl : effPreset.pools) totalUnitsInSelected += (int)pl.units.size();
 
         if (pState->hFontIcon)
         {
@@ -1598,16 +1870,40 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         SelectObject(memDC, pState->hFontBold);
         SetTextColor(memDC, textPrimary);
         RECT rcPoolTitle = { 46, toolbarY, rcPresetPicker.left - 12, toolbarY + toolbarH };
-        std::wstring poolSummaryStr = L"Active: " + pState->preset.presetName + L" (" +
-            std::to_wstring(effPreset.pools.size()) + L"/" + std::to_wstring(pState->preset.pools.size()) +
-            L" pools • " + std::to_wstring(totalUnitsInSelected) + L" units)";
+        size_t totalSelectedSources = pState->selectedPresetIndices.size() + pState->selectedBlueprintIndices.size();
+        size_t totalSelectedPools = pState->selectedPresetPools.size() + pState->selectedBlueprintPools.size();
+        std::wstring poolSummaryStr;
+        if (totalSelectedSources > 1)
+        {
+            int totalUnitsInAll = 0;
+            for (const auto& ep : effPresetsList)
+            {
+                for (const auto& pl : ep.pools) totalUnitsInAll += (int)pl.units.size();
+            }
+            poolSummaryStr = L"Active: Multi-Preset Rotation (" + std::to_wstring(totalSelectedSources) + L" sources • " +
+                std::to_wstring(totalSelectedPools) + L" pools • " + std::to_wstring(totalUnitsInAll) + L" units)";
+        }
+        else if (totalSelectedSources == 1)
+        {
+            int totalUnitsInSelected = 0;
+            for (const auto& pl : effPreset.pools) totalUnitsInSelected += (int)pl.units.size();
+
+            std::wstring sourceName = (pState->selectedBlueprintIndices.size() == 1 && pState->selectedBlueprintIndices[0] < (int)TrainConfigManager::g_LoadedConfigsCache.size()) ?
+                TrainConfigManager::g_LoadedConfigsCache[pState->selectedBlueprintIndices[0]].name : pState->preset.presetName;
+
+            poolSummaryStr = L"Active: " + sourceName + L" (" +
+                std::to_wstring(effPreset.pools.size()) + L" pools • " + std::to_wstring(totalUnitsInSelected) + L" units)";
+        }
+        else
+        {
+            poolSummaryStr = L"Active: None selected (Click dropdown to select)";
+        }
         DrawTextW(memDC, poolSummaryStr.c_str(), -1, &rcPoolTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
         bool isHoverPreset = (pState->hoveredTarget == ExportDialogState::TARGET_PRESET_DROPDOWN);
-        bool isHoverPools  = (pState->hoveredTarget == ExportDialogState::TARGET_POOLS_DROPDOWN);
         bool isHoverManage = (pState->hoveredTarget == ExportDialogState::TARGET_MANAGE_POOLS_BTN);
 
-        // 1. Draw Preset Selector Dropdown Box
+        // 1. Draw Unified Preset & Pool Selector Dropdown Box
         COLORREF comboBg = isHoverPreset ? RGB(72, 30, 36) : RGB(40, 16, 20);
         COLORREF comboBorder = isHoverPreset ? RGB(110, 45, 54) : RGB(78, 32, 38);
         HBRUSH hbrCombo = CreateSolidBrush(comboBg);
@@ -1621,7 +1917,31 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         RECT rcComboText = { rcPresetPicker.left + 10, rcPresetPicker.top, rcPresetPicker.right - 22, rcPresetPicker.bottom };
         SelectObject(memDC, pState->hFontBold);
         SetTextColor(memDC, textPrimary);
-        std::wstring presetLabel = L"Preset: " + pState->preset.presetName;
+        std::wstring presetLabel;
+        if (totalSelectedSources > 1)
+        {
+            presetLabel = std::to_wstring(totalSelectedSources) + L" Sources (" + std::to_wstring(totalSelectedPools) + L" Pools)";
+        }
+        else if (pState->selectedBlueprintIndices.size() == 1)
+        {
+            int bIdx = pState->selectedBlueprintIndices[0];
+            if (bIdx >= 0 && bIdx < (int)TrainConfigManager::g_LoadedConfigsCache.size())
+            {
+                presetLabel = L"Train: " + TrainConfigManager::g_LoadedConfigsCache[bIdx].name + L" (" + std::to_wstring(effPreset.pools.size()) + L" Pools)";
+            }
+            else
+            {
+                presetLabel = L"Train Blueprint (" + std::to_wstring(effPreset.pools.size()) + L" Pools)";
+            }
+        }
+        else if (pState->selectedPresetIndices.size() == 1)
+        {
+            presetLabel = L"Preset: " + pState->preset.presetName + L" (" + std::to_wstring(effPreset.pools.size()) + L" Pools)";
+        }
+        else
+        {
+            presetLabel = L"Select Presets & Pools...";
+        }
         DrawTextW(memDC, presetLabel.c_str(), -1, &rcComboText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
         RECT rcChevron = { rcPresetPicker.right - 20, rcPresetPicker.top, rcPresetPicker.right - 6, rcPresetPicker.bottom };
@@ -1641,70 +1961,7 @@ static LRESULT CALLBACK ExportDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
         pState->hitItems.push_back({ ExportDialogState::TARGET_PRESET_DROPDOWN, rcPresetPicker, -1 });
 
-        // 2. Draw Pools Multi-Select Dropdown Box
-        COLORREF poolBg = isHoverPools ? RGB(72, 30, 36) : RGB(40, 16, 20);
-        COLORREF poolBorder = isHoverPools ? RGB(110, 45, 54) : RGB(78, 32, 38);
-        HBRUSH hbrPool = CreateSolidBrush(poolBg);
-        HPEN hPenPool = CreatePen(PS_SOLID, 1, poolBorder);
-        SelectObject(memDC, hbrPool);
-        SelectObject(memDC, hPenPool);
-        RoundRect(memDC, rcPoolPicker.left, rcPoolPicker.top, rcPoolPicker.right, rcPoolPicker.bottom, 6, 6);
-        DeleteObject(hbrPool);
-        DeleteObject(hPenPool);
-
-        size_t numTotalPools = pState->preset.pools.size();
-        bool isAllPools = (numTotalPools > 0 && (pState->selectedPoolIndices.empty() || pState->selectedPoolIndices.size() >= numTotalPools));
-        std::wstring poolsLabel;
-        if (isAllPools)
-        {
-            poolsLabel = L"Pools: All (" + std::to_wstring(numTotalPools) + L")";
-        }
-        else if (pState->selectedPoolIndices.size() == 1)
-        {
-            int pIdx = pState->selectedPoolIndices[0];
-            if (pIdx >= 0 && pIdx < (int)numTotalPools)
-            {
-                std::wstring pName = pState->preset.pools[pIdx].name;
-                if (pName.empty()) pName = L"Pool #" + std::to_wstring(pIdx + 1);
-                poolsLabel = L"Pool: " + pName;
-            }
-            else
-            {
-                poolsLabel = L"1 Pool Selected";
-            }
-        }
-        else if (pState->selectedPoolIndices.empty())
-        {
-            poolsLabel = L"Pools: None";
-        }
-        else
-        {
-            poolsLabel = L"Pools: " + std::to_wstring(pState->selectedPoolIndices.size()) + L"/" + std::to_wstring(numTotalPools);
-        }
-
-        RECT rcPoolText = { rcPoolPicker.left + 10, rcPoolPicker.top, rcPoolPicker.right - 22, rcPoolPicker.bottom };
-        SelectObject(memDC, pState->hFontBold);
-        SetTextColor(memDC, textPrimary);
-        DrawTextW(memDC, poolsLabel.c_str(), -1, &rcPoolText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-        RECT rcPoolChevron = { rcPoolPicker.right - 20, rcPoolPicker.top, rcPoolPicker.right - 6, rcPoolPicker.bottom };
-        int pChevCX = (rcPoolChevron.left + rcPoolChevron.right) / 2;
-        int pChevCY = (rcPoolChevron.top + rcPoolChevron.bottom) / 2;
-        COLORREF pArrCol = isHoverPools ? RGB(255, 255, 255) : textSecondary;
-        HBRUSH hBrPChev = CreateSolidBrush(pArrCol);
-        HPEN hPenPChev = CreatePen(PS_SOLID, 1, pArrCol);
-        HBRUSH hOldBrPC = (HBRUSH)SelectObject(memDC, hBrPChev);
-        HPEN hOldPenPC = (HPEN)SelectObject(memDC, hPenPChev);
-        POINT ptsPChev[3] = { { pChevCX - 4, pChevCY - 2 }, { pChevCX + 4, pChevCY - 2 }, { pChevCX, pChevCY + 3 } };
-        Polygon(memDC, ptsPChev, 3);
-        SelectObject(memDC, hOldBrPC);
-        SelectObject(memDC, hOldPenPC);
-        DeleteObject(hBrPChev);
-        DeleteObject(hPenPChev);
-
-        pState->hitItems.push_back({ ExportDialogState::TARGET_POOLS_DROPDOWN, rcPoolPicker, -1 });
-
-        // 3. Draw Manage Pools Button
+        // 2. Draw Manage Pools Button
         DrawModernButton(memDC, rcManagePoolsBtn, L"Manage Pools", isHoverManage, false, false, pState->hFontMain, pState->hFontIcon, L"\xE713");
         pState->hitItems.push_back({ ExportDialogState::TARGET_MANAGE_POOLS_BTN, rcManagePoolsBtn, -1 });
 
@@ -2212,17 +2469,26 @@ void ShowBatchConsistGeneratorDialog(HWND hWndParent, int presetIndex)
     if (presetIndex >= 0 && presetIndex < (int)PoolManager::g_PoolPresetsCache.size())
     {
         pState->selectedPresetIdx = presetIndex;
+        pState->selectedPresetIndices.push_back(presetIndex);
         PoolManager::g_ActivePresetIndex = presetIndex;
         pState->preset = PoolManager::g_PoolPresetsCache[presetIndex];
+        for (int k = 0; k < (int)pState->preset.pools.size(); ++k)
+        {
+            pState->selectedPresetPools.push_back({ presetIndex, k });
+        }
     }
     else if (!PoolManager::g_PoolPresetsCache.empty())
     {
         if (PoolManager::g_ActivePresetIndex < 0 || PoolManager::g_ActivePresetIndex >= (int)PoolManager::g_PoolPresetsCache.size())
             PoolManager::g_ActivePresetIndex = 0;
         pState->selectedPresetIdx = PoolManager::g_ActivePresetIndex;
+        pState->selectedPresetIndices.push_back(PoolManager::g_ActivePresetIndex);
         pState->preset = PoolManager::g_PoolPresetsCache[PoolManager::g_ActivePresetIndex];
+        for (int k = 0; k < (int)pState->preset.pools.size(); ++k)
+        {
+            pState->selectedPresetPools.push_back({ PoolManager::g_ActivePresetIndex, k });
+        }
     }
-    pState->selectedPoolIndices.clear();
     pState->targetFolder = GetAppConsistsDirectory();
     
     // Clean base name from preset name

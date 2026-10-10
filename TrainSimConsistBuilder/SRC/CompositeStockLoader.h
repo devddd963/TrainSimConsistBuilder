@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <atomic>
 #include "StockSpecReader.h"
 #include "ShapeReader.h"
 #include "ShapeAnimator.h"
@@ -69,7 +70,8 @@ namespace CompositeStockLoader
     bool LoadCompositeStockCPU(
         const std::wstring& stockFilePath,
         const std::wstring& trainsetBasePath,
-        CompositeStockUnit& outUnit
+        CompositeStockUnit& outUnit,
+        const std::atomic<bool>* pCancelToken = nullptr
     );
 
     // Step 2: Initialize GPU vertex buffers, index buffers, and load textures for all sub-shapes (Render thread)

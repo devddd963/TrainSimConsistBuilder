@@ -3,5 +3,8 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
+  <Project Path="TSCBResources/TSCBResources.vcxproj" Id="a81c5c50-d24e-464a-a5e8-7452179e4822" />
   <Project Path="TrainSimConsistBuilder/TrainSimConsistBuilder.vcxproj" Id="604564d5-2225-481d-93b2-0e2a5b8fd87c" />
+  <Project Path="TSCBLauncher/TSCBLauncher.vcxproj" Id="b72f41d8-732f-46e0-b77c-0c599423d9e1" />
 </Solution>
+

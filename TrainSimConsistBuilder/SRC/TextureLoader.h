@@ -7,6 +7,7 @@
 #include <vector>
 #include <unordered_map>
 #include <list>
+#include <atomic>
 
 struct LoadedTexture {
     ID3D11ShaderResourceView* pSRV = nullptr;
@@ -26,7 +27,7 @@ public:
     static std::wstring ResolveTexturePath(const std::wstring& shapeDir, const std::wstring& rawImageName);
 
     // Pre-decodes textures into CPU memory cache (can be called safely from background worker threads)
-    static void PredecodeTexturesCPU(const std::wstring& shapeDir, const std::vector<std::wstring>& imageNames);
+    static void PredecodeTexturesCPU(const std::wstring& shapeDir, const std::vector<std::wstring>& imageNames, const std::atomic<bool>* pCancelToken = nullptr);
 
     // Clears global CPU-side decoded texture cache
     static void ClearGlobalCPUCache();

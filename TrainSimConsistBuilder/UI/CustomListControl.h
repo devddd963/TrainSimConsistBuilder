@@ -56,7 +56,14 @@ private:
     int m_selectedIndex;
     bool m_isMultiSelect;
     std::unordered_set<int> m_selectedIndices;
+    std::vector<int> m_selectedOrder;
     int m_anchorRow;
+
+    // Integrated Selection Gutter state
+    bool m_bShowSelectionGutter;
+    std::unordered_set<int> m_checkedIndices;
+    bool m_bHoverGutterHeader;
+    bool m_bPressedGutterHeader;
 
     // Marquee / Rubber-band drag selection & Item Drag-Drop state
     bool m_isMarqueeSelecting;
@@ -78,6 +85,7 @@ private:
     int m_marqueeStartScrollX;
     int m_marqueeCurrentX;
     int m_marqueeCurrentY;
+    std::unordered_set<int> m_marqueeInitialSelection;
     bool m_isAutoScrolling;
     static constexpr UINT_PTR TIMER_AUTOSCROLL_ID = 0x5C02;
 
@@ -121,6 +129,15 @@ private:
     HFONT m_hFontFaytText;
     static constexpr UINT_PTR TIMER_FAYT_TIMEOUT_ID = 0x5C03;
 
+    // Inline Column Hover Copy Button & Feedback State
+    int m_inlineCopyCol;
+    int m_copiedRow;
+    int m_copiedCol;
+    ULONGLONG m_copiedTick;
+    bool m_bHoverCopyBtn;
+    HFONT m_hFontCopyIcon;
+    static constexpr UINT_PTR TIMER_COPY_FEEDBACK_ID = 0x5C04;
+
     void StartFayt(wchar_t initialChar);
     void UpdateFaytMatches();
     void FaytNext();
@@ -145,7 +162,7 @@ public:
     void SetSortState(int colIndex, bool ascending) { m_sortColIndex = colIndex; m_sortAscending = ascending; }
     void SetColumnWidth(int colIndex, int width);
     int GetColumnWidth(int colIndex) const;
-    
+
     // Filtering APIs
     const std::vector<std::wstring>& GetActiveFilters(int colIndex) const;
     void SetActiveFilters(int colIndex, const std::vector<std::wstring>& filters);
@@ -166,6 +183,12 @@ public:
     void SetMultiSelect(bool bEnable);
     bool IsMultiSelect() const { return m_isMultiSelect; }
     int GetSelectedIndex() const { return m_selectedIndex; }
+    int GetFirstSelectedIndex() const {
+        if (m_isMultiSelect) {
+            return m_selectedOrder.empty() ? -1 : m_selectedOrder.front();
+        }
+        return m_selectedIndex;
+    }
     void SetSelectedIndex(int index);
     std::vector<int> GetSelectedIndices() const;
     void SetSelectedIndices(const std::vector<int>& indices);
@@ -173,6 +196,18 @@ public:
     void ClearSelection();
     bool IsRowSelected(int row) const;
     void ToggleRowSelection(int row);
+
+    // Integrated Selection Gutter APIs
+    void SetShowSelectionGutter(bool bShow);
+    bool IsShowSelectionGutter() const { return m_bShowSelectionGutter; }
+    int GetGutterWidth() const { return m_bShowSelectionGutter ? 32 : 0; }
+    void SetItemChecked(int itemIndex, bool bChecked);
+    bool IsItemChecked(int itemIndex) const;
+    void SetAllItemsChecked(bool bChecked);
+    void ClearCheckedItems();
+    std::vector<int> GetCheckedIndices() const;
+    void SetCheckedIndices(const std::vector<int>& indices);
+    int GetCheckedCount() const;
 
     // Consist Units Rearrangement / Reordering APIs
     void SetAllowRearrange(bool allow) { m_bAllowRearrange = allow; }
@@ -183,6 +218,8 @@ public:
     bool IsAllowMarquee() const { return m_bAllowMarquee; }
     void SetDrawCardBorder(bool allow) { m_bDrawCardBorder = allow; Invalidate(); }
     bool IsDrawCardBorder() const { return m_bDrawCardBorder; }
+    void SetInlineCopyColumn(int colIndex) { m_inlineCopyCol = colIndex; Invalidate(); }
+    int  GetInlineCopyColumn() const { return m_inlineCopyCol; }
     void SetDropTargetIndex(int idx) { m_dropTargetIndex = idx; Invalidate(); }
     int  GetDropTargetIndex() const { return m_dropTargetIndex; }
     bool IsItemDragging() const { return m_bIsItemDragging; }
