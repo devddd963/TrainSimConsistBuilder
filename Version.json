@@ -1,6 +1,6 @@
 {
   "version": "9.3.0",
-  "build": 93000,
-  "changelog": "SQLite Master Database Migration, Multi-threading Performance, Zero-Registry Portability & Auto-Zip Updater.",
+  "build": 96000,
+  "changelog": "Minor Bug Fixes , UI Improvements.",
   "download_url": "https://github.com/devddd963/TrainSimConsistBuilder/releases/latest/download/TrainSimConsistBuilder.zip"
 }
