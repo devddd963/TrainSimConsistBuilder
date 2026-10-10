@@ -16,6 +16,7 @@ struct CustomColumn {
     std::wstring title;
     int width;
     int align; // 0 = Left, 1 = Center, 2 = Right
+    int defaultWidth;
 };
 #define NM_CELLCLICK (NM_FIRST - 50)
 #define NM_RCELLCLICK (NM_FIRST - 51)
@@ -74,6 +75,8 @@ private:
     bool m_bAllowRearrange;
     bool m_bAllowTransferSource;
     bool m_bAllowMarquee;
+    bool m_bAutoFitPrimary;
+    bool m_bAutoFitLastColumn;
     bool m_bDrawCardBorder;
     POINT m_ptDragStart;
     POINT m_ptMarqueeStart;
@@ -224,6 +227,15 @@ public:
     int  GetDropTargetIndex() const { return m_dropTargetIndex; }
     bool IsItemDragging() const { return m_bIsItemDragging; }
     void CancelItemDrag();
+
+    // Primary Section & Auto-Fit Helpers
+    int  GetPrimaryLeftSectionWidth() const;
+    void AutoFitPrimaryColumn();
+    void SetAutoFitPrimary(bool autoFit) { m_bAutoFitPrimary = autoFit; }
+    bool IsAutoFitPrimary() const { return m_bAutoFitPrimary; }
+    void AutoFitLastColumn();
+    void SetAutoFitLastColumn(bool autoFit) { m_bAutoFitLastColumn = autoFit; UpdateScrollbars(); Invalidate(); }
+    bool IsAutoFitLastColumn() const { return m_bAutoFitLastColumn; }
 
     // Drop Target & Drag Auto-Scroll Math Helpers
     int  GetDropIndexFromPoint(POINT ptClient) const;

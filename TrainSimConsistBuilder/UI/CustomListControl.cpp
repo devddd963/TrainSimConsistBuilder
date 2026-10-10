@@ -68,7 +68,9 @@ CustomListControl::CustomListControl()
     m_copiedCol(-1),
     m_copiedTick(0),
     m_bHoverCopyBtn(false),
-    m_hFontCopyIcon(NULL)
+    m_hFontCopyIcon(NULL),
+    m_bAutoFitPrimary(false),
+    m_bAutoFitLastColumn(true)
 {
     m_ptDragStart = { 0, 0 };
     m_ptMarqueeStart = { 0, 0 };
@@ -130,7 +132,7 @@ HWND CustomListControl::Create(HWND hParent, int x, int y, int width, int height
 // ---------------------------------------------------------------------------
 void CustomListControl::AddColumn(const std::wstring& title, int width, int align)
 {
-    CustomColumn col = { title, width, align };
+    CustomColumn col = { title, width, align, width };
     m_columns.push_back(col);
     m_activeFilters.resize(m_columns.size());
     UpdateScrollbars();
@@ -162,6 +164,7 @@ void CustomListControl::SetColumnWidth(int colIndex, int width)
     if (colIndex >= 0 && colIndex < (int)m_columns.size())
     {
         m_columns[colIndex].width = width;
+        m_columns[colIndex].defaultWidth = width;
         UpdateScrollbars();
         Invalidate();
     }
@@ -172,6 +175,79 @@ int CustomListControl::GetColumnWidth(int colIndex) const
     if (colIndex >= 0 && colIndex < (int)m_columns.size())
         return m_columns[colIndex].width;
     return 0;
+}
+
+int CustomListControl::GetPrimaryLeftSectionWidth() const
+{
+    if (m_columns.empty()) return GetUsableWidth();
+    int w = m_columns[0].width;
+    if (m_columns.size() > 1 && (m_columns[0].title == L"No." || m_columns[0].title == L"#" || m_columns[0].title == L"No"))
+    {
+        w += m_columns[1].width;
+    }
+    return w;
+}
+
+void CustomListControl::AutoFitPrimaryColumn()
+{
+    if (!m_bAutoFitPrimary || m_columns.empty() || m_isResizing) return;
+    int listW = GetUsableWidth();
+    if (listW <= 0) return;
+
+    size_t targetCol = 0;
+    if (m_columns.size() > 1 && (m_columns[0].title == L"No." || m_columns[0].title == L"#" || m_columns[0].title == L"No"))
+    {
+        targetCol = 1;
+    }
+
+    int totalOther = 0;
+    for (size_t c = 0; c < m_columns.size(); ++c)
+    {
+        if (c != targetCol) totalOther += m_columns[c].width;
+    }
+
+    int avail = listW - GetGutterWidth();
+    int minPrimary = 120;
+
+    int newPrimaryW = avail - totalOther;
+    if (newPrimaryW < minPrimary) newPrimaryW = minPrimary;
+
+    if (m_columns[targetCol].width != newPrimaryW)
+    {
+        m_columns[targetCol].width = newPrimaryW;
+    }
+}
+
+void CustomListControl::AutoFitLastColumn()
+{
+    if (!m_bAutoFitLastColumn || m_columns.size() <= 1 || m_isResizing || !m_hWnd) return;
+
+    RECT rcClient;
+    GetClientRect(m_hWnd, &rcClient);
+    int fullW = rcClient.right;
+    if (fullW <= 0) return;
+
+    // Reset earlier columns to their defined defaultWidths
+    for (size_t c = 0; c < m_columns.size(); ++c)
+    {
+        m_columns[c].width = m_columns[c].defaultWidth;
+    }
+
+    size_t lastCol = m_columns.size() - 1;
+
+    int sumEarlier = 0;
+    for (size_t c = 0; c < lastCol; ++c)
+    {
+        sumEarlier += m_columns[c].width;
+    }
+
+    int avail = fullW - GetGutterWidth();
+    int minLastColW = (std::max)(50, m_columns[lastCol].defaultWidth);
+
+    int newLastW = avail - sumEarlier;
+    if (newLastW < minLastColW) newLastW = minLastColW;
+
+    m_columns[lastCol].width = newLastW;
 }
 
 const std::vector<std::wstring>& CustomListControl::GetActiveFilters(int colIndex) const
@@ -596,7 +672,9 @@ void CustomListControl::UpdateScrollbars()
 {
     if (!m_hWnd) return;
 
+    AutoFitLastColumn();
     LayoutScrollbars();
+    AutoFitLastColumn();
 
     RECT rc = GetListRect();
     int listW     = rc.right - rc.left;
@@ -766,7 +844,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         int totalColsWidth = 0;
         for (const auto& col : m_columns) totalColsWidth += col.width;
         int rightOfColumns = GetGutterWidth() - m_scrollX + totalColsWidth;
-        int rowPillRight = (std::min)(listW - 4, rightOfColumns);
+        int rowPillRight = (std::max)(listW - 4, rightOfColumns);
         if (rowPillRight < 4) rowPillRight = 4;
 
         for (int r = startRow; r < endRow; ++r)
@@ -1743,6 +1821,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
 
     case WM_SIZE:
     {
+        AutoFitLastColumn();
         UpdateScrollbars();
         Invalidate();
         return 0;
@@ -1969,6 +2048,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             int totalColsWidth = 0;
             for (const auto& col : m_columns) totalColsWidth += col.width;
             int rightOfCols = GetGutterWidth() - m_scrollX + totalColsWidth;
+            int nameRightX = GetGutterWidth() - m_scrollX + GetPrimaryLeftSectionWidth();
 
             if (clickedRow >= 0 && clickedRow < itemCount && x < rightOfCols)
             {
@@ -2053,94 +2133,117 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                     }
                 }
 
-                bool isAlreadySelected = (m_selectedIndices.count(clickedRow) > 0);
-
-                if (m_bAllowRearrange || m_bAllowTransferSource)
+                // Directory Opus model:
+                // If clicked within the Primary/Name section -> row selection / item reorder drag.
+                // If clicked in the right section columns (and marquee is allowed) -> start Marquee selection.
+                if (x < nameRightX || !m_bAllowMarquee)
                 {
-                    // Clicked on ANY row in a draggable list (Workspace or Stock Library)
-                    // Windows Explorer model:
-                    // Potential item drag. If moved > 4px, it will drag this item (or existing multi-selection if already selected).
-                    // If released without moving > 4px, it executes standard click / Ctrl / Shift selection.
-                    m_bPotentialItemDrag = true;
-                    m_bPotentialDrag = false;
-                    m_ptDragStart = { x, y };
-                    m_pendingClickedRow = clickedRow;
-                    m_bPendingCtrl = bCtrl;
-                    m_bPendingShift = bShift;
-                    SetCapture(m_hWnd);
-                }
-                else if (!m_bAllowMarquee)
-                {
-                    // Marquee disabled (Consists Manager) -> Direct single-click selection
-                    m_selectedIndices.clear();
-                    m_selectedOrder.clear();
-                    m_selectedIndices.insert(clickedRow);
-                    m_selectedOrder.push_back(clickedRow);
-                    m_selectedIndex = clickedRow;
-                    m_anchorRow = clickedRow;
-                    Invalidate();
-
-                    m_bPotentialItemDrag = false;
-                    m_bPotentialDrag = false;
-                    m_pendingClickedRow = clickedRow;
-
-                    NMHDR nmhdr = { 0 };
-                    nmhdr.hwndFrom = m_hWnd;
-                    nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
-                    nmhdr.code     = NM_CLICK;
-                    SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
-                    return 0;
-                }
-                else
-                {
-                    // Table without item drag: clicking directly on a row selects it immediately
-                    if (m_isMultiSelect)
+                    if (m_bAllowRearrange || m_bAllowTransferSource)
                     {
-                        if (bCtrl)
-                        {
-                            ToggleRowSelection(clickedRow);
-                        }
-                        else if (bShift)
-                        {
-                            int anchor = (m_anchorRow >= 0) ? m_anchorRow : 0;
-                            int rStart = (std::min)(anchor, clickedRow);
-                            int rEnd   = (std::max)(anchor, clickedRow);
-                            m_selectedIndices.clear();
-                            m_selectedOrder.clear();
-                            for (int r = rStart; r <= rEnd; ++r)
-                            {
-                                m_selectedIndices.insert(r);
-                                m_selectedOrder.push_back(r);
-                            }
-                            m_selectedIndex = clickedRow;
-                            Invalidate();
-                        }
-                        else
-                        {
-                            m_selectedIndices.clear();
-                            m_selectedOrder.clear();
-                            m_selectedIndices.insert(clickedRow);
-                            m_selectedOrder.push_back(clickedRow);
-                            m_selectedIndex = clickedRow;
-                            m_anchorRow = clickedRow;
-                            Invalidate();
-                        }
+                        // Draggable list (Workspace or Stock Library)
+                        m_bPotentialItemDrag = true;
+                        m_bPotentialDrag = false;
+                        m_ptDragStart = { x, y };
+                        m_pendingClickedRow = clickedRow;
+                        m_bPendingCtrl = bCtrl;
+                        m_bPendingShift = bShift;
+                        SetCapture(m_hWnd);
+                    }
+                    else if (!m_bAllowMarquee)
+                    {
+                        // Marquee disabled -> Direct single-click selection
+                        m_selectedIndices.clear();
+                        m_selectedOrder.clear();
+                        m_selectedIndices.insert(clickedRow);
+                        m_selectedOrder.push_back(clickedRow);
+                        m_selectedIndex = clickedRow;
+                        m_anchorRow = clickedRow;
+                        Invalidate();
+
+                        m_bPotentialItemDrag = false;
+                        m_bPotentialDrag = false;
+                        m_pendingClickedRow = clickedRow;
+
+                        NMHDR nmhdr = { 0 };
+                        nmhdr.hwndFrom = m_hWnd;
+                        nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+                        nmhdr.code     = NM_CLICK;
+                        SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+                        return 0;
                     }
                     else
                     {
-                        SetSelectedIndex(clickedRow);
-                    }
+                        // Table with direct click selection
+                        if (m_isMultiSelect)
+                        {
+                            if (bCtrl)
+                            {
+                                ToggleRowSelection(clickedRow);
+                            }
+                            else if (bShift)
+                            {
+                                int anchor = (m_anchorRow >= 0) ? m_anchorRow : 0;
+                                int rStart = (std::min)(anchor, clickedRow);
+                                int rEnd   = (std::max)(anchor, clickedRow);
+                                m_selectedIndices.clear();
+                                m_selectedOrder.clear();
+                                for (int r = rStart; r <= rEnd; ++r)
+                                {
+                                    m_selectedIndices.insert(r);
+                                    m_selectedOrder.push_back(r);
+                                }
+                                m_selectedIndex = clickedRow;
+                                Invalidate();
+                            }
+                            else
+                            {
+                                m_selectedIndices.clear();
+                                m_selectedOrder.clear();
+                                m_selectedIndices.insert(clickedRow);
+                                m_selectedOrder.push_back(clickedRow);
+                                m_selectedIndex = clickedRow;
+                                m_anchorRow = clickedRow;
+                                Invalidate();
+                            }
+                        }
+                        else
+                        {
+                            SetSelectedIndex(clickedRow);
+                        }
 
-                    m_bPotentialItemDrag = false;
-                    m_bPotentialDrag = false;
-                    m_pendingClickedRow = clickedRow;
+                        m_bPotentialItemDrag = false;
+                        m_bPotentialDrag = false;
+                        m_pendingClickedRow = clickedRow;
+
+                        NMHDR nmhdr = { 0 };
+                        nmhdr.hwndFrom = m_hWnd;
+                        nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+                        nmhdr.code     = NM_CLICK;
+                        SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+                        return 0;
+                    }
+                }
+                else
+                {
+                    // Clicked in right columns when Marquee is enabled -> DOpus Marquee start
+                    if (!bCtrl && !bShift)
+                    {
+                        ClearSelection();
+                    }
 
                     NMHDR nmhdr = { 0 };
                     nmhdr.hwndFrom = m_hWnd;
                     nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
                     nmhdr.code     = NM_CLICK;
                     SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
-                    return 0;
+
+                    m_bPotentialItemDrag = false;
+                    m_bPotentialDrag = true;
+                    m_ptDragStart = { x, y };
+                    m_pendingClickedRow = -1;
+                    m_bPendingCtrl = bCtrl;
+                    m_bPendingShift = bShift;
+                    SetCapture(m_hWnd);
                 }
             }
             else
@@ -2456,30 +2559,46 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 int totalColsW = 0;
                 for (const auto& col : m_columns) totalColsW += col.width;
                 int rightOfCols = GetGutterWidth() - m_scrollX + totalColsW;
+                int nameRightX = GetGutterWidth() - m_scrollX + GetPrimaryLeftSectionWidth();
 
-                if (x < rightOfCols)
+                int candidateRow = m_scrollY + (y - m_headerHeight) / m_rowHeight;
+                int itemCount = GetItemCount();
+
+                if (candidateRow >= 0 && candidateRow < itemCount)
                 {
-                    m_hoveredRow = m_scrollY + (y - m_headerHeight) / m_rowHeight;
-                    if (m_hoveredRow >= 0 && m_hoveredRow < GetItemCount())
+                    int xPos = GetGutterWidth() - m_scrollX;
+                    m_hoveredCol = -1;
+                    for (size_t c = 0; c < m_columns.size(); ++c)
                     {
-                        int xPos = GetGutterWidth() - m_scrollX;
-                        m_hoveredCol = -1;
-                        for (size_t c = 0; c < m_columns.size(); ++c)
+                        int colWidth = m_columns[c].width;
+                        int nextX = xPos + colWidth;
+                        if (x >= xPos && x < nextX && x >= GetGutterWidth())
                         {
-                            int colWidth = m_columns[c].width;
-                            int nextX = xPos + colWidth;
-                            if (x >= xPos && x < nextX && x >= GetGutterWidth())
-                            {
-                                m_hoveredCol = (int)c;
-                                break;
-                            }
-                            xPos = nextX;
+                            m_hoveredCol = (int)c;
+                            break;
                         }
+                        xPos = nextX;
+                    }
+
+                    // DOpus style hover activation:
+                    // Hover row is ONLY activated if pointer is in the primary/Name column (left section),
+                    // OR if hovering directly over interactive buttons (Orientation toggle or Inline copy button).
+                    bool isInteractiveBtnHover = false;
+                    if (m_hoveredCol >= 0)
+                    {
+                        if (m_columns[m_hoveredCol].title == L"Orientation" || m_hoveredCol == m_inlineCopyCol)
+                        {
+                            isInteractiveBtnHover = true;
+                        }
+                    }
+
+                    if (x < nameRightX || isInteractiveBtnHover)
+                    {
+                        m_hoveredRow = candidateRow;
                     }
                     else
                     {
                         m_hoveredRow = -1;
-                        m_hoveredCol = -1;
                     }
                 }
                 else
@@ -3237,15 +3356,27 @@ void CustomListControl::UpdateMarqueeSelection(int currentX, int currentY)
     bool bCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0 || m_bPendingCtrl;
     bool bShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0 || m_bPendingShift;
 
+    // Horizontal bounds of marquee box in screen coordinates
+    int boxLeft = (std::min)(m_rcMarquee.left, m_rcMarquee.right);
+    int boxRight = (std::max)(m_rcMarquee.left, m_rcMarquee.right);
+
+    int nameLeft = GetGutterWidth() - m_scrollX;
+    int nameRight = nameLeft + GetPrimaryLeftSectionWidth();
+
+    bool intersectsNameHorizontally = (boxRight >= nameLeft && boxLeft <= nameRight);
+
     // Build the set of rows currently intersecting the rubber-band box
     std::unordered_set<int> boxIntersects;
-    for (int r = 0; r < itemCount; ++r)
+    if (intersectsNameHorizontally)
     {
-        int rowTopWorld = r * m_rowHeight;
-        int rowBottomWorld = rowTopWorld + m_rowHeight;
-        if (rowBottomWorld >= topWorldY && rowTopWorld <= bottomWorldY)
+        for (int r = 0; r < itemCount; ++r)
         {
-            boxIntersects.insert(r);
+            int rowTopWorld = r * m_rowHeight;
+            int rowBottomWorld = rowTopWorld + m_rowHeight;
+            if (rowBottomWorld >= topWorldY && rowTopWorld <= bottomWorldY)
+            {
+                boxIntersects.insert(r);
+            }
         }
     }
 

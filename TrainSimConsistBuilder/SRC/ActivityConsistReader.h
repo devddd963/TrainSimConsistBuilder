@@ -16,6 +16,8 @@ namespace ActivityConsistReader {
         std::vector<ConsistReader::UnitInfo> units;
         int totalUnits = 0;
         bool isBroken = false;
+        bool hasMissingStock = false;
+        bool hasMissingShape = false;
         bool isDirty = false;
     };
 

@@ -1,5 +1,6 @@
 #include "ActivityConsistReader.h"
 #include "AppLogging.h"
+#include "StockSpecReader.h"
 #include <windows.h>
 #include <sstream>
 #include <algorithm>
@@ -357,10 +358,13 @@ namespace ActivityConsistReader {
         for (auto& con : data.consists)
         {
             con.isBroken = false;
+            con.hasMissingStock = false;
+            con.hasMissingShape = false;
             for (const auto& u : con.units)
             {
                 if (u.uid.empty() || u.parentDir.empty())
                 {
+                    con.hasMissingStock = true;
                     con.isBroken = true;
                     break;
                 }
@@ -371,9 +375,30 @@ namespace ActivityConsistReader {
                 DWORD attr = GetFileAttributesW(uPath.c_str());
                 if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
                 {
-                    con.isBroken = true;
-                    break;
+                    // Try alternate extension fallback (.wag / .eng)
+                    std::wstring altExt = u.isEngine ? L".wag" : L".eng";
+                    std::wstring altPath = basePath;
+                    if (!altPath.empty() && altPath.back() != L'\\') altPath += L'\\';
+                    altPath += L"TRAINS\\TRAINSET\\" + u.parentDir + L"\\" + u.uid + altExt;
+                    DWORD altAttr = GetFileAttributesW(altPath.c_str());
+                    if (altAttr == INVALID_FILE_ATTRIBUTES || (altAttr & FILE_ATTRIBUTE_DIRECTORY))
+                    {
+                        con.hasMissingStock = true;
+                        con.isBroken = true;
+                        break;
+                    }
+                    uPath = altPath;
                 }
+
+                StockSpecReader::StockSpec spec = StockSpecReader::ReadFullSpec(uPath, basePath);
+                if (!spec.mainShapeFile.empty() && !spec.shapeExistsOnDisk)
+                {
+                    con.hasMissingShape = true;
+                }
+            }
+            if (con.hasMissingStock || con.hasMissingShape)
+            {
+                con.isBroken = true;
             }
         }
 

@@ -648,9 +648,9 @@ void SwitchActiveConsistTab(HWND hWnd, int newSel)
             PopulateRouteActivityTree();
             g_ConsistList.Clear();
             g_ConsistList.ClearColumns();
-            g_ConsistList.AddColumn(L"Name", 280, 0);
-            g_ConsistList.AddColumn(L"Units", 80, 0);
-            g_ConsistList.AddColumn(L"Status", 120, 0);
+            g_ConsistList.AddColumn(L"Name", 200, 0);
+            g_ConsistList.AddColumn(L"Units", 70, 0);
+            g_ConsistList.AddColumn(L"Status", 100, 0);
             SetWindowTextW(g_hConsistHeader, L"  Activity Consists");
             CommandBar_SetButtonText(g_hCommandBar, CMD_ACTION_SAVE_CONSISTS, L"Save Activity Consist(s)", 195);
 
@@ -665,7 +665,7 @@ void SwitchActiveConsistTab(HWND hWnd, int newSel)
             g_ConsistList.AddColumn(L"Name", 240, 0);
             g_ConsistList.AddColumn(L"Units", 80, 0);
             g_ConsistList.AddColumn(L"Status", 100, 0);
-            g_ConsistList.AddColumn(L"Modified", 160, 0);
+            g_ConsistList.AddColumn(L"Modified", 140, 0);
             PopulateConsistListFromCache();
             CommandBar_SetButtonText(g_hCommandBar, CMD_ACTION_SAVE_CONSISTS, L"Save Consist(s)", 145);
 
@@ -1153,13 +1153,17 @@ static void UpdateLibraryTheme(BOOL bDarkMode)
 bool StringContainsIgnoreCase(const std::wstring& str, const std::wstring& search);
 static bool MatchLetterFilter(const std::wstring& str, const std::vector<std::wstring>& activeFilters);
 static bool MatchUnitsFilter(int units, const std::vector<std::wstring>& activeFilters);
+static bool MatchModifiedFilter(const FILETIME& ft, const std::vector<std::wstring>& activeFilters);
 
 struct ScannedConsist {
     std::wstring szFileName;
     std::wstring szName;
     int nUnits = 0;
     std::wstring szLastModified;
+    FILETIME ftLastWriteTime = { 0 };
     bool isBroken = false;
+    bool hasMissingStock = false;
+    bool hasMissingShape = false;
 };
 
 static std::vector<ScannedConsist> g_ScannedConsistsCache;
@@ -1189,8 +1193,25 @@ static void PopulateConsistListFromCache()
         if (!MatchUnitsFilter(item.nUnits, g_ConsistList.GetActiveFilters(1)))
             continue;
 
-        bool isFixedInSession = (!item.isBroken && g_SessionFixedConsists.count(item.szFileName) > 0);
-        std::wstring statusStr = item.isBroken ? L"Broken" : (isFixedInSession ? L"Fixed" : L"Healthy");
+        auto itSess = g_ConsistSessions.find(item.szFileName);
+        std::wstring statusStr;
+        if (itSess != g_ConsistSessions.end())
+        {
+            statusStr = EvaluateAndUpdateConsistStatus(item.szFileName, itSess->second.units, !itSess->second.isDirty);
+        }
+        else
+        {
+            bool isFixedInSession = (!item.isBroken && g_SessionFixedConsists.count(item.szFileName) > 0);
+            if (isFixedInSession)
+                statusStr = L"Fixed";
+            else if (item.hasMissingStock || (item.isBroken && !item.hasMissingShape))
+                statusStr = L"Missing Stock";
+            else if (item.hasMissingShape)
+                statusStr = L"Missing Shape";
+            else
+                statusStr = L"Healthy";
+        }
+
         const auto& statusFilters = g_ConsistList.GetActiveFilters(2);
         if (!statusFilters.empty())
         {
@@ -1202,8 +1223,10 @@ static void PopulateConsistListFromCache()
             if (!match) continue;
         }
 
+        if (!MatchModifiedFilter(item.ftLastWriteTime, g_ConsistList.GetActiveFilters(3)))
+            continue;
+
         std::wstring displayName = item.szName;
-        auto itSess = g_ConsistSessions.find(item.szFileName);
         if (itSess != g_ConsistSessions.end() && itSess->second.isDirty)
         {
             displayName = L"● " + displayName;
@@ -1211,7 +1234,8 @@ static void PopulateConsistListFromCache()
 
         g_ConsistList.AddItem({ displayName, std::to_wstring(item.nUnits), statusStr, item.szLastModified, item.szFileName });
         totalConsists++;
-        if (item.isBroken) brokenConsists++;
+        if (statusStr == L"Missing Stock" || statusStr == L"Missing Shape" || statusStr == L"Broken")
+            brokenConsists++;
     }
 
     wchar_t szHeader[128];
@@ -1505,8 +1529,6 @@ static void PopulateActivityConsistList()
     for (size_t i = 0; i < g_CurrentActivityData.consists.size(); ++i)
     {
         const auto& con = g_CurrentActivityData.consists[i];
-        if (con.isBroken) brokenConsists++;
-        totalConsists++;
 
         // Filter 0: Name (Letter filter)
         if (!MatchLetterFilter(con.name, nameFilters))
@@ -1516,10 +1538,26 @@ static void PopulateActivityConsistList()
         if (!MatchUnitsFilter(con.totalUnits, unitsFilters))
             continue;
 
-        // Filter 2: Status (Healthy, Broken, Fixed)
+        // Filter 2: Status (Healthy, Missing Stock, Missing Shape, Fixed)
         std::wstring consistKey = g_CurrentActivityFilePath + L"#" + con.id;
-        bool isFixed = (!con.isBroken && g_SessionFixedConsists.count(consistKey) > 0);
-        std::wstring statusStr = con.isBroken ? L"Broken" : (isFixed ? L"Fixed" : L"Healthy");
+        auto itSess = g_ConsistSessions.find(consistKey);
+        std::wstring statusStr;
+        if (itSess != g_ConsistSessions.end())
+        {
+            statusStr = EvaluateAndUpdateConsistStatus(consistKey, itSess->second.units, !itSess->second.isDirty);
+        }
+        else
+        {
+            bool isFixed = (!con.isBroken && g_SessionFixedConsists.count(consistKey) > 0);
+            if (isFixed)
+                statusStr = L"Fixed";
+            else if (con.hasMissingStock || (con.isBroken && !con.hasMissingShape))
+                statusStr = L"Missing Stock";
+            else if (con.hasMissingShape)
+                statusStr = L"Missing Shape";
+            else
+                statusStr = L"Healthy";
+        }
 
         if (!statusFilters.empty())
         {
@@ -1528,7 +1566,6 @@ static void PopulateActivityConsistList()
         }
 
         std::wstring displayName = con.name;
-        auto itSess = g_ConsistSessions.find(consistKey);
         if (con.isDirty || (itSess != g_ConsistSessions.end() && itSess->second.isDirty))
         {
             displayName = L"● " + displayName;
@@ -1536,6 +1573,10 @@ static void PopulateActivityConsistList()
 
         std::wstring idxStr = std::to_wstring(i);
         g_ConsistList.AddItem({ displayName, std::to_wstring(con.totalUnits), statusStr, idxStr });
+
+        totalConsists++;
+        if (statusStr == L"Missing Stock" || statusStr == L"Missing Shape" || statusStr == L"Broken")
+            brokenConsists++;
     }
 
     std::wstring actDispName = g_CurrentActivityData.fileName.empty() ? L"Activity" : g_CurrentActivityData.fileName;
@@ -1604,67 +1645,41 @@ DWORD WINAPI ConsistScannerThreadProc(LPVOID lpParam)
                     continue;
                 }
 
-                // Health check: verify all engines/wagons exist on disk
-                bool isBroken = false;
+                // Health check: verify all engines/wagons and shapes exist on disk
+                bool hasMissingStock = false;
+                bool hasMissingShape = false;
                 try
                 {
                     ConsistReader::ConsistData conData = ConsistReader::LoadConsist(fileFullPath);
                     for (const auto& unit : conData.units)
                     {
-                        if (unit.uid.empty() || unit.parentDir.empty())
+                        UnitHealthStatus h = GetUnitHealthOnDisk(unit, basePath);
+                        if (h == UnitHealthStatus::MissingStock)
                         {
-                            isBroken = true;
+                            hasMissingStock = true;
                             break;
                         }
-                        std::wstring ext = unit.isEngine ? L".eng" : L".wag";
-                        std::wstring unitPath = basePath + L"TRAINS\\TRAINSET\\" + unit.parentDir + L"\\" + unit.uid + ext;
-                        
-                        DWORD attr = GetFileAttributesW(unitPath.c_str());
-                        if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+                        else if (h == UnitHealthStatus::MissingShape)
                         {
-                            isBroken = true;
-                            break;
+                            hasMissingShape = true;
                         }
                     }
                 }
                 catch (...)
                 {
-                    isBroken = true;
+                    hasMissingStock = true;
                 }
-
-                // Check Column Header Filters
-                if (!MatchLetterFilter(szConsistName, g_ConsistList.GetActiveFilters(0)))
-                {
-                    continue;
-                }
-                if (!MatchUnitsFilter(nUnits, g_ConsistList.GetActiveFilters(1)))
-                {
-                    continue;
-                }
-                // Check Status filter (column 2)
-                bool isFixedInSession = (!isBroken && g_SessionFixedConsists.count(ffd.cFileName) > 0);
-                std::wstring statusStr = isBroken ? L"Broken" : (isFixedInSession ? L"Fixed" : L"Healthy");
-                const auto& statusFilters = g_ConsistList.GetActiveFilters(2);
-                if (!statusFilters.empty())
-                {
-                    bool match = false;
-                    for (const auto& f : statusFilters)
-                    {
-                        if (f == statusStr) match = true;
-                    }
-                    if (!match) continue;
-                }
-                if (!MatchModifiedFilter(ffd.ftLastWriteTime, g_ConsistList.GetActiveFilters(3)))
-                {
-                    continue;
-                }
+                bool isBroken = (hasMissingStock || hasMissingShape);
 
                 ScannedConsist* pConsist = new ScannedConsist();
                 pConsist->szFileName = ffd.cFileName;
                 pConsist->szName = szConsistName;
                 pConsist->nUnits = nUnits;
                 pConsist->szLastModified = FormatFileTimeFriendly(ffd.ftLastWriteTime);
+                pConsist->ftLastWriteTime = ffd.ftLastWriteTime;
                 pConsist->isBroken = isBroken;
+                pConsist->hasMissingStock = hasMissingStock;
+                pConsist->hasMissingShape = hasMissingShape;
                 if (isBroken)
                 {
                     g_InitiallyBrokenConsists.insert(ffd.cFileName);
@@ -3339,7 +3354,14 @@ void OnFilterPopupCallback(int colIndex, const std::vector<std::wstring>& checke
         }
         else
         {
-            TriggerConsistsRescan(GetAncestor(hWndList, GA_ROOT));
+            if (!g_ScannedConsistsCache.empty())
+            {
+                PopulateConsistListFromCache();
+            }
+            else
+            {
+                TriggerConsistsRescan(GetAncestor(hWndList, GA_ROOT));
+            }
         }
     }
     else if (hWndList == g_hAssetList || hWndList == g_hAssetList2 || hWndList == g_hAssetList3)
@@ -5921,6 +5943,20 @@ static bool SaveCurrentConsistDiskOnly(HWND hWnd)
             std::wstring friendlyTime = std::wstring(dateBuf) + L" " + timeBuf;
             g_ConsistList.SetCellText(sel, 3, friendlyTime);
             g_ConsistList.SetCellText(sel, 4, g_szCurrentConsistFile);
+
+            for (auto& item : g_ScannedConsistsCache)
+            {
+                if (item.szFileName == g_szCurrentConsistFile)
+                {
+                    item.szName = strName;
+                    item.nUnits = (int)g_LoadedConsistUnits.size();
+                    item.szLastModified = friendlyTime;
+                    item.isBroken = (statusStr == L"Missing Stock" || statusStr == L"Missing Shape" || statusStr == L"Broken");
+                    item.hasMissingStock = (statusStr == L"Missing Stock");
+                    item.hasMissingShape = (statusStr == L"Missing Shape");
+                    break;
+                }
+            }
         }
 
         if (!g_szCurrentConsistFile.empty())
@@ -5962,7 +5998,9 @@ static bool SaveActivityConsistByIndex(HWND hWnd, int consistIndex, int listRowI
         con.isDirty = false;
 
         std::wstring statusStr = EvaluateAndUpdateConsistStatus(consistKey, con.units, true);
-        con.isBroken = (statusStr == L"Broken");
+        con.isBroken = (statusStr == L"Missing Stock" || statusStr == L"Missing Shape" || statusStr == L"Broken");
+        con.hasMissingStock = (statusStr == L"Missing Stock");
+        con.hasMissingShape = (statusStr == L"Missing Shape");
 
         int targetRow = -1;
         if (listRowIndex >= 0 && listRowIndex < g_ConsistList.GetItemCount())
@@ -6879,7 +6917,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_ConsistList.AddColumn(L"Name", 240, 0);
             g_ConsistList.AddColumn(L"Units", 80, 0);
             g_ConsistList.AddColumn(L"Status", 100, 0);
-            g_ConsistList.AddColumn(L"Modified", 160, 0);
+            g_ConsistList.AddColumn(L"Modified", 140, 0);
         }
 
         // 5b. Create Top Deck: Route/Activities TreeView (for Activity Consists Tab)
@@ -6926,7 +6964,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_AssetList.SetVirtualMode(AssetListGetCellText, (void*)(intptr_t)0);
             g_AssetList.AddColumn(L"Name", 200, 0);
             g_AssetList.AddColumn(L"Type", 80, 0);
-            g_AssetList.AddColumn(L"Folder", 150, 0);
+            g_AssetList.AddColumn(L"Folder", 140, 0);
         }
 
         // 8b. Create Bottom Deck: Asset ListView (Pane 1 - Dual/Triple)
@@ -6941,7 +6979,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_AssetList2.SetVirtualMode(AssetListGetCellText, (void*)(intptr_t)1);
             g_AssetList2.AddColumn(L"Name", 200, 0);
             g_AssetList2.AddColumn(L"Type", 80, 0);
-            g_AssetList2.AddColumn(L"Folder", 150, 0);
+            g_AssetList2.AddColumn(L"Folder", 140, 0);
             ShowWindow(g_hAssetList2, SW_HIDE);
         }
 
@@ -6957,7 +6995,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_AssetList3.SetVirtualMode(AssetListGetCellText, (void*)(intptr_t)2);
             g_AssetList3.AddColumn(L"Name", 200, 0);
             g_AssetList3.AddColumn(L"Type", 80, 0);
-            g_AssetList3.AddColumn(L"Folder", 150, 0);
+            g_AssetList3.AddColumn(L"Folder", 140, 0);
             ShowWindow(g_hAssetList3, SW_HIDE);
         }
 
@@ -7787,16 +7825,53 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
             if (g_hConsistList && g_ActiveTab == 0)
             {
-                bool isFixedInSession = (!pConsist->isBroken && g_SessionFixedConsists.count(pConsist->szFileName) > 0);
-                std::wstring statusStr = pConsist->isBroken ? L"Broken" : (isFixedInSession ? L"Fixed" : L"Healthy");
-                
-                std::wstring displayName = pConsist->szName;
                 auto itSess = g_ConsistSessions.find(pConsist->szFileName);
-                if (itSess != g_ConsistSessions.end() && itSess->second.isDirty)
+                std::wstring statusStr;
+                if (itSess != g_ConsistSessions.end())
                 {
-                    displayName = L"● " + displayName;
+                    statusStr = EvaluateAndUpdateConsistStatus(pConsist->szFileName, itSess->second.units, !itSess->second.isDirty);
                 }
-                g_ConsistList.AddItem({ displayName, std::to_wstring(pConsist->nUnits), statusStr, pConsist->szLastModified, pConsist->szFileName });
+                else
+                {
+                    bool isFixedInSession = (!pConsist->isBroken && g_SessionFixedConsists.count(pConsist->szFileName) > 0);
+                    if (isFixedInSession) statusStr = L"Fixed";
+                    else if (pConsist->hasMissingStock || (pConsist->isBroken && !pConsist->hasMissingShape)) statusStr = L"Missing Stock";
+                    else if (pConsist->hasMissingShape) statusStr = L"Missing Shape";
+                    else statusStr = L"Healthy";
+                }
+
+                bool match = true;
+                if (!g_szConsistSearchQuery.empty() &&
+                    !StringContainsIgnoreCase(pConsist->szFileName, g_szConsistSearchQuery) &&
+                    !StringContainsIgnoreCase(pConsist->szName, g_szConsistSearchQuery))
+                {
+                    match = false;
+                }
+                if (match && !MatchLetterFilter(pConsist->szName, g_ConsistList.GetActiveFilters(0)))
+                    match = false;
+                if (match && !MatchUnitsFilter(pConsist->nUnits, g_ConsistList.GetActiveFilters(1)))
+                    match = false;
+                if (match)
+                {
+                    const auto& statusFilters = g_ConsistList.GetActiveFilters(2);
+                    if (!statusFilters.empty())
+                    {
+                        if (std::find(statusFilters.begin(), statusFilters.end(), statusStr) == statusFilters.end())
+                            match = false;
+                    }
+                }
+                if (match && !MatchModifiedFilter(pConsist->ftLastWriteTime, g_ConsistList.GetActiveFilters(3)))
+                    match = false;
+
+                if (match)
+                {
+                    std::wstring displayName = pConsist->szName;
+                    if (itSess != g_ConsistSessions.end() && itSess->second.isDirty)
+                    {
+                        displayName = L"● " + displayName;
+                    }
+                    g_ConsistList.AddItem({ displayName, std::to_wstring(pConsist->nUnits), statusStr, pConsist->szLastModified, pConsist->szFileName });
+                }
             }
             delete pConsist;
         }
@@ -7805,20 +7880,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     case WM_CONSIST_SCAN_COMPLETE:
     {
-        int totalConsists = g_ConsistList.GetItemCount();
-        int brokenConsists = 0;
-        for (int i = 0; i < totalConsists; ++i)
-        {
-            if (g_ConsistList.GetCellText(i, 2) == L"Broken")
-            {
-                brokenConsists++;
-            }
-        }
-        wchar_t szHeader[128];
-        swprintf_s(szHeader, 128, L"  Consists Manager [ Total: %d • Broken: %d ]", totalConsists, brokenConsists);
-        SetWindowTextW(g_hConsistHeader, szHeader);
-
-        g_ConsistList.SortByColumn(0, false);
+        PopulateConsistListFromCache();
         return 0;
     }
 
