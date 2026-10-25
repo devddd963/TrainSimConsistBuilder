@@ -9,6 +9,8 @@
 #include "ModernMessageBox.h"
 #include "ModernContextMenu.h"
 #include "CustomDropDownMenu.h"
+#include "CustomScrollBar.h"
+#include "CustomListControl.h"
 #include "../SRC/PoolMutator.h"
 #include "../SRC/PoolManager.h"
 #include "../SRC/TrainConfig.h"
@@ -246,9 +248,96 @@ namespace
         bool isHoverMasterBroken = false;
         bool isHoverTab2BtnSelectBroken = false;
         bool isHoverTab2BtnScanLibrary = false;
+
+        // Tab 2 Filter (Defaults to All Consists as requested)
+        enum class Tab2FilterMode { BrokenOnly, EmptyOnly, BrokenAndEmpty, All };
+        Tab2FilterMode tab2Filter = Tab2FilterMode::All;
+
+        // Tab 2 Action
+        enum class Tab2ActionMode { ReplaceUnit, RebuildConsist, PurgeUnit };
+        Tab2ActionMode tab2Action = Tab2ActionMode::ReplaceUnit;
+
+        // Tab 2 selected consist index (for routing/preview)
+        int tab2SelectedConsistIdx = -1;
+
+        // Tab 2 Multi-Consist & Sub-Group Collapsible States
+        struct ConsistSectionState
+        {
+            bool isExpanded = true;
+            bool enginesExpanded = true;
+            bool wagonsExpanded = true;
+        };
+        std::map<size_t, ConsistSectionState> tab2ConsistStates;
+
+        // Hierarchical Collapsible Matrix for Tab 2 (identical to Sound Studio)
+        enum MutatorDisplayRowType
+        {
+            MUTATOR_ROW_CONSIST_HEADER,
+            MUTATOR_ROW_UNIT_ENTRY,
+            MUTATOR_ROW_EMPTY_NOTICE
+        };
+
+        struct MutatorDisplayRow
+        {
+            MutatorDisplayRowType rowType = MUTATOR_ROW_CONSIST_HEADER;
+            int consistIndex = 0;
+            int unitIndex = -1;
+        };
+
+        CustomListControl batchConsistList;
+        HWND hBatchConsistListWnd = NULL;
+        std::vector<MutatorDisplayRow> displayRows;
+
+        // Tab 2 Sub-Toolbar & Controls
+        RECT rcBtnExpandAll = { 0 };
+        RECT rcBtnCollapseAll = { 0 };
+        RECT rcTab2FilterBtn = { 0 };
+        RECT rcTab2ActionReplace = { 0 };
+        RECT rcTab2ActionRebuild = { 0 };
+        RECT rcTab2ActionPurge = { 0 };
+
+        // Hover states for Tab 2 elements
+        bool isHoverBtnExpandAll = false;
+        bool isHoverBtnCollapseAll = false;
+        bool isHoverTab2FilterBtn = false;
+        bool isHoverTab2ActionReplace = false;
+        bool isHoverTab2ActionRebuild = false;
+        bool isHoverTab2ActionPurge = false;
     };
 
     static MutatorDlgState g_State;
+
+    static MutatorDlgState::ConsistSectionState& GetConsistSectionState(size_t cIdx)
+    {
+        auto it = g_State.tab2ConsistStates.find(cIdx);
+        if (it == g_State.tab2ConsistStates.end())
+        {
+            MutatorDlgState::ConsistSectionState newState;
+            newState.isExpanded = true;
+            newState.enginesExpanded = true;
+            newState.wagonsExpanded = true;
+            g_State.tab2ConsistStates[cIdx] = newState;
+            return g_State.tab2ConsistStates[cIdx];
+        }
+        return it->second;
+    }
+
+    static std::vector<size_t> GetActiveConsistIndices()
+    {
+        std::vector<size_t> active;
+        for (size_t i = 0; i < g_State.brokenConsists.size(); ++i)
+        {
+            if (g_State.brokenConsists[i].isSelected)
+            {
+                active.push_back(i);
+            }
+        }
+        if (active.empty() && g_State.tab2SelectedConsistIdx >= 0 && g_State.tab2SelectedConsistIdx < (int)g_State.brokenConsists.size())
+        {
+            active.push_back((size_t)g_State.tab2SelectedConsistIdx);
+        }
+        return active;
+    }
 
     static const PoolMutator::SourceNodeConfig* FindSourceNodeById(int id);
     static int CycleNextSourceIdForConsist(int currentId, int actionExecutionMode);
@@ -261,6 +350,9 @@ namespace
         }
         return PoolManager::GetPresetByIndex(g_State.selectedPresetIdx);
     }
+
+    static void PopulateBatchConsistMatrix();
+    static void ResizeBatchConsistColumns(int listW);
 
     static void RefreshBrokenConsists(bool forceScanAll = false)
     {
@@ -284,7 +376,7 @@ namespace
                 }
             }
         }
-        g_State.brokenScrollY = 0;
+        PopulateBatchConsistMatrix();
     }
 
     static void UpdateControlPositions(HWND hWnd)
@@ -350,6 +442,38 @@ namespace
             else
             {
                 SetWindowPos(g_State.hEditCloneSuffix, NULL, 128, h - 89, 154, 18, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
+            }
+        }
+
+        // Batch Consist Hierarchical Matrix (Tab 2)
+        if (g_State.hBatchConsistListWnd)
+        {
+            if (isTab2)
+            {
+                int totalW = w - 60;
+                int gap = 12;
+                int rightColW = (totalW - gap) * 34 / 100;
+                if (rightColW < 320) rightColW = 320;
+                int listW = totalW - gap - rightColW;
+                int leftX = 30;
+                int topY = 164;
+                int listH = (h - 68) - topY;
+                if (listH < 100) listH = 100;
+
+                if (g_State.brokenConsists.empty())
+                {
+                    ShowWindow(g_State.hBatchConsistListWnd, SW_HIDE);
+                }
+                else
+                {
+                    ShowWindow(g_State.hBatchConsistListWnd, SW_SHOW);
+                    SetWindowPos(g_State.hBatchConsistListWnd, NULL, leftX, topY, listW, listH, SWP_NOZORDER);
+                    ResizeBatchConsistColumns(listW);
+                }
+            }
+            else
+            {
+                ShowWindow(g_State.hBatchConsistListWnd, SW_HIDE);
             }
         }
 
@@ -574,8 +698,877 @@ namespace
         return L"Select Source Stock";
     }
 
+    // -------------------------------------------------------------------------
+    // TAB 2 NEW HELPERS
+    // -------------------------------------------------------------------------
+
+    static void DrawSolidTriangleDir(HDC hdc, int cx, int cy, COLORREF col, int dir /* 0=down, 1=up, 2=right, 3=left */, int size = 4)
+    {
+        HBRUSH hbr = CreateSolidBrush(col);
+        HPEN hpen = CreatePen(PS_SOLID, 1, col);
+        HBRUSH holdBr = (HBRUSH)SelectObject(hdc, hbr);
+        HPEN holdPen = (HPEN)SelectObject(hdc, hpen);
+        POINT pts[3];
+        if (dir == 0) // Down
+        {
+            pts[0] = { cx - size, cy - (size / 2) };
+            pts[1] = { cx + size, cy - (size / 2) };
+            pts[2] = { cx,        cy + (size / 2) + 1 };
+        }
+        else if (dir == 1) // Up
+        {
+            pts[0] = { cx,        cy - (size / 2) - 1 };
+            pts[1] = { cx - size, cy + (size / 2) };
+            pts[2] = { cx + size, cy + (size / 2) };
+        }
+        else if (dir == 2) // Right
+        {
+            pts[0] = { cx - (size / 2), cy - size };
+            pts[1] = { cx - (size / 2), cy + size };
+            pts[2] = { cx + (size / 2) + 1, cy };
+        }
+        else // Left
+        {
+            pts[0] = { cx + (size / 2), cy - size };
+            pts[1] = { cx + (size / 2), cy + size };
+            pts[2] = { cx - (size / 2) - 1, cy };
+        }
+        Polygon(hdc, pts, 3);
+        SelectObject(hdc, holdBr);
+        SelectObject(hdc, holdPen);
+        DeleteObject(hbr);
+        DeleteObject(hpen);
+    }
+
+    static void DrawSolidTriangle(HDC hdc, int cx, int cy, COLORREF col, bool isDown, int size = 4)
+    {
+        DrawSolidTriangleDir(hdc, cx, cy, col, isDown ? 0 : 1, size);
+    }
+
+    static void ResizeBatchConsistColumns(int listW)
+    {
+        if (!g_State.hBatchConsistListWnd) return;
+        RECT rcInner = { 0 };
+        if (GetClientRect(g_State.hBatchConsistListWnd, &rcInner) && rcInner.right > 50)
+        {
+            listW = rcInner.right;
+        }
+        if (listW <= 100) return;
+
+        int availW = listW - 14;
+        int fixedW = 60 + 85 + 115 + 155; // Col 0, 2, 4, 5
+        int remW = availW - fixedW;
+        if (remW < 160) remW = 160;
+
+        int col1 = remW * 55 / 100;
+        int col3 = remW - col1;
+
+        g_State.batchConsistList.SetColumnWidth(0, 60);
+        g_State.batchConsistList.SetColumnWidth(1, col1);
+        g_State.batchConsistList.SetColumnWidth(2, 85);
+        g_State.batchConsistList.SetColumnWidth(3, col3);
+        g_State.batchConsistList.SetColumnWidth(4, 115);
+        g_State.batchConsistList.SetColumnWidth(5, 155);
+        g_State.batchConsistList.Invalidate();
+    }
+
+    static void PopulateBatchConsistMatrix()
+    {
+        if (!g_State.hBatchConsistListWnd) return;
+
+        g_State.displayRows.clear();
+        g_State.batchConsistList.Clear();
+
+        std::vector<size_t> filteredIndices;
+        for (size_t i = 0; i < g_State.brokenConsists.size(); ++i)
+        {
+            auto& bc = g_State.brokenConsists[i];
+            bool hasBroken = false;
+            for (const auto& bu : bc.brokenUnits) { if (bu.isBroken) { hasBroken = true; break; } }
+            bool isEmpty = bc.brokenUnits.empty();
+
+            bool include = false;
+            switch (g_State.tab2Filter)
+            {
+            case MutatorDlgState::Tab2FilterMode::BrokenOnly:     include = hasBroken; break;
+            case MutatorDlgState::Tab2FilterMode::EmptyOnly:      include = isEmpty; break;
+            case MutatorDlgState::Tab2FilterMode::BrokenAndEmpty: include = hasBroken || isEmpty; break;
+            case MutatorDlgState::Tab2FilterMode::All:            include = true; break;
+            }
+            if (include) filteredIndices.push_back(i);
+        }
+
+        for (size_t fIdx = 0; fIdx < filteredIndices.size(); ++fIdx)
+        {
+            size_t cIdx = filteredIndices[fIdx];
+            auto& bc = g_State.brokenConsists[cIdx];
+            auto& cState = GetConsistSectionState(cIdx);
+
+            // 1. Parent Consist Row
+            MutatorDlgState::MutatorDisplayRow parentRow;
+            parentRow.rowType = MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER;
+            parentRow.consistIndex = (int)cIdx;
+            parentRow.unitIndex = -1;
+            g_State.displayRows.push_back(parentRow);
+
+            int brokenCount = 0;
+            for (const auto& bu : bc.brokenUnits) { if (bu.isBroken) brokenCount++; }
+
+            bool isActivity = (bc.filePath.rfind(L"ACTIVITY:", 0) == 0);
+            std::wstring conLabel;
+            if (isActivity)
+            {
+                conLabel = L"[Act] " + bc.consistName;
+            }
+            else
+            {
+                conLabel = bc.fileName;
+                if (conLabel.size() < 4 || _wcsicmp(conLabel.substr(conLabel.size() - 4).c_str(), L".con") != 0)
+                {
+                    conLabel += L".con";
+                }
+            }
+
+            std::wstring expandChevron = bc.brokenUnits.empty() ? L"  " : (cState.isExpanded ? L"▾ " : L"▸ ");
+            std::wstring col0 = expandChevron + std::to_wstring(fIdx + 1);
+
+            std::wstring typeStr = std::to_wstring(bc.brokenUnits.size()) + L" Units";
+            std::wstring pathStr = bc.filePath;
+
+            std::wstring statusStr;
+            if (bc.brokenUnits.empty()) statusStr = L"○ 0 Units";
+            else if (brokenCount > 0) statusStr = L"⚠ " + std::to_wstring(brokenCount) + L" Missing";
+            else statusStr = L"✓ Healthy";
+
+            std::wstring targetStr;
+            if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit)
+            {
+                targetStr = L"🗑 Purge Marked";
+            }
+            else if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::RebuildConsist)
+            {
+                const auto* pSrc = FindSourceNodeById(bc.assignedSourceId);
+                targetStr = L"🔄 Rebuild ➔ " + (pSrc ? pSrc->name : L"Source A");
+            }
+            else
+            {
+                const auto* pSrc = FindSourceNodeById(bc.assignedSourceId);
+                targetStr = (pSrc ? pSrc->name : L"Source A");
+            }
+
+            g_State.batchConsistList.AddItem({
+                col0,
+                conLabel,
+                typeStr,
+                pathStr,
+                statusStr,
+                targetStr
+            });
+
+            // 2. Child Rows if Expanded
+            if (cState.isExpanded)
+            {
+                if (bc.brokenUnits.empty())
+                {
+                    MutatorDlgState::MutatorDisplayRow noticeRow;
+                    noticeRow.rowType = MutatorDlgState::MUTATOR_ROW_EMPTY_NOTICE;
+                    noticeRow.consistIndex = (int)cIdx;
+                    noticeRow.unitIndex = -1;
+                    g_State.displayRows.push_back(noticeRow);
+
+                    g_State.batchConsistList.AddItem({
+                        L"   ↳",
+                        L"(Empty Formation - 0 units)",
+                        L"—",
+                        L"—",
+                        L"○ 0 Units",
+                        L"—"
+                    });
+                }
+                else
+                {
+                    for (size_t uIdx = 0; uIdx < bc.brokenUnits.size(); ++uIdx)
+                    {
+                        const auto& bu = bc.brokenUnits[uIdx];
+                        MutatorDlgState::MutatorDisplayRow unitRow;
+                        unitRow.rowType = MutatorDlgState::MUTATOR_ROW_UNIT_ENTRY;
+                        unitRow.consistIndex = (int)cIdx;
+                        unitRow.unitIndex = (int)uIdx;
+                        g_State.displayRows.push_back(unitRow);
+
+                        std::wstring uSlot = bu.uid;
+                        std::wstring uType = bu.isEngine ? L"Engine" : L"Wagon";
+                        std::wstring uFolder = bu.parentDir;
+                        std::wstring uStatus = bu.isBroken ? L"MISSING" : L"READY";
+
+                        std::wstring uTarget;
+                        if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit)
+                        {
+                            uTarget = bu.isSelected ? L"➔ Purge Unit" : L"Keep Unit";
+                        }
+                        else if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::RebuildConsist)
+                        {
+                            uTarget = L"(Rebuild Entire)";
+                        }
+                        else
+                        {
+                            const auto* pSrc = FindSourceNodeById(bu.assignedSourceId);
+                            uTarget = L"➔ " + (pSrc ? pSrc->name : L"Source A");
+                        }
+
+                        g_State.batchConsistList.AddItem({
+                            L"   ↳",
+                            uSlot,
+                            uType,
+                            uFolder,
+                            uStatus,
+                            uTarget
+                        });
+                    }
+                }
+            }
+        }
+
+        ResizeBatchConsistColumns(0);
+    }
+
+    static bool Mutator_RowBackgroundCallback(HDC hdc, int itemIndex, const RECT& rcRow, bool isSelected, bool isHovered, void* pParam)
+    {
+        if (itemIndex < 0 || itemIndex >= (int)g_State.displayRows.size()) return false;
+        const auto& dRow = g_State.displayRows[itemIndex];
+        if (dRow.consistIndex < 0 || dRow.consistIndex >= (int)g_State.brokenConsists.size()) return false;
+        const auto& bc = g_State.brokenConsists[dRow.consistIndex];
+        auto& cState = GetConsistSectionState(dRow.consistIndex);
+
+        bool isFirstInCard = (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER);
+        bool isLastInCard = (!cState.isExpanded || (itemIndex + 1 >= (int)g_State.displayRows.size()) || (g_State.displayRows[itemIndex + 1].consistIndex != dRow.consistIndex));
+
+        RECT rc = rcRow;
+        if (isFirstInCard && itemIndex > 0)
+        {
+            rc.top += 4;
+        }
+        if (isLastInCard)
+        {
+            rc.bottom -= 1;
+        }
+
+        int brokenCount = 0;
+        for (const auto& bu : bc.brokenUnits) { if (bu.isBroken) brokenCount++; }
+
+        COLORREF accentColor;
+        if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
+        {
+            accentColor = (brokenCount > 0) ? RGB(255, 95, 80) : RGB(0, 145, 255);
+        }
+        else if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_UNIT_ENTRY && dRow.unitIndex >= 0 && dRow.unitIndex < (int)bc.brokenUnits.size())
+        {
+            const auto& bu = bc.brokenUnits[dRow.unitIndex];
+            if (bu.isBroken) accentColor = RGB(255, 80, 80);
+            else if (bu.isEngine) accentColor = RGB(0, 145, 255);
+            else accentColor = RGB(245, 158, 11);
+        }
+        else
+        {
+            accentColor = RGB(120, 120, 130);
+        }
+
+        COLORREF bgCol;
+        COLORREF borderCol = RGB(46, 54, 68);
+
+        if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
+        {
+            bgCol = (brokenCount > 0) ? RGB(32, 26, 32) : RGB(24, 30, 42);
+            if (isSelected) bgCol = RGB(36, 68, 110);
+            else if (isHovered) bgCol = (brokenCount > 0) ? RGB(40, 32, 40) : RGB(30, 40, 56);
+        }
+        else if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_UNIT_ENTRY)
+        {
+            bgCol = (dRow.unitIndex % 2 == 0) ? RGB(20, 24, 30) : RGB(23, 27, 34);
+            if (isSelected) bgCol = RGB(28, 52, 85);
+            else if (isHovered) bgCol = RGB(30, 38, 50);
+        }
+        else // MUTATOR_ROW_EMPTY_NOTICE
+        {
+            bgCol = RGB(19, 23, 30);
+            if (isSelected) bgCol = RGB(28, 52, 85);
+            else if (isHovered) bgCol = RGB(26, 32, 44);
+        }
+
+        HBRUSH hbrBg = CreateSolidBrush(bgCol);
+        HPEN hpenBorder = CreatePen(PS_SOLID, 1, borderCol);
+        HGDIOBJ oldBr = SelectObject(hdc, hbrBg);
+        HGDIOBJ oldPn = SelectObject(hdc, hpenBorder);
+
+        if (isFirstInCard && isLastInCard)
+        {
+            RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 6, 6);
+        }
+        else if (isFirstInCard)
+        {
+            RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom + 6, 6, 6);
+            HPEN hInnerPen = CreatePen(PS_SOLID, 1, RGB(38, 46, 58));
+            SelectObject(hdc, hInnerPen);
+            MoveToEx(hdc, rc.left + 1, rc.bottom - 1, NULL);
+            LineTo(hdc, rc.right - 1, rc.bottom - 1);
+            DeleteObject(hInnerPen);
+        }
+        else if (isLastInCard)
+        {
+            RoundRect(hdc, rc.left, rc.top - 6, rc.right, rc.bottom, 6, 6);
+        }
+        else
+        {
+            FillRect(hdc, &rc, hbrBg);
+            HPEN hSidePen = CreatePen(PS_SOLID, 1, borderCol);
+            SelectObject(hdc, hSidePen);
+            MoveToEx(hdc, rc.left, rc.top, NULL); LineTo(hdc, rc.left, rc.bottom);
+            MoveToEx(hdc, rc.right - 1, rc.top, NULL); LineTo(hdc, rc.right - 1, rc.bottom);
+            DeleteObject(hSidePen);
+        }
+
+        SelectObject(hdc, oldBr);
+        SelectObject(hdc, oldPn);
+        DeleteObject(hbrBg);
+        DeleteObject(hpenBorder);
+
+        // Left Accent Color Stripe
+        int stripeLeft = rc.left + 1;
+        int stripeW = 4;
+        RECT rcStripe = { stripeLeft, rc.top + (isFirstInCard ? 2 : 0), stripeLeft + stripeW, rc.bottom - (isLastInCard ? 2 : 0) };
+        HBRUSH hbrStripe = CreateSolidBrush(accentColor);
+        FillRect(hdc, &rcStripe, hbrStripe);
+        DeleteObject(hbrStripe);
+
+        // Inter-card separator gap line
+        if (isFirstInCard && itemIndex > 0)
+        {
+            HPEN hSepPen = CreatePen(PS_SOLID, 1, RGB(30, 35, 45));
+            HGDIOBJ oldSep = SelectObject(hdc, hSepPen);
+            MoveToEx(hdc, rc.left - 2, rc.top - 2, NULL);
+            LineTo(hdc, rc.right + 2, rc.top - 2);
+            SelectObject(hdc, oldSep);
+            DeleteObject(hSepPen);
+        }
+
+        return true;
+    }
+
+    static bool Mutator_DrawCellCallback(HDC hdc, int itemIndex, int subItemIndex, const RECT& rcCell, bool isSelected, bool isHovered, void* pParam)
+    {
+        if (itemIndex < 0 || itemIndex >= (int)g_State.displayRows.size()) return false;
+        const auto& dRow = g_State.displayRows[itemIndex];
+        if (dRow.consistIndex < 0 || dRow.consistIndex >= (int)g_State.brokenConsists.size()) return false;
+        const auto& bc = g_State.brokenConsists[dRow.consistIndex];
+        auto& cState = GetConsistSectionState(dRow.consistIndex);
+
+        int oldBkMode = SetBkMode(hdc, TRANSPARENT);
+        HFONT hOldFont = (HFONT)SelectObject(hdc, g_State.hFontMain ? g_State.hFontMain : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+        COLORREF accentCol = RGB(0, 120, 215);
+
+        // Column 0: Chevron / Checkbox / Number
+        if (subItemIndex == 0)
+        {
+            RECT rc = rcCell;
+            if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
+            {
+                // Chevron ▾ / ▸
+                if (!bc.brokenUnits.empty())
+                {
+                    SelectObject(hdc, g_State.hFontMain);
+                    SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(140, 185, 240));
+                    RECT rcChevron = { rc.left + 6, rc.top, rc.left + 18, rc.bottom };
+                    DrawTextW(hdc, cState.isExpanded ? L"▾" : L"▸", -1, &rcChevron, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+
+                // Checkbox
+                int chkSz = 14;
+                int chkY = rc.top + (rc.bottom - rc.top - chkSz) / 2;
+                RECT rcChk = { rc.left + 20, chkY, rc.left + 20 + chkSz, chkY + chkSz };
+
+                int selUnits = 0;
+                for (const auto& u : bc.brokenUnits) { if (u.isSelected) selUnits++; }
+                bool isAllChecked = bc.isSelected && (!bc.brokenUnits.empty() ? (selUnits == (int)bc.brokenUnits.size()) : true);
+                bool isIndeterminate = !isAllChecked && (selUnits > 0 || bc.isSelected);
+
+                COLORREF chkBg = (isAllChecked || isIndeterminate) ? accentCol : RGB(36, 40, 48);
+                COLORREF chkBdr = (isAllChecked || isIndeterminate) ? accentCol : RGB(70, 78, 92);
+                HBRUSH hbrChk = CreateSolidBrush(chkBg);
+                HPEN hpChk = CreatePen(PS_SOLID, 1, chkBdr);
+                HGDIOBJ oB = SelectObject(hdc, hbrChk);
+                HGDIOBJ oP = SelectObject(hdc, hpChk);
+                RoundRect(hdc, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
+                SelectObject(hdc, oB); SelectObject(hdc, oP);
+                DeleteObject(hbrChk); DeleteObject(hpChk);
+
+                if (isAllChecked)
+                {
+                    SelectObject(hdc, g_State.hFontIcon ? g_State.hFontIcon : g_State.hFontMain);
+                    SetTextColor(hdc, RGB(255, 255, 255));
+                    RECT rcGlyph = { rcChk.left, rcChk.top - 1, rcChk.right, rcChk.bottom };
+                    DrawTextW(hdc, L"\xE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+                else if (isIndeterminate)
+                {
+                    HBRUSH hbrInd = CreateSolidBrush(RGB(255, 255, 255));
+                    RECT rcInd = { rcChk.left + 3, rcChk.top + 6, rcChk.right - 3, rcChk.top + 8 };
+                    FillRect(hdc, &rcInd, hbrInd);
+                    DeleteObject(hbrInd);
+                }
+
+                // Consist Number #
+                SelectObject(hdc, g_State.hFontBold);
+                SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(220, 225, 235));
+                RECT rcNum = { rc.left + 38, rc.top, rc.right - 2, rc.bottom };
+                DrawTextW(hdc, std::to_wstring(dRow.consistIndex + 1).c_str(), -1, &rcNum, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+            else if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_UNIT_ENTRY && dRow.unitIndex >= 0 && dRow.unitIndex < (int)bc.brokenUnits.size())
+            {
+                const auto& bu = bc.brokenUnits[dRow.unitIndex];
+
+                // Branch ↳
+                SelectObject(hdc, g_State.hFontMain);
+                SetTextColor(hdc, RGB(110, 130, 160));
+                RECT rcBranch = { rc.left + 6, rc.top, rc.left + 20, rc.bottom };
+                DrawTextW(hdc, L"↳", -1, &rcBranch, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                // Unit Checkbox
+                int chkSz = 14;
+                int chkY = rc.top + (rc.bottom - rc.top - chkSz) / 2;
+                RECT rcChk = { rc.left + 22, chkY, rc.left + 22 + chkSz, chkY + chkSz };
+
+                HBRUSH hbrChk = CreateSolidBrush(bu.isSelected ? accentCol : RGB(32, 36, 44));
+                HPEN hpChk = CreatePen(PS_SOLID, 1, bu.isSelected ? accentCol : RGB(65, 72, 85));
+                HGDIOBJ oB = SelectObject(hdc, hbrChk);
+                HGDIOBJ oP = SelectObject(hdc, hpChk);
+                RoundRect(hdc, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
+                SelectObject(hdc, oB); SelectObject(hdc, oP);
+                DeleteObject(hbrChk); DeleteObject(hpChk);
+
+                if (bu.isSelected)
+                {
+                    SelectObject(hdc, g_State.hFontIcon ? g_State.hFontIcon : g_State.hFontMain);
+                    SetTextColor(hdc, RGB(255, 255, 255));
+                    RECT rcGlyph = { rcChk.left, rcChk.top - 1, rcChk.right, rcChk.bottom };
+                    DrawTextW(hdc, L"\xE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+
+                // Unit Index #
+                SelectObject(hdc, g_State.hFontSmall);
+                SetTextColor(hdc, RGB(140, 155, 175));
+                RECT rcNum = { rc.left + 40, rc.top, rc.right - 2, rc.bottom };
+                DrawTextW(hdc, std::to_wstring(dRow.unitIndex + 1).c_str(), -1, &rcNum, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+            else // Notice row
+            {
+                SelectObject(hdc, g_State.hFontMain);
+                SetTextColor(hdc, RGB(90, 105, 125));
+                RECT rcBranch = { rc.left + 6, rc.top, rc.right - 2, rc.bottom };
+                DrawTextW(hdc, L"↳", -1, &rcBranch, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+
+            SelectObject(hdc, hOldFont);
+            SetBkMode(hdc, oldBkMode);
+            return true;
+        }
+
+        // Column 1: Consist / Unit Name
+        if (subItemIndex == 1)
+        {
+            RECT rc = rcCell;
+            rc.left += 6; rc.right -= 6;
+            if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
+            {
+                SelectObject(hdc, g_State.hFontBold);
+                SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(245, 245, 245));
+                bool isActivity = (bc.filePath.rfind(L"ACTIVITY:", 0) == 0);
+                std::wstring nameStr = isActivity ? (L"[Act] " + bc.consistName) : bc.fileName;
+                DrawTextW(hdc, nameStr.c_str(), -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            }
+            else if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_UNIT_ENTRY && dRow.unitIndex >= 0 && dRow.unitIndex < (int)bc.brokenUnits.size())
+            {
+                const auto& bu = bc.brokenUnits[dRow.unitIndex];
+                SelectObject(hdc, g_State.hFontMain);
+                SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : (bu.isBroken ? RGB(255, 130, 130) : RGB(215, 225, 240)));
+                DrawTextW(hdc, bu.uid.c_str(), -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            }
+            else // Notice row
+            {
+                SelectObject(hdc, g_State.hFontSmall);
+                SetTextColor(hdc, RGB(140, 150, 165));
+                DrawTextW(hdc, L"(Empty Formation)", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+
+            SelectObject(hdc, hOldFont);
+            SetBkMode(hdc, oldBkMode);
+            return true;
+        }
+
+        // Column 2: Type Pill Badge
+        if (subItemIndex == 2)
+        {
+            RECT rc = rcCell;
+            rc.top += 4; rc.bottom -= 4;
+            rc.left += 4; rc.right -= 4;
+            if (rc.right > rc.left)
+            {
+                if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
+                {
+                    COLORREF pillBg = RGB(22, 34, 48);
+                    COLORREF pillBorder = RGB(44, 68, 96);
+                    COLORREF pillText = RGB(120, 180, 245);
+                    HBRUSH hbr = CreateSolidBrush(pillBg); HPEN hp = CreatePen(PS_SOLID, 1, pillBorder);
+                    HGDIOBJ oB = SelectObject(hdc, hbr); HGDIOBJ oP = SelectObject(hdc, hp);
+                    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 4, 4);
+                    SelectObject(hdc, oB); SelectObject(hdc, oP);
+                    DeleteObject(hbr); DeleteObject(hp);
+
+                    SelectObject(hdc, g_State.hFontSmall);
+                    SetTextColor(hdc, pillText);
+                    std::wstring cntStr = std::to_wstring(bc.brokenUnits.size()) + L" Units";
+                    DrawTextW(hdc, cntStr.c_str(), -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+                else if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_UNIT_ENTRY && dRow.unitIndex >= 0 && dRow.unitIndex < (int)bc.brokenUnits.size())
+                {
+                    const auto& bu = bc.brokenUnits[dRow.unitIndex];
+                    bool isEng = bu.isEngine;
+                    COLORREF pillBg = isEng ? RGB(18, 48, 88) : RGB(48, 36, 18);
+                    COLORREF pillBorder = isEng ? RGB(32, 90, 160) : RGB(120, 85, 35);
+                    COLORREF pillText = isEng ? RGB(100, 185, 255) : RGB(255, 175, 80);
+
+                    HBRUSH hbr = CreateSolidBrush(pillBg); HPEN hp = CreatePen(PS_SOLID, 1, pillBorder);
+                    HGDIOBJ oB = SelectObject(hdc, hbr); HGDIOBJ oP = SelectObject(hdc, hp);
+                    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 4, 4);
+                    SelectObject(hdc, oB); SelectObject(hdc, oP);
+                    DeleteObject(hbr); DeleteObject(hp);
+
+                    SelectObject(hdc, g_State.hFontSmall);
+                    SetTextColor(hdc, pillText);
+                    DrawTextW(hdc, isEng ? L"Engine" : L"Wagon", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+            }
+
+            SelectObject(hdc, hOldFont);
+            SetBkMode(hdc, oldBkMode);
+            return true;
+        }
+
+        // Column 3: Parent Directory / File
+        if (subItemIndex == 3)
+        {
+            RECT rc = rcCell;
+            rc.left += 6; rc.right -= 6;
+            SelectObject(hdc, g_State.hFontSmall);
+            SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(150, 165, 185));
+
+            if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
+            {
+                DrawTextW(hdc, bc.filePath.c_str(), -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            }
+            else if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_UNIT_ENTRY && dRow.unitIndex >= 0 && dRow.unitIndex < (int)bc.brokenUnits.size())
+            {
+                const auto& bu = bc.brokenUnits[dRow.unitIndex];
+                DrawTextW(hdc, bu.parentDir.c_str(), -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            }
+
+            SelectObject(hdc, hOldFont);
+            SetBkMode(hdc, oldBkMode);
+            return true;
+        }
+
+        // Column 4: Status Pill Badge
+        if (subItemIndex == 4)
+        {
+            RECT rc = rcCell;
+            rc.top += 4; rc.bottom -= 4;
+            rc.left += 6; rc.right -= 6;
+            if (rc.right > rc.left)
+            {
+                if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
+                {
+                    int brokenCount = 0;
+                    for (const auto& bu : bc.brokenUnits) { if (bu.isBroken) brokenCount++; }
+
+                    COLORREF pillBg;
+                    COLORREF pillBorder;
+                    COLORREF pillText;
+                    std::wstring statText;
+
+                    if (bc.brokenUnits.empty())
+                    {
+                        pillBg = RGB(42, 34, 20); pillBorder = RGB(95, 75, 40); pillText = RGB(255, 170, 80);
+                        statText = L"○ 0 Units";
+                    }
+                    else if (brokenCount > 0)
+                    {
+                        pillBg = RGB(56, 26, 28); pillBorder = RGB(130, 50, 55); pillText = RGB(255, 95, 80);
+                        statText = L"⚠ " + std::to_wstring(brokenCount) + L" Missing";
+                    }
+                    else
+                    {
+                        pillBg = RGB(20, 48, 32); pillBorder = RGB(40, 110, 70); pillText = RGB(90, 190, 110);
+                        statText = L"✓ Healthy";
+                    }
+
+                    HBRUSH hbr = CreateSolidBrush(pillBg); HPEN hp = CreatePen(PS_SOLID, 1, pillBorder);
+                    HGDIOBJ oB = SelectObject(hdc, hbr); HGDIOBJ oP = SelectObject(hdc, hp);
+                    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 4, 4);
+                    SelectObject(hdc, oB); SelectObject(hdc, oP);
+                    DeleteObject(hbr); DeleteObject(hp);
+
+                    SelectObject(hdc, g_State.hFontSmall);
+                    SetTextColor(hdc, pillText);
+                    DrawTextW(hdc, statText.c_str(), -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+                else if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_UNIT_ENTRY && dRow.unitIndex >= 0 && dRow.unitIndex < (int)bc.brokenUnits.size())
+                {
+                    const auto& bu = bc.brokenUnits[dRow.unitIndex];
+                    COLORREF pillBg = bu.isBroken ? RGB(56, 22, 26) : RGB(20, 48, 30);
+                    COLORREF pillBorder = bu.isBroken ? RGB(140, 45, 52) : RGB(40, 110, 65);
+                    COLORREF pillText = bu.isBroken ? RGB(255, 80, 80) : RGB(90, 190, 110);
+
+                    HBRUSH hbr = CreateSolidBrush(pillBg); HPEN hp = CreatePen(PS_SOLID, 1, pillBorder);
+                    HGDIOBJ oB = SelectObject(hdc, hbr); HGDIOBJ oP = SelectObject(hdc, hp);
+                    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 4, 4);
+                    SelectObject(hdc, oB); SelectObject(hdc, oP);
+                    DeleteObject(hbr); DeleteObject(hp);
+
+                    SelectObject(hdc, g_State.hFontSmall);
+                    SetTextColor(hdc, pillText);
+                    DrawTextW(hdc, bu.isBroken ? L"MISSING" : L"READY", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+            }
+
+            SelectObject(hdc, hOldFont);
+            SetBkMode(hdc, oldBkMode);
+            return true;
+        }
+
+        // Column 5: Target Mutation / Routing Pill Button
+        if (subItemIndex == 5)
+        {
+            RECT rc = rcCell;
+            rc.top += 3; rc.bottom -= 3;
+            rc.left += 4; rc.right -= 6;
+            if (rc.right > rc.left)
+            {
+                if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
+                {
+                    if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit)
+                    {
+                        SelectObject(hdc, g_State.hFontSmall);
+                        SetTextColor(hdc, RGB(255, 120, 120));
+                        DrawTextW(hdc, L"🗑 Purge Marked", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    }
+                    else
+                    {
+                        const auto* pSrc = FindSourceNodeById(bc.assignedSourceId);
+                        COLORREF srcCol = pSrc ? pSrc->color : RGB(56, 189, 248);
+                        std::wstring srcName = pSrc ? pSrc->name : L"Source A";
+
+                        HBRUSH hbr = CreateSolidBrush(RGB(22, 22, 28));
+                        HPEN hp = CreatePen(PS_SOLID, 1, srcCol);
+                        HGDIOBJ oB = SelectObject(hdc, hbr); HGDIOBJ oP = SelectObject(hdc, hp);
+                        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 4, 4);
+                        SelectObject(hdc, oB); SelectObject(hdc, oP);
+                        DeleteObject(hbr); DeleteObject(hp);
+
+                        // Colored Dot
+                        HBRUSH hbrDot = CreateSolidBrush(srcCol);
+                        HGDIOBJ oDot = SelectObject(hdc, hbrDot);
+                        SelectObject(hdc, GetStockObject(NULL_PEN));
+                        Ellipse(hdc, rc.left + 6, rc.top + (rc.bottom - rc.top - 8) / 2, rc.left + 14, rc.top + (rc.bottom - rc.top - 8) / 2 + 8);
+                        SelectObject(hdc, oDot);
+                        DeleteObject(hbrDot);
+
+                        SelectObject(hdc, g_State.hFontSmall);
+                        SetTextColor(hdc, srcCol);
+                        RECT rcTxt = { rc.left + 18, rc.top, rc.right - 14, rc.bottom };
+                        DrawTextW(hdc, srcName.c_str(), -1, &rcTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                        DrawSolidTriangle(hdc, rc.right - 8, (rc.top + rc.bottom) / 2, srcCol, true, 3);
+                    }
+                }
+                else if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_UNIT_ENTRY && dRow.unitIndex >= 0 && dRow.unitIndex < (int)bc.brokenUnits.size())
+                {
+                    const auto& bu = bc.brokenUnits[dRow.unitIndex];
+                    if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit)
+                    {
+                        SelectObject(hdc, g_State.hFontSmall);
+                        SetTextColor(hdc, bu.isSelected ? RGB(255, 100, 100) : RGB(140, 140, 150));
+                        DrawTextW(hdc, bu.isSelected ? L"➔ Purge Unit" : L"Keep Unit", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    }
+                    else if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::RebuildConsist)
+                    {
+                        SelectObject(hdc, g_State.hFontSmall);
+                        SetTextColor(hdc, RGB(200, 160, 255));
+                        DrawTextW(hdc, L"(Rebuild Entire)", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    }
+                    else // ReplaceUnit
+                    {
+                        const auto* pSrc = FindSourceNodeById(bu.assignedSourceId);
+                        COLORREF srcCol = pSrc ? pSrc->color : RGB(56, 189, 248);
+                        std::wstring srcLetter = pSrc ? (pSrc->name.size() >= 7 ? pSrc->name.substr(7) : pSrc->name) : L"A";
+
+                        HBRUSH hbr = CreateSolidBrush(RGB(22, 22, 28));
+                        HPEN hp = CreatePen(PS_SOLID, 1, srcCol);
+                        HGDIOBJ oB = SelectObject(hdc, hbr); HGDIOBJ oP = SelectObject(hdc, hp);
+                        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 4, 4);
+                        SelectObject(hdc, oB); SelectObject(hdc, oP);
+                        DeleteObject(hbr); DeleteObject(hp);
+
+                        // Colored Dot
+                        HBRUSH hbrDot = CreateSolidBrush(srcCol);
+                        HGDIOBJ oDot = SelectObject(hdc, hbrDot);
+                        SelectObject(hdc, GetStockObject(NULL_PEN));
+                        Ellipse(hdc, rc.left + 6, rc.top + (rc.bottom - rc.top - 8) / 2, rc.left + 14, rc.top + (rc.bottom - rc.top - 8) / 2 + 8);
+                        SelectObject(hdc, oDot);
+                        DeleteObject(hbrDot);
+
+                        SelectObject(hdc, g_State.hFontSmall);
+                        SetTextColor(hdc, srcCol);
+                        RECT rcTxt = { rc.left + 18, rc.top, rc.right - 14, rc.bottom };
+                        std::wstring label = L"Src " + srcLetter;
+                        DrawTextW(hdc, label.c_str(), -1, &rcTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                        DrawSolidTriangle(hdc, rc.right - 8, (rc.top + rc.bottom) / 2, srcCol, true, 3);
+                    }
+                }
+            }
+
+            SelectObject(hdc, hOldFont);
+            SetBkMode(hdc, oldBkMode);
+            return true;
+        }
+
+        SelectObject(hdc, hOldFont);
+        SetBkMode(hdc, oldBkMode);
+        return false;
+    }
+
+    static bool Mutator_IsCellInteractive(int itemIndex, int subItemIndex, void* pParam)
+    {
+        if (itemIndex < 0 || itemIndex >= (int)g_State.displayRows.size()) return false;
+        if (subItemIndex == 0) return true; // Chevron / Checkbox
+        if (subItemIndex == 5) return true; // Source Node / Action pill
+        return false;
+    }
+
+    static void ShowFilterDropdown(HWND hWnd)
+    {
+        std::vector<DropDownItem> items;
+        items.push_back(DropDownItem::Action(1, L"\xE7BA", L"Broken + Empty", L"Show consists with missing stock or 0 units",
+            g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenAndEmpty, true));
+        items.push_back(DropDownItem::Action(2, L"\xE730", L"Broken Only",    L"Show only consists with missing/broken units",
+            g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenOnly, true));
+        items.push_back(DropDownItem::Action(3, L"\xE894", L"Empty Only",     L"Show only consists with 0 units",
+            g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::EmptyOnly, true));
+        items.push_back(DropDownItem::Separator());
+        items.push_back(DropDownItem::Action(4, L"\xE74C", L"All Consists",   L"Show all consists including healthy",
+            g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::All, true));
+
+        int curId = 4;
+        if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenAndEmpty) curId = 1;
+        else if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenOnly) curId = 2;
+        else if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::EmptyOnly) curId = 3;
+        else if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::All) curId = 4;
+
+        int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, g_State.rcTab2FilterBtn, items, curId);
+        if (chosen == 1) g_State.tab2Filter = MutatorDlgState::Tab2FilterMode::BrokenAndEmpty;
+        else if (chosen == 2) g_State.tab2Filter = MutatorDlgState::Tab2FilterMode::BrokenOnly;
+        else if (chosen == 3) g_State.tab2Filter = MutatorDlgState::Tab2FilterMode::EmptyOnly;
+        else if (chosen == 4) g_State.tab2Filter = MutatorDlgState::Tab2FilterMode::All;
+        g_State.tab2SelectedConsistIdx = -1;
+        PopulateBatchConsistMatrix();
+        InvalidateRect(hWnd, NULL, FALSE);
+    }
+
+    static void ShowSourceDropdownForConsist(HWND hWnd, PoolMutator::BrokenConsistInfo& bcon, const RECT& rcAnchor)
+    {
+        std::vector<DropDownItem> items;
+        for (size_t i = 0; i < g_State.sourceNodes.size(); ++i)
+        {
+            const auto& node = g_State.sourceNodes[i];
+            bool isCurrent = (node.sourceId == bcon.assignedSourceId);
+            // Only offer Pool Preset / Blueprint for Rebuild action
+            bool validForRebuild = (node.sourceType == 1 || node.sourceType == 2);
+            bool skip = (bcon.actionExecutionMode == 1 && !validForRebuild);
+            if (!skip)
+            {
+                items.push_back(DropDownItem::Action(node.sourceId + 1, L"", node.name,
+                    GetSourceNodeSummaryText(node), isCurrent, true));
+            }
+        }
+        int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, rcAnchor, items, bcon.assignedSourceId + 1);
+        if (chosen >= 1)
+        {
+            int newSrcId = chosen - 1;
+            bcon.assignedSourceId = newSrcId;
+            for (auto& bu : bcon.brokenUnits) bu.assignedSourceId = newSrcId;
+            PopulateBatchConsistMatrix();
+        }
+        InvalidateRect(hWnd, NULL, FALSE);
+    }
+
+    static void ShowSourceDropdownForUnit(HWND hWnd, PoolMutator::BrokenUnitInfo& bu, const RECT& rcAnchor)
+    {
+        std::vector<DropDownItem> items;
+        for (size_t i = 0; i < g_State.sourceNodes.size(); ++i)
+        {
+            const auto& node = g_State.sourceNodes[i];
+            bool isCurrent = (node.sourceId == bu.assignedSourceId);
+            items.push_back(DropDownItem::Action(node.sourceId + 1, L"", node.name,
+                GetSourceNodeSummaryText(node), isCurrent, true));
+        }
+        int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, rcAnchor, items, bu.assignedSourceId + 1);
+        if (chosen >= 1)
+        {
+            bu.assignedSourceId = chosen - 1;
+            PopulateBatchConsistMatrix();
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+
+    static void ShowSourceTypeDropdown(HWND hWnd, int sourceNodeIndex, const RECT& anchorRc)
+    {
+        if (sourceNodeIndex < 0 || sourceNodeIndex >= (int)g_State.sourceNodes.size()) return;
+        auto& node = g_State.sourceNodes[sourceNodeIndex];
+
+        std::vector<DropDownItem> items;
+        items.push_back(DropDownItem::Action(1, L"\xE734", L"Favourite Group", L"Pick units from custom favourite unit groups", node.sourceType == 0, true));
+        items.push_back(DropDownItem::Action(2, L"\xE71D", L"Pool Preset", L"Pick units from library pool presets", node.sourceType == 1, true));
+        items.push_back(DropDownItem::Action(3, L"\xE7C0", L"Train Configs", L"Pick units from .train configuration templates", node.sourceType == 2, true));
+
+        int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, anchorRc, items, node.sourceType + 1);
+        if (chosen >= 1 && chosen <= 3)
+        {
+            int newType = chosen - 1;
+            if (newType != node.sourceType)
+            {
+                node.sourceType = newType;
+                node.selectedGroupIndices.clear();
+                node.selectedPresetIndices.clear();
+                node.selectedBlueprintIndices.clear();
+
+                if (node.sourceType == 0)
+                {
+                    for (auto& bc : g_State.brokenConsists)
+                    {
+                        if (bc.actionExecutionMode == 1 && bc.assignedSourceId == node.sourceId)
+                        {
+                            bc.assignedSourceId = CycleNextSourceIdForConsist(bc.assignedSourceId, 1);
+                            for (auto& bu : bc.brokenUnits) bu.assignedSourceId = bc.assignedSourceId;
+                        }
+                    }
+                }
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+        }
+    }
+
     static void ShowBlueprintDropdownForSource(HWND hWnd, int sourceNodeIndex, const RECT& anchorRc)
     {
+
         if (sourceNodeIndex < 0 || sourceNodeIndex >= (int)g_State.sourceNodes.size()) return;
         auto& node = g_State.sourceNodes[sourceNodeIndex];
 
@@ -1352,6 +2345,23 @@ namespace
             repOpts.mode = PoolMutator::MutatorMode::ReplaceBroken;
             repOpts.sourceNodes = g_State.sourceNodes;
 
+            // Sync actionExecutionMode to all selected consists based on current action selection
+            for (auto& bc : g_State.brokenConsists)
+            {
+                if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::RebuildConsist)
+                {
+                    bc.actionExecutionMode = 1;
+                }
+                else if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit)
+                {
+                    bc.actionExecutionMode = 2;
+                }
+                else
+                {
+                    bc.actionExecutionMode = 0;
+                }
+            }
+
             PoolMutator::MutatorResult res;
             bool ok = ApplyPoolMutationToSessions(
                 g_State.hParent,
@@ -1364,15 +2374,37 @@ namespace
 
             if (ok && res.success)
             {
-                std::wstring successMsg = L"Consist Repair & Rebuild Operation Completed!\n\n";
-                successMsg += L"Processed " + std::to_wstring(res.processedCount) + L" consist(s).\n";
-                if (res.repairedUnitsCount > 0)
+                std::wstring successMsg;
+                if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit)
                 {
-                    successMsg += L"Replaced / Repaired " + std::to_wstring(res.repairedUnitsCount) + L" unit(s).\n";
+                    successMsg = L"Consist Unit Purge Operation Completed!\n\n";
+                    successMsg += L"Processed " + std::to_wstring(res.processedCount) + L" consist(s).\n";
+                    if (res.repairedUnitsCount > 0)
+                    {
+                        successMsg += L"Purged / Removed " + std::to_wstring(res.repairedUnitsCount) + L" unit(s).\n";
+                    }
+                }
+                else if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::RebuildConsist)
+                {
+                    successMsg = L"Consist Rebuild Operation Completed!\n\n";
+                    successMsg += L"Processed " + std::to_wstring(res.processedCount) + L" consist(s).\n";
+                    if (res.repairedUnitsCount > 0)
+                    {
+                        successMsg += L"Rebuilt with " + std::to_wstring(res.repairedUnitsCount) + L" new unit(s).\n";
+                    }
+                }
+                else
+                {
+                    successMsg = L"Consist Repair Operation Completed!\n\n";
+                    successMsg += L"Processed " + std::to_wstring(res.processedCount) + L" consist(s).\n";
+                    if (res.repairedUnitsCount > 0)
+                    {
+                        successMsg += L"Replaced / Repaired " + std::to_wstring(res.repairedUnitsCount) + L" unit(s).\n";
+                    }
                 }
                 successMsg += L"\nChanges staged in session memory (●). Use 'Save Consist(s)' (Ctrl+S) when ready to commit to disk.";
 
-                ShowModernMessageBox(hWnd, successMsg.c_str(), L"Consist Repair & Rebuild", MB_OK | MB_ICONINFORMATION);
+                ShowModernMessageBox(hWnd, successMsg.c_str(), L"Batch Consist Editing", MB_OK | MB_ICONINFORMATION);
 
                 // Refresh broken list in dialog
                 RefreshBrokenConsists();
@@ -1385,8 +2417,8 @@ namespace
             }
             else
             {
-                std::wstring err = res.errorMessage.empty() ? L"No broken units were selected or an error occurred." : res.errorMessage;
-                ShowModernMessageBox(hWnd, err.c_str(), L"Repair Error", MB_OK | MB_ICONERROR);
+                std::wstring err = res.errorMessage.empty() ? L"No broken units or consists were selected or an error occurred." : res.errorMessage;
+                ShowModernMessageBox(hWnd, err.c_str(), L"Batch Edit Error", MB_OK | MB_ICONERROR);
             }
             return;
         }
@@ -1604,17 +2636,120 @@ namespace
             return 0;
         }
 
-        case WM_MOUSEWHEEL:
+        case WM_NOTIFY:
         {
-            if (g_State.activeTab == 2)
+            if (g_State.hBatchConsistListWnd && lParam && ((NMHDR*)lParam)->hwndFrom == g_State.hBatchConsistListWnd)
             {
-                short delta = GET_WHEEL_DELTA_WPARAM(wParam);
-                g_State.brokenScrollY -= (delta / 120) * 32;
-                if (g_State.brokenScrollY < 0) g_State.brokenScrollY = 0;
-                int maxScroll = (std::max)(0, g_State.brokenTotalContentH - 300);
-                if (g_State.brokenScrollY > maxScroll) g_State.brokenScrollY = maxScroll;
-                InvalidateRect(hWnd, &g_State.rcBrokenTreeCard, FALSE);
-                return 0;
+                NMHDR* pnmh = (NMHDR*)lParam;
+                if (pnmh->code == NM_CELLCLICK)
+                {
+                    NMCELLCLICK* pCell = (NMCELLCLICK*)lParam;
+                    int clickedRow = pCell->itemIndex;
+                    int clickedCol = pCell->subItemIndex;
+
+                    if (clickedRow >= 0 && clickedRow < (int)g_State.displayRows.size())
+                    {
+                        const auto& dRow = g_State.displayRows[clickedRow];
+                        if (dRow.consistIndex >= 0 && dRow.consistIndex < (int)g_State.brokenConsists.size())
+                        {
+                            auto& bc = g_State.brokenConsists[dRow.consistIndex];
+                            auto& cState = GetConsistSectionState(dRow.consistIndex);
+
+                            if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
+                            {
+                                if (clickedCol == 0)
+                                {
+                                    POINT pt;
+                                    GetCursorPos(&pt);
+                                    ScreenToClient(g_State.hBatchConsistListWnd, &pt);
+
+                                    // Col 0 is 60px wide: checkbox is at 20..36
+                                    if (pt.x >= 18 && pt.x <= 38)
+                                    {
+                                        bc.isSelected = !bc.isSelected;
+                                        for (auto& bu : bc.brokenUnits) bu.isSelected = bc.isSelected;
+                                    }
+                                    else
+                                    {
+                                        cState.isExpanded = !cState.isExpanded;
+                                    }
+                                    PopulateBatchConsistMatrix();
+                                    InvalidateRect(hWnd, NULL, FALSE);
+                                    return 0;
+                                }
+                                else if (clickedCol == 5 && g_State.tab2Action != MutatorDlgState::Tab2ActionMode::PurgeUnit)
+                                {
+                                    POINT ptScreen;
+                                    GetCursorPos(&ptScreen);
+                                    RECT rcAnchor = { ptScreen.x - 50, ptScreen.y, ptScreen.x + 50, ptScreen.y + 20 };
+                                    ShowSourceDropdownForConsist(hWnd, bc, rcAnchor);
+                                    PopulateBatchConsistMatrix();
+                                    return 0;
+                                }
+                                else
+                                {
+                                    g_State.tab2SelectedConsistIdx = dRow.consistIndex;
+                                    PopulateBatchConsistMatrix();
+                                    InvalidateRect(hWnd, NULL, FALSE);
+                                    return 0;
+                                }
+                            }
+                            else if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_UNIT_ENTRY && dRow.unitIndex >= 0 && dRow.unitIndex < (int)bc.brokenUnits.size())
+                            {
+                                auto& bu = bc.brokenUnits[dRow.unitIndex];
+                                if (clickedCol == 0)
+                                {
+                                    bu.isSelected = !bu.isSelected;
+                                    bool anySel = false;
+                                    for (const auto& u : bc.brokenUnits) { if (u.isSelected) { anySel = true; break; } }
+                                    bc.isSelected = anySel;
+                                    PopulateBatchConsistMatrix();
+                                    InvalidateRect(hWnd, NULL, FALSE);
+                                    return 0;
+                                }
+                                else if (clickedCol == 5 && g_State.tab2Action == MutatorDlgState::Tab2ActionMode::ReplaceUnit)
+                                {
+                                    POINT ptScreen;
+                                    GetCursorPos(&ptScreen);
+                                    RECT rcAnchor = { ptScreen.x - 50, ptScreen.y, ptScreen.x + 50, ptScreen.y + 20 };
+                                    ShowSourceDropdownForUnit(hWnd, bu, rcAnchor);
+                                    PopulateBatchConsistMatrix();
+                                    return 0;
+                                }
+                                else
+                                {
+                                    bu.isSelected = !bu.isSelected;
+                                    bool anySel = false;
+                                    for (const auto& u : bc.brokenUnits) { if (u.isSelected) { anySel = true; break; } }
+                                    bc.isSelected = anySel;
+                                    PopulateBatchConsistMatrix();
+                                    InvalidateRect(hWnd, NULL, FALSE);
+                                    return 0;
+                                }
+                            }
+                        }
+                    }
+                }
+                else if (pnmh->code == NM_DBLCLK)
+                {
+                    NMCELLCLICK* pCell = (NMCELLCLICK*)lParam;
+                    int clickedRow = (pCell && pCell->itemIndex >= 0) ? pCell->itemIndex : g_State.batchConsistList.GetSelectedIndex();
+                    if (clickedRow >= 0 && clickedRow < (int)g_State.displayRows.size())
+                    {
+                        const auto& dRow = g_State.displayRows[clickedRow];
+                        if (dRow.consistIndex >= 0 && dRow.consistIndex < (int)g_State.brokenConsists.size())
+                        {
+                            if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
+                            {
+                                auto& cState = GetConsistSectionState(dRow.consistIndex);
+                                cState.isExpanded = !cState.isExpanded;
+                                PopulateBatchConsistMatrix();
+                                InvalidateRect(hWnd, NULL, FALSE);
+                                return 0;
+                            }
+                        }
+                    }
+                }
             }
             break;
         }
@@ -1780,6 +2915,30 @@ namespace
             }
 
             EnsureDefaultSourceNodes();
+
+            // Create Batch Consist Matrix List Control with Sound Studio Card Styling
+            g_State.hBatchConsistListWnd = g_State.batchConsistList.Create(hWnd, 30, 164, 600, 400, 205);
+            if (g_State.hBatchConsistListWnd)
+            {
+                g_State.batchConsistList.SetShowSelectionGutter(false);
+                g_State.batchConsistList.SetMultiSelect(false);
+                g_State.batchConsistList.SetShowVerticalDividers(false);
+                g_State.batchConsistList.SetAutoFitLastColumn(false);
+                g_State.batchConsistList.SetRowHeight(28);
+                g_State.batchConsistList.SetRowBackgroundCallback(Mutator_RowBackgroundCallback, &g_State);
+                g_State.batchConsistList.SetDrawCellCallback(Mutator_DrawCellCallback, &g_State);
+                g_State.batchConsistList.SetCellInteractiveCallback(Mutator_IsCellInteractive, &g_State);
+
+                g_State.batchConsistList.AddColumn(L"#", 60, 0);
+                g_State.batchConsistList.AddColumn(L"Consist / Unit Name", 220, 0);
+                g_State.batchConsistList.AddColumn(L"Type", 85, 1);
+                g_State.batchConsistList.AddColumn(L"Parent Directory / File", 180, 0);
+                g_State.batchConsistList.AddColumn(L"Current Status", 115, 1);
+                g_State.batchConsistList.AddColumn(L"Target Mutation / Source", 155, 0);
+
+                ShowWindow(g_State.hBatchConsistListWnd, (g_State.activeTab == 2) ? SW_SHOW : SW_HIDE);
+            }
+
             UpdateControlPositions(hWnd);
             return 0;
         }
@@ -1815,8 +2974,15 @@ namespace
             bool hRadP1 = (g_State.activeTab == 1) && PtInRect(&g_State.rcRadioPos1, pt);
             bool hRadP2 = (g_State.activeTab == 1) && PtInRect(&g_State.rcRadioPos2, pt);
             bool hRadP3 = (g_State.activeTab == 1) && PtInRect(&g_State.rcRadioPos3, pt);
+            bool hTab2Filter = (g_State.activeTab == 2) && PtInRect(&g_State.rcTab2FilterBtn, pt);
+            bool hTab2ActRep = (g_State.activeTab == 2) && PtInRect(&g_State.rcTab2ActionReplace, pt);
+            bool hTab2ActReb = (g_State.activeTab == 2) && PtInRect(&g_State.rcTab2ActionRebuild, pt);
+            bool hTab2ActPrg = (g_State.activeTab == 2) && PtInRect(&g_State.rcTab2ActionPurge, pt);
             bool hTab2SelBrk = (g_State.activeTab == 2) && PtInRect(&g_State.rcTab2BtnSelectBroken, pt);
             bool hTab2ScanLib = (g_State.activeTab == 2) && PtInRect(&g_State.rcTab2BtnScanLibrary, pt);
+            bool hExpAll = (g_State.activeTab == 2) && PtInRect(&g_State.rcBtnExpandAll, pt);
+            bool hColAll = (g_State.activeTab == 2) && PtInRect(&g_State.rcBtnCollapseAll, pt);
+            bool hMChk = (g_State.activeTab == 2) && PtInRect(&g_State.rcMasterBrokenCheck, pt);
             bool hAddSrc = (g_State.activeTab == 2) && PtInRect(&g_State.rcAddSourceBtn, pt);
 
             bool cardsChanged = false;
@@ -1849,7 +3015,13 @@ namespace
                 hRadP1 != g_State.isHoverRadioPos1 || hRadP2 != g_State.isHoverRadioPos2 ||
                 hRadP3 != g_State.isHoverRadioPos3 || hCheck != g_State.isHoverCheckClones ||
                 hAddSrc != g_State.isHoverAddSourceBtn || cardsChanged ||
+                hTab2Filter != g_State.isHoverTab2FilterBtn ||
+                hTab2ActRep != g_State.isHoverTab2ActionReplace ||
+                hTab2ActReb != g_State.isHoverTab2ActionRebuild ||
+                hTab2ActPrg != g_State.isHoverTab2ActionPurge ||
                 hTab2SelBrk != g_State.isHoverTab2BtnSelectBroken || hTab2ScanLib != g_State.isHoverTab2BtnScanLibrary ||
+                hExpAll != g_State.isHoverBtnExpandAll || hColAll != g_State.isHoverBtnCollapseAll ||
+                hMChk != g_State.isHoverMasterBroken ||
                 hApply != g_State.isHoverApply || hCancel != g_State.isHoverCancel)
             {
                 g_State.isHoverPreset = hPreset;
@@ -1867,8 +3039,15 @@ namespace
                 g_State.isHoverRadioPos3 = hRadP3;
                 g_State.isHoverCheckClones = hCheck;
                 g_State.isHoverAddSourceBtn = hAddSrc;
+                g_State.isHoverTab2FilterBtn = hTab2Filter;
+                g_State.isHoverTab2ActionReplace = hTab2ActRep;
+                g_State.isHoverTab2ActionRebuild = hTab2ActReb;
+                g_State.isHoverTab2ActionPurge = hTab2ActPrg;
                 g_State.isHoverTab2BtnSelectBroken = hTab2SelBrk;
                 g_State.isHoverTab2BtnScanLibrary = hTab2ScanLib;
+                g_State.isHoverBtnExpandAll = hExpAll;
+                g_State.isHoverBtnCollapseAll = hColAll;
+                g_State.isHoverMasterBroken = hMChk;
                 g_State.isHoverApply = hApply;
                 g_State.isHoverCancel = hCancel;
                 InvalidateRect(hWnd, NULL, FALSE);
@@ -1896,6 +3075,10 @@ namespace
             g_State.isHoverRadioPos3 = false;
             g_State.isHoverCheckClones = false;
             g_State.isHoverAddSourceBtn = false;
+            g_State.isHoverTab2FilterBtn = false;
+            g_State.isHoverTab2ActionReplace = false;
+            g_State.isHoverTab2ActionRebuild = false;
+            g_State.isHoverTab2ActionPurge = false;
             for (auto& card : g_State.sourceCardUIs)
             {
                 card.isHoverPicker = false;
@@ -1904,6 +3087,10 @@ namespace
             }
             g_State.isHoverTab2BtnSelectBroken = false;
             g_State.isHoverTab2BtnScanLibrary = false;
+            g_State.isHoverBtnExpandAll = false;
+            g_State.isHoverBtnCollapseAll = false;
+            g_State.isHoverTab2FilterBtn = false;
+            g_State.isHoverMasterBroken = false;
             g_State.isHoverApply = false;
             g_State.isHoverCancel = false;
             InvalidateRect(hWnd, NULL, FALSE);
@@ -2015,16 +3202,47 @@ namespace
                 }
             }
             // ==========================================
-            // TAB 2: REPLACE / REPAIR BROKEN UNITS
+            // TAB 2: REPLACE / REPAIR / PURGE BROKEN UNITS
             // ==========================================
             else if (g_State.activeTab == 2)
             {
-                // Master Checkbox (Select All / Deselect All)
+                // Top Ribbon: Filter Dropdown Button
+                if (PtInRect(&g_State.rcTab2FilterBtn, pt))
+                {
+                    ShowFilterDropdown(hWnd);
+                    return 0;
+                }
+
+                // Header: Expand All Button
+                if (PtInRect(&g_State.rcBtnExpandAll, pt))
+                {
+                    for (size_t i = 0; i < g_State.brokenConsists.size(); ++i)
+                    {
+                        GetConsistSectionState(i).isExpanded = true;
+                    }
+                    PopulateBatchConsistMatrix();
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
+                }
+
+                // Header: Collapse All Button
+                if (PtInRect(&g_State.rcBtnCollapseAll, pt))
+                {
+                    for (size_t i = 0; i < g_State.brokenConsists.size(); ++i)
+                    {
+                        GetConsistSectionState(i).isExpanded = false;
+                    }
+                    PopulateBatchConsistMatrix();
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
+                }
+
+                // Header: Master Checkbox (Select All / Deselect All for filtered consists)
                 if (PtInRect(&g_State.rcMasterBrokenCheck, pt))
                 {
                     int totalItems = 0;
                     int selectedItems = 0;
-                    for (const auto& bc : g_State.brokenConsists)
+                    for (auto& bc : g_State.brokenConsists)
                     {
                         if (bc.brokenUnits.empty())
                         {
@@ -2049,35 +3267,30 @@ namespace
                             bu.isSelected = newSelState;
                         }
                     }
-                    InvalidateRect(hWnd, &g_State.rcBrokenTreeCard, FALSE);
+                    PopulateBatchConsistMatrix();
+                    InvalidateRect(hWnd, NULL, FALSE);
                     return 0;
                 }
 
-                // Select Broken Units Quick Action Button
+                // Header: "Select Broken Only" Quick Action Button
                 if (PtInRect(&g_State.rcTab2BtnSelectBroken, pt))
                 {
-                    for (auto& bc : g_State.brokenConsists)
+                    for (auto& con : g_State.brokenConsists)
                     {
-                        if (bc.brokenUnits.empty())
+                        bool anyBroken = false;
+                        for (auto& bu : con.brokenUnits)
                         {
-                            bc.isSelected = true;
+                            bu.isSelected = bu.isBroken;
+                            if (bu.isSelected) anyBroken = true;
                         }
-                        else
-                        {
-                            bool anyBroken = false;
-                            for (auto& bu : bc.brokenUnits)
-                            {
-                                bu.isSelected = bu.isBroken;
-                                if (bu.isSelected) anyBroken = true;
-                            }
-                            bc.isSelected = anyBroken;
-                        }
+                        con.isSelected = anyBroken || con.brokenUnits.empty();
                     }
-                    InvalidateRect(hWnd, &g_State.rcBrokenTreeCard, FALSE);
+                    PopulateBatchConsistMatrix();
+                    InvalidateRect(hWnd, NULL, FALSE);
                     return 0;
                 }
 
-                // Scan Entire Library Action Button (Empty State)
+                // Empty State: Scan Entire Library Button
                 if (PtInRect(&g_State.rcTab2BtnScanLibrary, pt))
                 {
                     RefreshBrokenConsists(true);
@@ -2085,187 +3298,92 @@ namespace
                     return 0;
                 }
 
-                // Tree List clicks
-                if (PtInRect(&g_State.rcBrokenTreeList, pt))
+                // Right Pane: Action Mode Segmented Buttons [Replace | Rebuild | Purge]
+                if (PtInRect(&g_State.rcTab2ActionReplace, pt))
                 {
-                    int curY = g_State.rcBrokenTreeList.top - g_State.brokenScrollY;
-                    for (size_t cIdx = 0; cIdx < g_State.brokenConsists.size(); ++cIdx)
-                    {
-                        auto& bcon = g_State.brokenConsists[cIdx];
-
-                        int rowH = 26;
-                        RECT rcConRow = { g_State.rcBrokenTreeList.left + 4, curY, g_State.rcBrokenTreeList.right - 4, curY + rowH };
-
-                        if (PtInRect(&rcConRow, pt))
-                        {
-                            RECT rcChev = { rcConRow.left + 4, rcConRow.top, rcConRow.left + 20, rcConRow.bottom };
-                            RECT rcConChk = { rcConRow.left + 24, rcConRow.top + 5, rcConRow.left + 40, rcConRow.top + 21 };
-                            RECT rcConMode = { rcConRow.right - 164, rcConRow.top + 3, rcConRow.right - 84, rcConRow.top + 23 };
-                            RECT rcConPill = { rcConRow.right - 80, rcConRow.top + 3, rcConRow.right - 4, rcConRow.top + 23 };
-
-                            if (PtInRect(&rcChev, pt))
-                            {
-                                bcon.isExpanded = !bcon.isExpanded;
-                                InvalidateRect(hWnd, &g_State.rcBrokenTreeCard, FALSE);
-                                return 0;
-                            }
-                            else if (PtInRect(&rcConMode, pt))
-                            {
-                                if (bcon.brokenUnits.empty())
-                                {
-                                    ShowModernMessageBox(hWnd, L"This consist is currently empty (0 units).\n\nReplace mode cannot be used because there are no existing rolling stock units to replace. Rebuild Consist mode will generate new rolling stock from scratch using the assigned source rules.", L"Empty Consist", MB_OK | MB_ICONINFORMATION);
-                                    bcon.actionExecutionMode = 1;
-                                    return 0;
-                                }
-                                bcon.actionExecutionMode = (bcon.actionExecutionMode == 0) ? 1 : 0;
-                                if (bcon.actionExecutionMode == 1)
-                                {
-                                    const auto* pCur = FindSourceNodeById(bcon.assignedSourceId);
-                                    if (!pCur || pCur->sourceType == 0)
-                                    {
-                                        bcon.assignedSourceId = CycleNextSourceIdForConsist(bcon.assignedSourceId, 1);
-                                        for (auto& bu : bcon.brokenUnits) bu.assignedSourceId = bcon.assignedSourceId;
-                                    }
-                                }
-                                InvalidateRect(hWnd, NULL, FALSE);
-                                return 0;
-                            }
-                            else if (PtInRect(&rcConPill, pt))
-                            {
-                                bcon.assignedSourceId = CycleNextSourceIdForConsist(bcon.assignedSourceId, bcon.actionExecutionMode);
-                                for (auto& bu : bcon.brokenUnits)
-                                {
-                                    bu.assignedSourceId = bcon.assignedSourceId;
-                                }
-                                InvalidateRect(hWnd, NULL, FALSE);
-                                return 0;
-                            }
-                            else
-                            {
-                                bcon.isSelected = !bcon.isSelected;
-                                for (auto& bu : bcon.brokenUnits)
-                                {
-                                    bu.isSelected = bcon.isSelected;
-                                }
-                                InvalidateRect(hWnd, NULL, FALSE);
-                                return 0;
-                            }
-                        }
-                        curY += rowH + 4;
-
-                        if (bcon.isExpanded && (bcon.actionExecutionMode == 1 || bcon.brokenUnits.empty()))
-                        {
-                            curY += 48 + 4;
-                        }
-                        else if (bcon.isExpanded && bcon.actionExecutionMode == 0)
-                        {
-                            for (size_t uIdx = 0; uIdx < bcon.brokenUnits.size(); ++uIdx)
-                            {
-                                auto& bu = bcon.brokenUnits[uIdx];
-                                int uRowH = 22;
-                                RECT rcURow = { g_State.rcBrokenTreeList.left + 28, curY, g_State.rcBrokenTreeList.right - 8, curY + uRowH };
-                                if (PtInRect(&rcURow, pt))
-                                {
-                                    RECT rcUPill = { rcURow.right - 92, rcURow.top + 2, rcURow.right - 58, rcURow.top + 20 };
-                                    if (PtInRect(&rcUPill, pt))
-                                    {
-                                        bu.assignedSourceId = CycleNextSourceId(bu.assignedSourceId);
-                                        InvalidateRect(hWnd, NULL, FALSE);
-                                        return 0;
-                                    }
-                                    else
-                                    {
-                                        bu.isSelected = !bu.isSelected;
-                                        bool hasAnySel = false;
-                                        for (const auto& u : bcon.brokenUnits) { if (u.isSelected) { hasAnySel = true; break; } }
-                                        bcon.isSelected = hasAnySel;
-                                        InvalidateRect(hWnd, NULL, FALSE);
-                                        return 0;
-                                    }
-                                }
-                                curY += uRowH + 2;
-                            }
-                        }
-                    }
+                    g_State.tab2Action = MutatorDlgState::Tab2ActionMode::ReplaceUnit;
+                    for (auto& bc : g_State.brokenConsists) bc.actionExecutionMode = 0;
+                    PopulateBatchConsistMatrix();
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
                 }
-
-                // Add Source Button Click
-                if (PtInRect(&g_State.rcAddSourceBtn, pt))
+                if (PtInRect(&g_State.rcTab2ActionRebuild, pt))
                 {
-                    PoolMutator::SourceNodeConfig newSrc;
-                    newSrc.sourceId = g_State.nextSourceNodeId++;
-                    wchar_t letter = L'A' + (wchar_t)(g_State.sourceNodes.size() % 26);
-                    newSrc.name = std::wstring(L"Source ") + letter;
-                    newSrc.sourceType = (g_State.sourceNodes.size() % 2 == 0) ? 0 : 1;
-                    newSrc.color = GetSourceColorByIndex((int)g_State.sourceNodes.size());
-                    g_State.sourceNodes.push_back(newSrc);
+                    g_State.tab2Action = MutatorDlgState::Tab2ActionMode::RebuildConsist;
+                    for (auto& bc : g_State.brokenConsists) bc.actionExecutionMode = 1;
+                    PopulateBatchConsistMatrix();
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
+                }
+                if (PtInRect(&g_State.rcTab2ActionPurge, pt))
+                {
+                    g_State.tab2Action = MutatorDlgState::Tab2ActionMode::PurgeUnit;
+                    for (auto& bc : g_State.brokenConsists) bc.actionExecutionMode = 2;
+                    PopulateBatchConsistMatrix();
                     InvalidateRect(hWnd, NULL, FALSE);
                     return 0;
                 }
 
-                // Source Cards Clicks (Type Toggle, Dropdown Picker, Delete Button)
-                for (size_t k = 0; k < g_State.sourceCardUIs.size(); ++k)
+                // Right Pane: Source Nodes Configuration
+                if (g_State.tab2Action != MutatorDlgState::Tab2ActionMode::PurgeUnit)
                 {
-                    const auto& cardUI = g_State.sourceCardUIs[k];
-                    if (cardUI.sourceId < 0 || k >= g_State.sourceNodes.size()) continue;
-                    auto& node = g_State.sourceNodes[k];
-
-                    if (PtInRect(&cardUI.rcTypeToggle, pt))
+                    // Add Source Button
+                    if (PtInRect(&g_State.rcAddSourceBtn, pt))
                     {
-                        int toggleW = cardUI.rcTypeToggle.right - cardUI.rcTypeToggle.left;
-                        int segW = toggleW / 3;
-                        int segIdx = (pt.x - cardUI.rcTypeToggle.left) / (segW > 0 ? segW : 1);
-                        if (segIdx < 0) segIdx = 0;
-                        if (segIdx > 2) segIdx = 2;
-                        node.sourceType = segIdx;
-                        node.selectedGroupIndices.clear();
-                        node.selectedPresetIndices.clear();
-                        node.selectedBlueprintIndices.clear();
+                        PoolMutator::SourceNodeConfig newSrc;
+                        newSrc.sourceId = g_State.nextSourceNodeId++;
+                        wchar_t letter = L'A' + (wchar_t)(g_State.sourceNodes.size() % 26);
+                        newSrc.name = std::wstring(L"Source ") + letter;
+                        newSrc.sourceType = (g_State.sourceNodes.size() % 2 == 0) ? 0 : 1;
+                        newSrc.color = GetSourceColorByIndex((int)g_State.sourceNodes.size());
+                        g_State.sourceNodes.push_back(newSrc);
+                        InvalidateRect(hWnd, NULL, FALSE);
+                        return 0;
+                    }
 
-                        if (node.sourceType == 0)
+                    // Source Cards (Type Dropdown, Delete Button, Picker Dropdown)
+                    for (size_t k = 0; k < g_State.sourceCardUIs.size(); ++k)
+                    {
+                        const auto& cardUI = g_State.sourceCardUIs[k];
+                        if (cardUI.sourceId < 0 || k >= g_State.sourceNodes.size()) continue;
+                        auto& node = g_State.sourceNodes[k];
+
+                        if (PtInRect(&cardUI.rcTypeToggle, pt))
                         {
+                            ShowSourceTypeDropdown(hWnd, (int)k, cardUI.rcTypeToggle);
+                            return 0;
+                        }
+                        if (PtInRect(&cardUI.rcDeleteBtn, pt) && g_State.sourceNodes.size() > 1)
+                        {
+                            int delId = node.sourceId;
+                            g_State.sourceNodes.erase(g_State.sourceNodes.begin() + k);
                             for (auto& bc : g_State.brokenConsists)
                             {
-                                if (bc.actionExecutionMode == 1 && bc.assignedSourceId == node.sourceId)
+                                if (bc.assignedSourceId == delId)
                                 {
-                                    bc.assignedSourceId = CycleNextSourceIdForConsist(bc.assignedSourceId, 1);
+                                    bc.assignedSourceId = CycleNextSourceIdForConsist(delId, bc.actionExecutionMode);
                                     for (auto& bu : bc.brokenUnits) bu.assignedSourceId = bc.assignedSourceId;
                                 }
                             }
+                            InvalidateRect(hWnd, NULL, FALSE);
+                            return 0;
                         }
-                        InvalidateRect(hWnd, NULL, FALSE);
-                        return 0;
-                    }
-                    if (PtInRect(&cardUI.rcDeleteBtn, pt) && g_State.sourceNodes.size() > 1)
-                    {
-                        int delId = node.sourceId;
-                        g_State.sourceNodes.erase(g_State.sourceNodes.begin() + k);
-                        for (auto& bc : g_State.brokenConsists)
+                        if (PtInRect(&cardUI.rcPicker, pt))
                         {
-                            if (bc.assignedSourceId == delId)
+                            if (node.sourceType == 0)
                             {
-                                bc.assignedSourceId = CycleNextSourceIdForConsist(delId, bc.actionExecutionMode);
-                                for (auto& bu : bc.brokenUnits) bu.assignedSourceId = bc.assignedSourceId;
+                                ShowGroupDropdownForSource(hWnd, (int)k, cardUI.rcPicker);
                             }
+                            else if (node.sourceType == 1)
+                            {
+                                ShowPresetDropdownForSource(hWnd, (int)k, cardUI.rcPicker);
+                            }
+                            else
+                            {
+                                ShowBlueprintDropdownForSource(hWnd, (int)k, cardUI.rcPicker);
+                            }
+                            return 0;
                         }
-                        InvalidateRect(hWnd, NULL, FALSE);
-                        return 0;
-                    }
-                    if (PtInRect(&cardUI.rcPicker, pt))
-                    {
-                        if (node.sourceType == 0)
-                        {
-                            ShowGroupDropdownForSource(hWnd, (int)k, cardUI.rcPicker);
-                        }
-                        else if (node.sourceType == 1)
-                        {
-                            ShowPresetDropdownForSource(hWnd, (int)k, cardUI.rcPicker);
-                        }
-                        else // sourceType == 2
-                        {
-                            ShowBlueprintDropdownForSource(hWnd, (int)k, cardUI.rcPicker);
-                        }
-                        return 0;
                     }
                 }
             }
@@ -2294,7 +3412,9 @@ namespace
         }
 
         case WM_LBUTTONUP:
+        {
             return 0;
+        }
 
         case WM_PAINT:
         {
@@ -2437,8 +3557,8 @@ namespace
             if (statusW > rcClient.right - 180) statusW = rcClient.right - 180;
 
             RECT rcStatus = { rcClient.right - statusW - 20, toolbarY, rcClient.right - 20, toolbarY + toolbarH };
-            RECT rcTitle = { 54, toolbarY + 5, rcStatus.left - 12, toolbarY + 24 };
-            RECT rcSub = { 54, toolbarY + 24, rcStatus.left - 12, toolbarY + 42 };
+            RECT rcTitle = { 54, toolbarY + 5, rcStatus.left - 16, toolbarY + 24 };
+            RECT rcSub = { 54, toolbarY + 24, rcStatus.left - 16, toolbarY + 42 };
 
             SetTextColor(hmemDC, textPrimary);
             const wchar_t* tabTitle = (g_State.activeTab == 0) ? L"Whole Consist Pool Overhaul / Mutation" :
@@ -3058,10 +4178,21 @@ namespace
                 g_State.rcGroupPicker = { 0 };
 
                 int cardBottom = rcClient.bottom - 68;
-                int leftColW = (rcClient.right - 60) * 44 / 100;
-                int wireChannelW = 54;
-                int rightColX = 30 + leftColW + wireChannelW;
-                int rightColW = rcClient.right - 30 - rightColX;
+                int totalW = rcClient.right - 60;
+                int gap = 12;
+
+                // 2-Area Distribution:
+                // Left Area (~66%): Collapsible Card-Row Matrix (CustomListControl)
+                // Right Area (~34%): Batch Action Radios + Source Nodes
+                int rightColW = (totalW - gap) * 34 / 100;
+                if (rightColW < 320) rightColW = 320;
+                int listW = totalW - gap - rightColW;
+
+                int leftX = 30;
+                int rightX = leftX + listW + gap;
+
+                RECT rcListPane  = { leftX, 126, leftX + listW, cardBottom };
+                RECT rcRightPane = { rightX, 126, rightX + rightColW, cardBottom };
 
                 struct WireAnchor
                 {
@@ -3070,32 +4201,28 @@ namespace
                 };
                 std::vector<WireAnchor> wireAnchors;
 
-                // -----------------------------------------------------------------
-                // LEFT COLUMN: Broken Consists & Units Tree Card
-                // -----------------------------------------------------------------
-                g_State.rcBrokenTreeCard = { 30, 126, 30 + leftColW, cardBottom };
+                // Sub-Toolbar / Header Bar above the List Control
+                int headerY = 126;
+                int headerH = 34;
+                RECT rcHeaderCard = { leftX, headerY, leftX + listW, headerY + headerH };
 
-                HBRUSH hbrTreeCard = CreateSolidBrush(cardBgCol);
-                HPEN hpenTreeCard = CreatePen(PS_SOLID, 1, borderCol);
-                HBRUSH hOldBTC = (HBRUSH)SelectObject(hmemDC, hbrTreeCard);
-                HPEN hOldPTC = (HPEN)SelectObject(hmemDC, hpenTreeCard);
-                RoundRect(hmemDC, g_State.rcBrokenTreeCard.left, g_State.rcBrokenTreeCard.top, g_State.rcBrokenTreeCard.right, g_State.rcBrokenTreeCard.bottom, 6, 6);
-                SelectObject(hmemDC, hOldBTC);
-                SelectObject(hmemDC, hOldPTC);
-                DeleteObject(hbrTreeCard);
-                DeleteObject(hpenTreeCard);
+                // Draw Header Card Background
+                HBRUSH hbrHdr = CreateSolidBrush(cardBgCol);
+                HPEN hpenHdr = CreatePen(PS_SOLID, 1, borderCol);
+                hOldB = (HBRUSH)SelectObject(hmemDC, hbrHdr);
+                hOldP = (HPEN)SelectObject(hmemDC, hpenHdr);
+                RoundRect(hmemDC, rcHeaderCard.left, rcHeaderCard.top, rcHeaderCard.right, rcHeaderCard.bottom, 6, 6);
+                SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP);
+                DeleteObject(hbrHdr); DeleteObject(hpenHdr);
 
-                // Tree Card Master Checkbox (Select All)
-                g_State.rcMasterBrokenCheck = { g_State.rcBrokenTreeCard.right - 92, g_State.rcBrokenTreeCard.top + 6, g_State.rcBrokenTreeCard.right - 8, g_State.rcBrokenTreeCard.top + 30 };
+                // Count total / selected units for master checkbox
                 int totalUnits = 0;
                 int selectedUnits = 0;
-                int totalBrokenUnits = 0;
-                int totalEmptyConsists = 0;
+                int totalConsists = (int)g_State.brokenConsists.size();
                 for (const auto& bc : g_State.brokenConsists)
                 {
                     if (bc.brokenUnits.empty())
                     {
-                        totalEmptyConsists++;
                         totalUnits++;
                         if (bc.isSelected) selectedUnits++;
                     }
@@ -3104,7 +4231,6 @@ namespace
                         for (const auto& bu : bc.brokenUnits)
                         {
                             totalUnits++;
-                            if (bu.isBroken) totalBrokenUnits++;
                             if (bc.isSelected && bu.isSelected) selectedUnits++;
                         }
                     }
@@ -3112,37 +4238,13 @@ namespace
                 bool isAllMaster = (totalUnits > 0 && selectedUnits == totalUnits);
                 bool isIndeterminateMaster = (selectedUnits > 0 && !isAllMaster);
 
-                // Quick Button: "Select Broken" (if broken units or empty consists exist)
-                if (totalBrokenUnits > 0 || totalEmptyConsists > 0)
-                {
-                    g_State.rcTab2BtnSelectBroken = { g_State.rcMasterBrokenCheck.left - 105, g_State.rcBrokenTreeCard.top + 6, g_State.rcMasterBrokenCheck.left - 6, g_State.rcBrokenTreeCard.top + 30 };
-                    COLORREF btnBg = g_State.isHoverTab2BtnSelectBroken ? RGB(55, 40, 42) : RGB(42, 30, 32);
-                    COLORREF btnBorder = g_State.isHoverTab2BtnSelectBroken ? RGB(220, 80, 80) : RGB(140, 50, 50);
-                    HBRUSH hbrSBBg = CreateSolidBrush(btnBg);
-                    HPEN hpenSBBorder = CreatePen(PS_SOLID, 1, btnBorder);
-                    SelectObject(hmemDC, hbrSBBg);
-                    SelectObject(hmemDC, hpenSBBorder);
-                    RoundRect(hmemDC, g_State.rcTab2BtnSelectBroken.left, g_State.rcTab2BtnSelectBroken.top, g_State.rcTab2BtnSelectBroken.right, g_State.rcTab2BtnSelectBroken.bottom, 4, 4);
-                    DeleteObject(hbrSBBg);
-                    DeleteObject(hpenSBBorder);
-
-                    SelectObject(hmemDC, g_State.hFontSmall);
-                    SetTextColor(hmemDC, RGB(255, 120, 110));
-                    DrawTextW(hmemDC, (totalEmptyConsists > 0 && totalBrokenUnits == 0) ? L"Select Empty" : L"Select Broken", -1, &g_State.rcTab2BtnSelectBroken, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                }
-                else
-                {
-                    g_State.rcTab2BtnSelectBroken = { 0 };
-                }
-
-                // Tree Card Header Title
-                int headerTitleRight = ((totalBrokenUnits > 0 || totalEmptyConsists > 0) ? (g_State.rcTab2BtnSelectBroken.left - 6) : (g_State.rcMasterBrokenCheck.left - 6));
-                RECT rcTreeHeader = { g_State.rcBrokenTreeCard.left + 12, g_State.rcBrokenTreeCard.top + 6, headerTitleRight, g_State.rcBrokenTreeCard.top + 30 };
-                SelectObject(hmemDC, g_State.hFontBold);
-                SetTextColor(hmemDC, textPrimary);
-                DrawTextW(hmemDC, L"Consist Units:", -1, &rcTreeHeader, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                RECT rcMChkBox = { g_State.rcMasterBrokenCheck.left, g_State.rcMasterBrokenCheck.top + 4, g_State.rcMasterBrokenCheck.left + 16, g_State.rcMasterBrokenCheck.top + 20 };
+                // Sub-toolbar elements from right to left:
+                // 1. [✓ All] master checkbox
+                int btnH = 24;
+                int btnY = headerY + 5;
+                int masterW = 54;
+                g_State.rcMasterBrokenCheck = { rcHeaderCard.right - masterW - 8, btnY, rcHeaderCard.right - 8, btnY + btnH };
+                RECT rcMChkBox = { g_State.rcMasterBrokenCheck.left, btnY + 4, g_State.rcMasterBrokenCheck.left + 16, btnY + 20 };
                 HBRUSH hbrMChk = CreateSolidBrush((isAllMaster || isIndeterminateMaster) ? accentCol : RGB(40, 40, 44));
                 HPEN hpenMChk = CreatePen(PS_SOLID, 1, (isAllMaster || isIndeterminateMaster) ? accentCol : borderCol);
                 hOldB = (HBRUSH)SelectObject(hmemDC, hbrMChk);
@@ -3162,534 +4264,397 @@ namespace
                     FillRect(hmemDC, &rcInd, hbrInd);
                     DeleteObject(hbrInd);
                 }
-                SelectObject(hmemDC, hOldB);
-                SelectObject(hmemDC, hOldP);
-                DeleteObject(hbrMChk);
-                DeleteObject(hpenMChk);
+                SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP);
+                DeleteObject(hbrMChk); DeleteObject(hpenMChk);
 
                 SelectObject(hmemDC, g_State.hFontMain);
                 SetTextColor(hmemDC, textPrimary);
-                RECT rcMText = { g_State.rcMasterBrokenCheck.left + 20, g_State.rcMasterBrokenCheck.top, g_State.rcMasterBrokenCheck.right, g_State.rcMasterBrokenCheck.bottom };
-                DrawTextW(hmemDC, L"Select All", -1, &rcMText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                RECT rcMText = { g_State.rcMasterBrokenCheck.left + 20, btnY, g_State.rcMasterBrokenCheck.right, btnY + btnH };
+                DrawTextW(hmemDC, L"All", -1, &rcMText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-                // Divider Line under Header
-                HPEN hPenTDiv = CreatePen(PS_SOLID, 1, borderCol);
-                SelectObject(hmemDC, hPenTDiv);
-                MoveToEx(hmemDC, g_State.rcBrokenTreeCard.left + 1, g_State.rcBrokenTreeCard.top + 36, NULL);
-                LineTo(hmemDC, g_State.rcBrokenTreeCard.right - 1, g_State.rcBrokenTreeCard.top + 36);
-                DeleteObject(hPenTDiv);
+                // 2. Filter Dropdown Button: [ All Consists ▼ ]
+                int filtW = 120;
+                int filtX = g_State.rcMasterBrokenCheck.left - filtW - 8;
+                g_State.rcTab2FilterBtn = { filtX, btnY, filtX + filtW, btnY + btnH };
+                COLORREF filtBg = g_State.isHoverTab2FilterBtn ? RGB(45, 45, 52) : RGB(32, 32, 36);
+                COLORREF filtBorder = g_State.isHoverTab2FilterBtn ? RGB(90, 90, 100) : borderCol;
+                HBRUSH hbrFilt = CreateSolidBrush(filtBg);
+                HPEN hpenFilt = CreatePen(PS_SOLID, 1, filtBorder);
+                SelectObject(hmemDC, hbrFilt); SelectObject(hmemDC, hpenFilt);
+                RoundRect(hmemDC, g_State.rcTab2FilterBtn.left, g_State.rcTab2FilterBtn.top, g_State.rcTab2FilterBtn.right, g_State.rcTab2FilterBtn.bottom, 4, 4);
+                DeleteObject(hbrFilt); DeleteObject(hpenFilt);
 
-                // Tree List Scroll View
-                g_State.rcBrokenTreeList = { g_State.rcBrokenTreeCard.left + 4, g_State.rcBrokenTreeCard.top + 38, g_State.rcBrokenTreeCard.right - 4, g_State.rcBrokenTreeCard.bottom - 6 };
+                const wchar_t* filtText = L"All Consists";
+                if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenAndEmpty) filtText = L"Broken + Empty";
+                else if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenOnly) filtText = L"Broken Only";
+                else if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::EmptyOnly) filtText = L"Empty Only";
 
-                HRGN hTreeClip = CreateRectRgn(g_State.rcBrokenTreeList.left, g_State.rcBrokenTreeList.top, g_State.rcBrokenTreeList.right, g_State.rcBrokenTreeList.bottom);
-                SelectClipRgn(hmemDC, hTreeClip);
+                SelectObject(hmemDC, g_State.hFontSmall);
+                SetTextColor(hmemDC, textPrimary);
+                RECT rcFiltTxt = { g_State.rcTab2FilterBtn.left + 8, btnY, g_State.rcTab2FilterBtn.right - 18, btnY + btnH };
+                DrawTextW(hmemDC, filtText, -1, &rcFiltTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                DrawSolidTriangle(hmemDC, g_State.rcTab2FilterBtn.right - 9, btnY + (btnH / 2), textSecondary, true, 3);
 
+                // 3. Quick Action: [ ⚠ Broken Only ]
+                int brokenBtnW = 105;
+                int brokenBtnX = filtX - brokenBtnW - 6;
+                g_State.rcTab2BtnSelectBroken = { brokenBtnX, btnY, brokenBtnX + brokenBtnW, btnY + btnH };
+                bool isBrokenActive = (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenOnly);
+                COLORREF brkBg = isBrokenActive ? RGB(60, 24, 28) : (g_State.isHoverTab2BtnSelectBroken ? RGB(45, 45, 52) : RGB(32, 32, 36));
+                COLORREF brkBdr = isBrokenActive ? RGB(239, 68, 68) : (g_State.isHoverTab2BtnSelectBroken ? RGB(90, 90, 100) : borderCol);
+                COLORREF brkTxt = isBrokenActive ? RGB(255, 140, 140) : textPrimary;
+                HBRUSH hbrBrk = CreateSolidBrush(brkBg); HPEN hpenBrk = CreatePen(PS_SOLID, 1, brkBdr);
+                SelectObject(hmemDC, hbrBrk); SelectObject(hmemDC, hpenBrk);
+                RoundRect(hmemDC, g_State.rcTab2BtnSelectBroken.left, g_State.rcTab2BtnSelectBroken.top, g_State.rcTab2BtnSelectBroken.right, g_State.rcTab2BtnSelectBroken.bottom, 4, 4);
+                DeleteObject(hbrBrk); DeleteObject(hpenBrk);
+                SelectObject(hmemDC, g_State.hFontSmall);
+                SetTextColor(hmemDC, brkTxt);
+                DrawTextW(hmemDC, L"⚠ Broken Only", -1, &g_State.rcTab2BtnSelectBroken, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                // 4. [ ☵ Collapse All ]
+                int colBtnW = 90;
+                int colBtnX = brokenBtnX - colBtnW - 6;
+                g_State.rcBtnCollapseAll = { colBtnX, btnY, colBtnX + colBtnW, btnY + btnH };
+                COLORREF colBg = g_State.isHoverBtnCollapseAll ? RGB(45, 45, 52) : RGB(32, 32, 36);
+                COLORREF colBdr = g_State.isHoverBtnCollapseAll ? RGB(90, 90, 100) : borderCol;
+                HBRUSH hbrCol = CreateSolidBrush(colBg); HPEN hpenCol = CreatePen(PS_SOLID, 1, colBdr);
+                SelectObject(hmemDC, hbrCol); SelectObject(hmemDC, hpenCol);
+                RoundRect(hmemDC, g_State.rcBtnCollapseAll.left, g_State.rcBtnCollapseAll.top, g_State.rcBtnCollapseAll.right, g_State.rcBtnCollapseAll.bottom, 4, 4);
+                DeleteObject(hbrCol); DeleteObject(hpenCol);
+                SelectObject(hmemDC, g_State.hFontSmall);
+                SetTextColor(hmemDC, textPrimary);
+                DrawTextW(hmemDC, L"☵ Collapse", -1, &g_State.rcBtnCollapseAll, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                // 5. [ ☵ Expand All ]
+                int expBtnW = 80;
+                int expBtnX = colBtnX - expBtnW - 6;
+                g_State.rcBtnExpandAll = { expBtnX, btnY, expBtnX + expBtnW, btnY + btnH };
+                COLORREF expBg = g_State.isHoverBtnExpandAll ? RGB(45, 45, 52) : RGB(32, 32, 36);
+                COLORREF expBdr = g_State.isHoverBtnExpandAll ? RGB(90, 90, 100) : borderCol;
+                HBRUSH hbrExp = CreateSolidBrush(expBg); HPEN hpenExp = CreatePen(PS_SOLID, 1, expBdr);
+                SelectObject(hmemDC, hbrExp); SelectObject(hmemDC, hpenExp);
+                RoundRect(hmemDC, g_State.rcBtnExpandAll.left, g_State.rcBtnExpandAll.top, g_State.rcBtnExpandAll.right, g_State.rcBtnExpandAll.bottom, 4, 4);
+                DeleteObject(hbrExp); DeleteObject(hpenExp);
+                SelectObject(hmemDC, g_State.hFontSmall);
+                SetTextColor(hmemDC, textPrimary);
+                DrawTextW(hmemDC, L"☵ Expand", -1, &g_State.rcBtnExpandAll, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                // Left Header Title: "Consists & Formations (N consists, M units)"
+                RECT rcLeftTitle = { rcHeaderCard.left + 10, btnY, expBtnX - 8, btnY + btnH };
+                SelectObject(hmemDC, g_State.hFontBold);
+                SetTextColor(hmemDC, textPrimary);
+                std::wstring titleStr = L"Consists & Formations (" + std::to_wstring(totalConsists) + L" consists, " + std::to_wstring(totalUnits) + L" units)";
+                DrawTextW(hmemDC, titleStr.c_str(), -1, &rcLeftTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                // Empty state if brokenConsists is empty
                 if (g_State.brokenConsists.empty())
                 {
-                    // Empty state: prompt to select consists or scan library
+                    RECT rcEmptyArea = { leftX, 164, leftX + listW, cardBottom };
+                    HBRUSH hbrEm = CreateSolidBrush(cardBgCol);
+                    HPEN hpenEm = CreatePen(PS_SOLID, 1, borderCol);
+                    SelectObject(hmemDC, hbrEm); SelectObject(hmemDC, hpenEm);
+                    RoundRect(hmemDC, rcEmptyArea.left, rcEmptyArea.top, rcEmptyArea.right, rcEmptyArea.bottom, 6, 6);
+                    DeleteObject(hbrEm); DeleteObject(hpenEm);
+
                     SelectObject(hmemDC, g_State.hFontIconLg);
                     SetTextColor(hmemDC, textSecondary);
-                    RECT rcEmIcon = { g_State.rcBrokenTreeList.left, g_State.rcBrokenTreeList.top + 45, g_State.rcBrokenTreeList.right, g_State.rcBrokenTreeList.top + 80 };
+                    RECT rcEmIcon = { rcEmptyArea.left, rcEmptyArea.top + 60, rcEmptyArea.right, rcEmptyArea.top + 95 };
                     DrawTextW(hmemDC, L"\xE896", -1, &rcEmIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                     SelectObject(hmemDC, g_State.hFontBold);
                     SetTextColor(hmemDC, textPrimary);
-                    RECT rcEmTitle = { g_State.rcBrokenTreeList.left, g_State.rcBrokenTreeList.top + 88, g_State.rcBrokenTreeList.right, g_State.rcBrokenTreeList.top + 110 };
+                    RECT rcEmTitle = { rcEmptyArea.left, rcEmptyArea.top + 105, rcEmptyArea.right, rcEmptyArea.top + 130 };
                     DrawTextW(hmemDC, L"No Consist(s) Selected", -1, &rcEmTitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                     SelectObject(hmemDC, g_State.hFontSmall);
                     SetTextColor(hmemDC, textSecondary);
-                    RECT rcEmSub = { g_State.rcBrokenTreeList.left + 24, g_State.rcBrokenTreeList.top + 116, g_State.rcBrokenTreeList.right - 24, g_State.rcBrokenTreeList.top + 160 };
+                    RECT rcEmSub = { rcEmptyArea.left + 40, rcEmptyArea.top + 135, rcEmptyArea.right - 40, rcEmptyArea.top + 180 };
                     DrawTextW(hmemDC, L"Select consist(s) in Consist Manager before opening, or click below to scan all consists across the library for broken units.", -1, &rcEmSub, DT_CENTER | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
 
-                    // Scan Library Button
-                    int btnW = 200;
-                    int btnH = 32;
-                    int btnX = (g_State.rcBrokenTreeList.left + g_State.rcBrokenTreeList.right - btnW) / 2;
-                    int btnY = g_State.rcBrokenTreeList.top + 172;
-                    g_State.rcTab2BtnScanLibrary = { btnX, btnY, btnX + btnW, btnY + btnH };
+                    int btnW = 180;
+                    int btnH2 = 32;
+                    int btnX2 = (rcEmptyArea.left + rcEmptyArea.right - btnW) / 2;
+                    int btnY2 = rcEmptyArea.top + 195;
+                    g_State.rcTab2BtnScanLibrary = { btnX2, btnY2, btnX2 + btnW, btnY2 + btnH2 };
 
                     DrawModernButton(hmemDC, g_State.rcTab2BtnScanLibrary, L"Scan Entire Library", g_State.isHoverTab2BtnScanLibrary, false, false, g_State.hFontBold, g_State.hFontIcon, L"\xE721");
                 }
                 else
                 {
                     g_State.rcTab2BtnScanLibrary = { 0 };
-                    int curY = g_State.rcBrokenTreeList.top + 4 - g_State.brokenScrollY;
-                    int totalContentH = 8;
-
-                    for (size_t cIdx = 0; cIdx < g_State.brokenConsists.size(); ++cIdx)
-                    {
-                        auto& bcon = g_State.brokenConsists[cIdx];
-
-                        int brokenCountInConsist = 0;
-                        for (const auto& bu : bcon.brokenUnits)
-                        {
-                            if (bu.isBroken) brokenCountInConsist++;
-                        }
-
-                        int rowH = 26;
-                        RECT rcConRow = { g_State.rcBrokenTreeList.left + 2, curY, g_State.rcBrokenTreeList.right - 2, curY + rowH };
-
-                        if (rcConRow.bottom >= g_State.rcBrokenTreeList.top && rcConRow.top <= g_State.rcBrokenTreeList.bottom)
-                        {
-                            HBRUSH hbrRowBg = CreateSolidBrush(RGB(36, 36, 40));
-                            HPEN hpenRow = CreatePen(PS_SOLID, 1, RGB(55, 55, 60));
-                            HBRUSH holdR1 = (HBRUSH)SelectObject(hmemDC, hbrRowBg);
-                            HPEN holdR2 = (HPEN)SelectObject(hmemDC, hpenRow);
-                            RoundRect(hmemDC, rcConRow.left, rcConRow.top, rcConRow.right, rcConRow.bottom, 4, 4);
-                            SelectObject(hmemDC, holdR1);
-                            SelectObject(hmemDC, holdR2);
-                            DeleteObject(hbrRowBg);
-                            DeleteObject(hpenRow);
-
-                            // Chevron
-                            RECT rcChev = { rcConRow.left + 4, rcConRow.top, rcConRow.left + 20, rcConRow.bottom };
-                            SelectObject(hmemDC, g_State.hFontIcon);
-                            SetTextColor(hmemDC, textSecondary);
-                            DrawTextW(hmemDC, bcon.isExpanded ? L"\xE70D" : L"\xE76C", -1, &rcChev, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                            // Checkbox
-                            RECT rcConChk = { rcConRow.left + 24, rcConRow.top + 5, rcConRow.left + 40, rcConRow.top + 21 };
-                            HBRUSH hbrCChk = CreateSolidBrush(bcon.isSelected ? accentCol : cardBgCol);
-                            HPEN hpenCChk = CreatePen(PS_SOLID, 1, bcon.isSelected ? accentCol : borderCol);
-                            SelectObject(hmemDC, hbrCChk);
-                            SelectObject(hmemDC, hpenCChk);
-                            RoundRect(hmemDC, rcConChk.left, rcConChk.top, rcConChk.right, rcConChk.bottom, 4, 4);
-                            DeleteObject(hbrCChk);
-                            DeleteObject(hpenCChk);
-
-                            if (bcon.isSelected)
-                            {
-                                SelectObject(hmemDC, g_State.hFontIcon);
-                                SetTextColor(hmemDC, RGB(255, 255, 255));
-                                RECT rcGlyph = { rcConChk.left, rcConChk.top - 1, rcConChk.right, rcConChk.bottom };
-                                DrawTextW(hmemDC, L"\xE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                            }
-
-                            // Consist Label
-                            SelectObject(hmemDC, g_State.hFontBold);
-                            SetTextColor(hmemDC, textPrimary);
-                            bool isActivityConsist = (bcon.filePath.rfind(L"ACTIVITY:", 0) == 0);
-                            std::wstring conLabel;
-                            if (isActivityConsist)
-                            {
-                                conLabel = L"[Activity Consist] " + bcon.consistName;
-                                if (!bcon.fileName.empty() && bcon.fileName != bcon.consistName)
-                                {
-                                    conLabel += L" (ID: " + bcon.fileName + L")";
-                                }
-                            }
-                            else
-                            {
-                                conLabel = bcon.fileName;
-                                if (conLabel.size() < 4 || _wcsicmp(conLabel.substr(conLabel.size() - 4).c_str(), L".con") != 0)
-                                {
-                                    conLabel += L".con";
-                                }
-                                if (!bcon.consistName.empty() && bcon.consistName != bcon.fileName)
-                                {
-                                    conLabel += L" (" + bcon.consistName + L")";
-                                }
-                            }
-                            RECT rcConText = { rcConRow.left + 46, rcConRow.top, rcConRow.right - 250, rcConRow.bottom };
-                            DrawTextW(hmemDC, conLabel.c_str(), -1, &rcConText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                            // Count & Status Badge
-                            SelectObject(hmemDC, g_State.hFontSmall);
-                            std::wstring badgStr;
-                            if (bcon.brokenUnits.empty())
-                            {
-                                badgStr = L"0 units (Empty)";
-                                SetTextColor(hmemDC, RGB(255, 170, 80));
-                            }
-                            else if (brokenCountInConsist > 0)
-                            {
-                                badgStr = std::to_wstring(brokenCountInConsist) + L" missing";
-                                SetTextColor(hmemDC, RGB(255, 95, 80));
-                            }
-                            else
-                            {
-                                badgStr = L"Healthy";
-                                SetTextColor(hmemDC, RGB(90, 190, 110));
-                            }
-                            RECT rcBadge = { rcConRow.right - 246, rcConRow.top, rcConRow.right - 170, rcConRow.bottom };
-                            DrawTextW(hmemDC, badgStr.c_str(), -1, &rcBadge, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                            // Consist Action Mode Button [🔄 Rebuild] vs [🔧 Replace]
-                            RECT rcConMode = { rcConRow.right - 164, rcConRow.top + 3, rcConRow.right - 84, rcConRow.top + 23 };
-                            bool isRebuild = (bcon.actionExecutionMode == 1 || bcon.brokenUnits.empty());
-                            COLORREF modeBg = isRebuild ? RGB(46, 26, 60) : RGB(24, 38, 52);
-                            COLORREF modeBorder = isRebuild ? RGB(168, 85, 247) : RGB(56, 140, 220);
-                            COLORREF modeTextCol = isRebuild ? RGB(226, 190, 255) : RGB(140, 205, 255);
-                            const wchar_t* modeText = isRebuild ? L"🔄 Rebuild" : L"🔧 Replace";
-
-                            HBRUSH hbrMode = CreateSolidBrush(modeBg);
-                            HPEN hpenMode = CreatePen(PS_SOLID, 1, modeBorder);
-                            SelectObject(hmemDC, hbrMode); SelectObject(hmemDC, hpenMode);
-                            RoundRect(hmemDC, rcConMode.left, rcConMode.top, rcConMode.right, rcConMode.bottom, 4, 4);
-                            DeleteObject(hbrMode); DeleteObject(hpenMode);
-
-                            SelectObject(hmemDC, g_State.hFontSmall);
-                            SetTextColor(hmemDC, modeTextCol);
-                            DrawTextW(hmemDC, modeText, -1, &rcConMode, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                            // Consist Source Pill [● Src A]
-                            const auto* pConSrc = FindSourceNodeById(bcon.assignedSourceId);
-                            COLORREF conSrcCol = pConSrc ? pConSrc->color : RGB(56, 189, 248);
-                            std::wstring conSrcName = pConSrc ? pConSrc->name : L"Source A";
-
-                            RECT rcConPill = { rcConRow.right - 80, rcConRow.top + 3, rcConRow.right - 4, rcConRow.top + 23 };
-                            HBRUSH hbrPill = CreateSolidBrush(RGB(30, 30, 36));
-                            HPEN hpenPill = CreatePen(PS_SOLID, 1, conSrcCol);
-                            SelectObject(hmemDC, hbrPill); SelectObject(hmemDC, hpenPill);
-                            RoundRect(hmemDC, rcConPill.left, rcConPill.top, rcConPill.right, rcConPill.bottom, 4, 4);
-                            DeleteObject(hbrPill); DeleteObject(hpenPill);
-
-                            HBRUSH hbrDot = CreateSolidBrush(conSrcCol);
-                            SelectObject(hmemDC, hbrDot);
-                            SelectObject(hmemDC, GetStockObject(NULL_PEN));
-                            Ellipse(hmemDC, rcConPill.left + 5, rcConPill.top + 7, rcConPill.left + 11, rcConPill.top + 13);
-                            DeleteObject(hbrDot);
-
-                            SelectObject(hmemDC, g_State.hFontSmall);
-                            SetTextColor(hmemDC, conSrcCol);
-                            RECT rcPillTxt = { rcConPill.left + 14, rcConPill.top, rcConPill.right - 4, rcConPill.bottom };
-                            DrawTextW(hmemDC, conSrcName.c_str(), -1, &rcPillTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                            if (!bcon.isExpanded && bcon.isSelected)
-                            {
-                                wireAnchors.push_back({ { g_State.rcBrokenTreeCard.right, (rcConRow.top + rcConRow.bottom) / 2 }, bcon.assignedSourceId });
-                            }
-                        }
-
-                        curY += rowH + 4;
-                        totalContentH += rowH + 4;
-
-                        if (bcon.isExpanded && (bcon.actionExecutionMode == 1 || bcon.brokenUnits.empty()))
-                        {
-                            // Render Rebuild Plan Banner
-                            int planH = 48;
-                            RECT rcPlan = { g_State.rcBrokenTreeList.left + 26, curY, g_State.rcBrokenTreeList.right - 6, curY + planH };
-                            if (rcPlan.bottom >= g_State.rcBrokenTreeList.top && rcPlan.top <= g_State.rcBrokenTreeList.bottom)
-                            {
-                                HBRUSH hbrPlan = CreateSolidBrush(RGB(28, 22, 38));
-                                HPEN hpenPlan = CreatePen(PS_SOLID, 1, RGB(130, 65, 175));
-                                SelectObject(hmemDC, hbrPlan); SelectObject(hmemDC, hpenPlan);
-                                RoundRect(hmemDC, rcPlan.left, rcPlan.top, rcPlan.right, rcPlan.bottom, 4, 4);
-                                DeleteObject(hbrPlan); DeleteObject(hpenPlan);
-
-                                SelectObject(hmemDC, g_State.hFontBold);
-                                SetTextColor(hmemDC, RGB(226, 190, 255));
-                                RECT rcPlanTitle = { rcPlan.left + 10, rcPlan.top + 4, rcPlan.right - 10, rcPlan.top + 22 };
-                                std::wstring planTitle = bcon.brokenUnits.empty() ? L"⚡ Rebuild Consist: Generate Empty Formation" : L"⚡ Rebuild Consist: Full Formation Generation";
-                                DrawTextW(hmemDC, planTitle.c_str(), -1, &rcPlanTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                                SelectObject(hmemDC, g_State.hFontSmall);
-                                SetTextColor(hmemDC, RGB(195, 185, 215));
-                                RECT rcPlanSub = { rcPlan.left + 10, rcPlan.top + 24, rcPlan.right - 10, rcPlan.top + 42 };
-                                const auto* pPlanSrc = FindSourceNodeById(bcon.assignedSourceId);
-                                std::wstring srcNameStr = pPlanSrc ? pPlanSrc->name : L"Source";
-                                std::wstring planDesc = bcon.brokenUnits.empty() ?
-                                    (L"Generates complete consist from " + srcNameStr + L" sequence & pool rules.") :
-                                    (L"Generates complete consist from " + srcNameStr + L" sequence & pool rules. (Original count ignored)");
-                                DrawTextW(hmemDC, planDesc.c_str(), -1, &rcPlanSub, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                                if (bcon.isSelected)
-                                {
-                                    wireAnchors.push_back({ { g_State.rcBrokenTreeCard.right, (rcPlan.top + rcPlan.bottom) / 2 }, bcon.assignedSourceId });
-                                }
-                            }
-                            curY += planH + 4;
-                            totalContentH += planH + 4;
-                        }
-                        else if (bcon.isExpanded && bcon.actionExecutionMode == 0)
-                        {
-                            for (size_t uIdx = 0; uIdx < bcon.brokenUnits.size(); ++uIdx)
-                            {
-                                const auto& bu = bcon.brokenUnits[uIdx];
-                                int uH = 22;
-                                RECT rcURow = { g_State.rcBrokenTreeList.left + 26, curY, g_State.rcBrokenTreeList.right - 6, curY + uH };
-
-                                if (rcURow.bottom >= g_State.rcBrokenTreeList.top && rcURow.top <= g_State.rcBrokenTreeList.bottom)
-                                {
-                                    // Child Checkbox
-                                    RECT rcUChk = { rcURow.left + 4, rcURow.top + 3, rcURow.left + 18, rcURow.top + 17 };
-                                    HBRUSH hbrUChk = CreateSolidBrush(bu.isSelected ? accentCol : cardBgCol);
-                                    HPEN hpenUChk = CreatePen(PS_SOLID, 1, bu.isSelected ? accentCol : borderCol);
-                                    SelectObject(hmemDC, hbrUChk);
-                                    SelectObject(hmemDC, hpenUChk);
-                                    RoundRect(hmemDC, rcUChk.left, rcUChk.top, rcUChk.right, rcUChk.bottom, 3, 3);
-                                    DeleteObject(hbrUChk);
-                                    DeleteObject(hpenUChk);
-
-                                    if (bu.isSelected)
-                                    {
-                                        SelectObject(hmemDC, g_State.hFontIcon);
-                                        SetTextColor(hmemDC, RGB(255, 255, 255));
-                                        RECT rcGlyph = { rcUChk.left, rcUChk.top - 1, rcUChk.right, rcUChk.bottom };
-                                        DrawTextW(hmemDC, L"\xE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                                    }
-
-                                    // Type & Pos Badge
-                                    SelectObject(hmemDC, g_State.hFontSmall);
-                                    std::wstring typeStr = bu.isEngine ? L"[Engine #" + std::to_wstring(bu.unitIndex + 1) + L"]" : L"[Wagon #" + std::to_wstring(bu.unitIndex + 1) + L"]";
-                                    SetTextColor(hmemDC, bu.isEngine ? RGB(100, 180, 255) : RGB(255, 170, 80));
-                                    RECT rcUType = { rcURow.left + 24, rcURow.top, rcURow.left + 105, rcURow.bottom };
-                                    DrawTextW(hmemDC, typeStr.c_str(), -1, &rcUType, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                                    // Unit Name & Folder
-                                    SelectObject(hmemDC, g_State.hFontMain);
-                                    SetTextColor(hmemDC, RGB(230, 230, 230));
-                                    std::wstring uLabel = bu.uid + L" (" + bu.parentDir + L")";
-                                    RECT rcUName = { rcURow.left + 108, rcURow.top, rcURow.right - 96, rcURow.bottom };
-                                    DrawTextW(hmemDC, uLabel.c_str(), -1, &rcUName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                                    // Unit Source Pill [ A ]
-                                    const auto* pUnitSrc = FindSourceNodeById(bu.assignedSourceId);
-                                    COLORREF uSrcCol = pUnitSrc ? pUnitSrc->color : RGB(56, 189, 248);
-                                    std::wstring uSrcLetter = pUnitSrc ? (pUnitSrc->name.size() >= 7 ? pUnitSrc->name.substr(7) : pUnitSrc->name) : L"A";
-
-                                    RECT rcUPill = { rcURow.right - 92, rcURow.top + 2, rcURow.right - 58, rcURow.top + 20 };
-                                    HBRUSH hbrUPill = CreateSolidBrush(RGB(30, 30, 36));
-                                    HPEN hpenUPill = CreatePen(PS_SOLID, 1, uSrcCol);
-                                    SelectObject(hmemDC, hbrUPill); SelectObject(hmemDC, hpenUPill);
-                                    RoundRect(hmemDC, rcUPill.left, rcUPill.top, rcUPill.right, rcUPill.bottom, 3, 3);
-                                    DeleteObject(hbrUPill); DeleteObject(hpenUPill);
-
-                                    SelectObject(hmemDC, g_State.hFontSmall);
-                                    SetTextColor(hmemDC, uSrcCol);
-                                    DrawTextW(hmemDC, uSrcLetter.c_str(), -1, &rcUPill, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                                    if (bu.isSelected)
-                                    {
-                                        wireAnchors.push_back({ { g_State.rcBrokenTreeCard.right, (rcURow.top + rcURow.bottom) / 2 }, bu.assignedSourceId });
-                                    }
-
-                                    // Status Badge (MISSING or HEALTHY)
-                                    SelectObject(hmemDC, g_State.hFontSmall);
-                                    if (bu.isBroken)
-                                    {
-                                        SetTextColor(hmemDC, RGB(255, 80, 80));
-                                        RECT rcUMiss = { rcURow.right - 54, rcURow.top, rcURow.right - 4, rcURow.bottom };
-                                        DrawTextW(hmemDC, L"MISSING", -1, &rcUMiss, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                                    }
-                                    else
-                                    {
-                                        SetTextColor(hmemDC, RGB(90, 190, 110));
-                                        RECT rcUOk = { rcURow.right - 54, rcURow.top, rcURow.right - 4, rcURow.bottom };
-                                        DrawTextW(hmemDC, L"HEALTHY", -1, &rcUOk, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                                    }
-                                }
-
-                                curY += uH + 2;
-                                totalContentH += uH + 2;
-                            }
-                        }
-                    }
-                    g_State.brokenTotalContentH = totalContentH;
                 }
 
-                SelectClipRgn(hmemDC, NULL);
-                DeleteObject(hTreeClip);
-
-                // -----------------------------------------------------------------
-                // RIGHT COLUMN: Multi-Source Cards Stack & Options
-                // -----------------------------------------------------------------
+                // =============================================================
+                // PANE 3: RIGHT PANE (ACTION MODE RADIOS & SOURCE CARDS)
+                // =============================================================
                 g_State.sourceCardUIs.clear();
 
-                // Top Header: Title & [+ Add Source] Button
-                RECT rcSrcHeader = { rightColX, 126, rightColX + rightColW - 110, 150 };
+                // Right Pane Card Background
+                HBRUSH hbrRightCard = CreateSolidBrush(cardBgCol);
+                HPEN hpenRightCard = CreatePen(PS_SOLID, 1, borderCol);
+                hOldB = (HBRUSH)SelectObject(hmemDC, hbrRightCard);
+                hOldP = (HPEN)SelectObject(hmemDC, hpenRightCard);
+                RoundRect(hmemDC, rcRightPane.left, rcRightPane.top, rcRightPane.right, rcRightPane.bottom, 6, 6);
+                SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP);
+                DeleteObject(hbrRightCard); DeleteObject(hpenRightCard);
+
+                // Right Header: Batch Action Title
+                RECT rcActHeader = { rcRightPane.left + 10, rcRightPane.top + 6, rcRightPane.right - 10, rcRightPane.top + 28 };
                 SelectObject(hmemDC, g_State.hFontBold);
                 SetTextColor(hmemDC, textPrimary);
-                DrawTextW(hmemDC, L"Replacement Sources", -1, &rcSrcHeader, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                DrawTextW(hmemDC, L"Batch Action Mode", -1, &rcActHeader, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-                g_State.rcAddSourceBtn = { rightColX + rightColW - 105, 122, rightColX + rightColW, 148 };
-                DrawModernButton(hmemDC, g_State.rcAddSourceBtn, L"Add Source", g_State.isHoverAddSourceBtn, false, false, g_State.hFontSmall, g_State.hFontIcon, L"\xE710");
+                // Action Mode Segmented Buttons [ Replace Units | Rebuild Consist | Purge Units ]
+                int actTotalW = (rcRightPane.right - rcRightPane.left - 20);
+                int actSegW = (actTotalW - 8) / 3;
+                int actTop = rcRightPane.top + 32;
+                int actH = 28;
 
-                int curCardY = 154;
-                for (size_t k = 0; k < g_State.sourceNodes.size(); ++k)
+                g_State.rcTab2ActionReplace = { rcRightPane.left + 10, actTop, rcRightPane.left + 10 + actSegW, actTop + actH };
+                g_State.rcTab2ActionRebuild = { g_State.rcTab2ActionReplace.right + 4, actTop, g_State.rcTab2ActionReplace.right + 4 + actSegW, actTop + actH };
+                g_State.rcTab2ActionPurge   = { g_State.rcTab2ActionRebuild.right + 4, actTop, rcRightPane.right - 10, actTop + actH };
+
+                // Draw Replace Button
+                bool isActReplace = (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::ReplaceUnit);
+                COLORREF bgRep = isActReplace ? RGB(24, 46, 72) : (g_State.isHoverTab2ActionReplace ? RGB(38, 38, 44) : RGB(28, 28, 32));
+                COLORREF bdrRep = isActReplace ? RGB(56, 140, 220) : (g_State.isHoverTab2ActionReplace ? RGB(80, 80, 88) : borderCol);
+                COLORREF txtRep = isActReplace ? RGB(140, 205, 255) : (g_State.isHoverTab2ActionReplace ? RGB(240, 240, 240) : textSecondary);
+                HBRUSH hbrRep = CreateSolidBrush(bgRep); HPEN hpenRep = CreatePen(PS_SOLID, 1, bdrRep);
+                SelectObject(hmemDC, hbrRep); SelectObject(hmemDC, hpenRep);
+                RoundRect(hmemDC, g_State.rcTab2ActionReplace.left, g_State.rcTab2ActionReplace.top, g_State.rcTab2ActionReplace.right, g_State.rcTab2ActionReplace.bottom, 4, 4);
+                DeleteObject(hbrRep); DeleteObject(hpenRep);
+                SelectObject(hmemDC, g_State.hFontSmall);
+                SetTextColor(hmemDC, txtRep);
+                DrawTextW(hmemDC, L"🔧 Replace", -1, &g_State.rcTab2ActionReplace, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                // Draw Rebuild Button
+                bool isActRebuild = (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::RebuildConsist);
+                COLORREF bgReb = isActRebuild ? RGB(46, 26, 60) : (g_State.isHoverTab2ActionRebuild ? RGB(38, 38, 44) : RGB(28, 28, 32));
+                COLORREF bdrReb = isActRebuild ? RGB(168, 85, 247) : (g_State.isHoverTab2ActionRebuild ? RGB(80, 80, 88) : borderCol);
+                COLORREF txtReb = isActRebuild ? RGB(226, 190, 255) : (g_State.isHoverTab2ActionRebuild ? RGB(240, 240, 240) : textSecondary);
+                HBRUSH hbrReb = CreateSolidBrush(bgReb); HPEN hpenReb = CreatePen(PS_SOLID, 1, bdrReb);
+                SelectObject(hmemDC, hbrReb); SelectObject(hmemDC, hpenReb);
+                RoundRect(hmemDC, g_State.rcTab2ActionRebuild.left, g_State.rcTab2ActionRebuild.top, g_State.rcTab2ActionRebuild.right, g_State.rcTab2ActionRebuild.bottom, 4, 4);
+                DeleteObject(hbrReb); DeleteObject(hpenReb);
+                SelectObject(hmemDC, g_State.hFontSmall);
+                SetTextColor(hmemDC, txtReb);
+                DrawTextW(hmemDC, L"🔄 Rebuild", -1, &g_State.rcTab2ActionRebuild, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                // Draw Purge Button
+                bool isActPurge = (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit);
+                COLORREF bgPrg = isActPurge ? RGB(56, 22, 28) : (g_State.isHoverTab2ActionPurge ? RGB(38, 38, 44) : RGB(28, 28, 32));
+                COLORREF bdrPrg = isActPurge ? RGB(220, 68, 76) : (g_State.isHoverTab2ActionPurge ? RGB(80, 80, 88) : borderCol);
+                COLORREF txtPrg = isActPurge ? RGB(255, 140, 148) : (g_State.isHoverTab2ActionPurge ? RGB(240, 240, 240) : textSecondary);
+                HBRUSH hbrPrg = CreateSolidBrush(bgPrg); HPEN hpenPrg = CreatePen(PS_SOLID, 1, bdrPrg);
+                SelectObject(hmemDC, hbrPrg); SelectObject(hmemDC, hpenPrg);
+                RoundRect(hmemDC, g_State.rcTab2ActionPurge.left, g_State.rcTab2ActionPurge.top, g_State.rcTab2ActionPurge.right, g_State.rcTab2ActionPurge.bottom, 4, 4);
+                DeleteObject(hbrPrg); DeleteObject(hpenPrg);
+                SelectObject(hmemDC, g_State.hFontSmall);
+                SetTextColor(hmemDC, txtPrg);
+                DrawTextW(hmemDC, L"🗑 Purge", -1, &g_State.rcTab2ActionPurge, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                // Divider Line under Action Selector
+                HPEN hPenRDiv = CreatePen(PS_SOLID, 1, borderCol);
+                SelectObject(hmemDC, hPenRDiv);
+                MoveToEx(hmemDC, rcRightPane.left + 1, actTop + actH + 10, NULL);
+                LineTo(hmemDC, rcRightPane.right - 1, actTop + actH + 10);
+                DeleteObject(hPenRDiv);
+
+                int contentTopY = actTop + actH + 18;
+
+                if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit)
                 {
-                    const auto& node = g_State.sourceNodes[k];
-                    int cardH = 66;
-                    RECT rcCard = { rightColX, curCardY, rightColX + rightColW, curCardY + cardH };
+                    g_State.rcAddSourceBtn = { 0 };
 
-                    MutatorDlgState::SourceCardUI cardUI;
-                    cardUI.sourceId = node.sourceId;
-                    cardUI.rcCard = rcCard;
+                    // Purge Info Notice Card
+                    RECT rcNotice = { rcRightPane.left + 12, contentTopY, rcRightPane.right - 12, contentTopY + 160 };
+                    HBRUSH hbrNotBg = CreateSolidBrush(RGB(36, 22, 26));
+                    HPEN hpenNotBdr = CreatePen(PS_SOLID, 1, RGB(110, 40, 48));
+                    SelectObject(hmemDC, hbrNotBg); SelectObject(hmemDC, hpenNotBdr);
+                    RoundRect(hmemDC, rcNotice.left, rcNotice.top, rcNotice.right, rcNotice.bottom, 6, 6);
+                    DeleteObject(hbrNotBg); DeleteObject(hpenNotBdr);
 
-                    // Card Background
-                    HBRUSH hbrCard = CreateSolidBrush(cardBgCol);
-                    HPEN hpenCard = CreatePen(PS_SOLID, 1, borderCol);
-                    SelectObject(hmemDC, hbrCard); SelectObject(hmemDC, hpenCard);
-                    RoundRect(hmemDC, rcCard.left, rcCard.top, rcCard.right, rcCard.bottom, 6, 6);
-                    DeleteObject(hbrCard); DeleteObject(hpenCard);
+                    // Notice Icon
+                    SelectObject(hmemDC, g_State.hFontIconLg);
+                    SetTextColor(hmemDC, RGB(255, 90, 90));
+                    RECT rcNotIcon = { rcNotice.left + 12, rcNotice.top + 12, rcNotice.left + 44, rcNotice.top + 44 };
+                    DrawTextW(hmemDC, L"\xE74D", -1, &rcNotIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-                    // Left Accent Color Stripe
-                    HBRUSH hbrStripe = CreateSolidBrush(node.color);
-                    RECT rcStripe = { rcCard.left + 2, rcCard.top + 6, rcCard.left + 5, rcCard.bottom - 6 };
-                    FillRect(hmemDC, &rcStripe, hbrStripe);
-                    DeleteObject(hbrStripe);
+                    // Notice Title
+                    SelectObject(hmemDC, g_State.hFontBold);
+                    SetTextColor(hmemDC, RGB(255, 160, 160));
+                    RECT rcNotTitle = { rcNotice.left + 48, rcNotice.top + 14, rcNotice.right - 12, rcNotice.top + 38 };
+                    DrawTextW(hmemDC, L"Purge Selected Units", -1, &rcNotTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-                    // Color Badge [ A ]
-                    RECT rcBadge = { rcCard.left + 12, rcCard.top + 7, rcCard.left + 30, rcCard.top + 23 };
-                    HBRUSH hbrBadge = CreateSolidBrush(node.color);
-                    SelectObject(hmemDC, hbrBadge);
-                    SelectObject(hmemDC, GetStockObject(NULL_PEN));
-                    RoundRect(hmemDC, rcBadge.left, rcBadge.top, rcBadge.right, rcBadge.bottom, 3, 3);
-                    DeleteObject(hbrBadge);
-
+                    // Notice Body
                     SelectObject(hmemDC, g_State.hFontSmall);
-                    SetTextColor(hmemDC, RGB(20, 20, 24));
-                    std::wstring badgeLtr = node.name.size() >= 7 ? node.name.substr(7) : L"A";
-                    DrawTextW(hmemDC, badgeLtr.c_str(), -1, &rcBadge, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                    // Source Name Title
+                    SetTextColor(hmemDC, RGB(220, 200, 205));
+                    RECT rcNotBody = { rcNotice.left + 14, rcNotice.top + 48, rcNotice.right - 14, rcNotice.bottom - 10 };
+                    DrawTextW(hmemDC, L"Selected units will be completely removed from their consist (.con) files without requiring replacement stock.\n\nUnit orders, couplings, and formation integrity will be preserved and automatically compacted upon clicking Apply.", -1, &rcNotBody, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+                }
+                else
+                {
+                    // Sources Header: Title & [+ Add Source] Button
+                    RECT rcSrcHeader = { rcRightPane.left + 10, contentTopY, rcRightPane.right - 120, contentTopY + 24 };
                     SelectObject(hmemDC, g_State.hFontBold);
                     SetTextColor(hmemDC, textPrimary);
-                    RECT rcNodeTitle = { rcCard.left + 36, rcCard.top + 5, rcCard.left + 105, rcCard.top + 25 };
-                    DrawTextW(hmemDC, node.name.c_str(), -1, &rcNodeTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    DrawTextW(hmemDC, L"Replacement Sources", -1, &rcSrcHeader, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-                    // Segmented Type Toggle [ Fav Group | Pool Preset | Blueprint ]
-                    cardUI.rcTypeToggle = { rcCard.left + 105, rcCard.top + 5, rcCard.right - (g_State.sourceNodes.size() > 1 ? 32 : 10), rcCard.top + 25 };
-                    HBRUSH hbrTogBg = CreateSolidBrush(RGB(30, 30, 34));
-                    HPEN hpenTogBg = CreatePen(PS_SOLID, 1, RGB(55, 55, 60));
-                    SelectObject(hmemDC, hbrTogBg); SelectObject(hmemDC, hpenTogBg);
-                    RoundRect(hmemDC, cardUI.rcTypeToggle.left, cardUI.rcTypeToggle.top, cardUI.rcTypeToggle.right, cardUI.rcTypeToggle.bottom, 4, 4);
-                    DeleteObject(hbrTogBg); DeleteObject(hpenTogBg);
+                    g_State.rcAddSourceBtn = { rcRightPane.right - 114, contentTopY - 2, rcRightPane.right - 10, contentTopY + 24 };
+                    DrawModernButton(hmemDC, g_State.rcAddSourceBtn, L"Add Source", g_State.isHoverAddSourceBtn, false, false, g_State.hFontSmall, g_State.hFontIcon, L"\xE710");
 
-                    int totalW = cardUI.rcTypeToggle.right - cardUI.rcTypeToggle.left;
-                    int segW = totalW / 3;
-                    RECT rcTog0 = { cardUI.rcTypeToggle.left + 1, cardUI.rcTypeToggle.top + 1, cardUI.rcTypeToggle.left + segW, cardUI.rcTypeToggle.bottom - 1 };
-                    RECT rcTog1 = { cardUI.rcTypeToggle.left + segW, cardUI.rcTypeToggle.top + 1, cardUI.rcTypeToggle.left + segW * 2, cardUI.rcTypeToggle.bottom - 1 };
-                    RECT rcTog2 = { cardUI.rcTypeToggle.left + segW * 2, cardUI.rcTypeToggle.top + 1, cardUI.rcTypeToggle.right - 1, cardUI.rcTypeToggle.bottom - 1 };
-
-                    if (node.sourceType == 0) // Fav Group Active
+                    int curCardY = contentTopY + 30;
+                    for (size_t k = 0; k < g_State.sourceNodes.size(); ++k)
                     {
-                        HBRUSH hbrAct = CreateSolidBrush(accentCol);
-                        SelectObject(hmemDC, hbrAct);
+                        const auto& node = g_State.sourceNodes[k];
+                        int cardH = 66;
+                        RECT rcCard = { rcRightPane.left + 10, curCardY, rcRightPane.right - 10, curCardY + cardH };
+
+                        MutatorDlgState::SourceCardUI cardUI;
+                        cardUI.sourceId = node.sourceId;
+                        cardUI.rcCard = rcCard;
+
+                        // Card Background
+                        HBRUSH hbrCard = CreateSolidBrush(cardBgCol);
+                        HPEN hpenCard = CreatePen(PS_SOLID, 1, borderCol);
+                        SelectObject(hmemDC, hbrCard); SelectObject(hmemDC, hpenCard);
+                        RoundRect(hmemDC, rcCard.left, rcCard.top, rcCard.right, rcCard.bottom, 6, 6);
+                        DeleteObject(hbrCard); DeleteObject(hpenCard);
+
+                        // Left Accent Color Stripe
+                        HBRUSH hbrStripe = CreateSolidBrush(node.color);
+                        RECT rcStripe = { rcCard.left + 2, rcCard.top + 6, rcCard.left + 5, rcCard.bottom - 6 };
+                        FillRect(hmemDC, &rcStripe, hbrStripe);
+                        DeleteObject(hbrStripe);
+
+                        // Color Badge [ A ]
+                        RECT rcBadge = { rcCard.left + 10, rcCard.top + 7, rcCard.left + 28, rcCard.top + 23 };
+                        HBRUSH hbrBadge = CreateSolidBrush(node.color);
+                        SelectObject(hmemDC, hbrBadge);
                         SelectObject(hmemDC, GetStockObject(NULL_PEN));
-                        RoundRect(hmemDC, rcTog0.left, rcTog0.top, rcTog0.right, rcTog0.bottom, 3, 3);
-                        DeleteObject(hbrAct);
-                    }
-                    else if (node.sourceType == 1) // Pool Preset Active
-                    {
-                        HBRUSH hbrAct = CreateSolidBrush(accentCol);
-                        SelectObject(hmemDC, hbrAct);
-                        SelectObject(hmemDC, GetStockObject(NULL_PEN));
-                        RoundRect(hmemDC, rcTog1.left, rcTog1.top, rcTog1.right, rcTog1.bottom, 3, 3);
-                        DeleteObject(hbrAct);
-                    }
-                    else // Train Blueprint Active
-                    {
-                        HBRUSH hbrAct = CreateSolidBrush(accentCol);
-                        SelectObject(hmemDC, hbrAct);
-                        SelectObject(hmemDC, GetStockObject(NULL_PEN));
-                        RoundRect(hmemDC, rcTog2.left, rcTog2.top, rcTog2.right, rcTog2.bottom, 3, 3);
-                        DeleteObject(hbrAct);
-                    }
-
-                    SelectObject(hmemDC, g_State.hFontSmall);
-                    SetTextColor(hmemDC, node.sourceType == 0 ? RGB(255, 255, 255) : textSecondary);
-                    DrawTextW(hmemDC, L"Fav Group", -1, &rcTog0, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                    SetTextColor(hmemDC, node.sourceType == 1 ? RGB(255, 255, 255) : textSecondary);
-                    DrawTextW(hmemDC, L"Pool Preset", -1, &rcTog1, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                    SetTextColor(hmemDC, node.sourceType == 2 ? RGB(255, 255, 255) : textSecondary);
-                    DrawTextW(hmemDC, L"Train Configs", -1, &rcTog2, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                    // Delete Button (if > 1 source)
-                    if (g_State.sourceNodes.size() > 1)
-                    {
-                        cardUI.rcDeleteBtn = { rcCard.right - 26, rcCard.top + 5, rcCard.right - 6, rcCard.top + 25 };
-                        COLORREF delBg = cardUI.isHoverDelete ? RGB(65, 30, 35) : RGB(36, 36, 40);
-                        COLORREF delBorder = cardUI.isHoverDelete ? RGB(200, 60, 60) : borderCol;
-                        HBRUSH hbrDel = CreateSolidBrush(delBg);
-                        HPEN hpenDel = CreatePen(PS_SOLID, 1, delBorder);
-                        SelectObject(hmemDC, hbrDel); SelectObject(hmemDC, hpenDel);
-                        RoundRect(hmemDC, cardUI.rcDeleteBtn.left, cardUI.rcDeleteBtn.top, cardUI.rcDeleteBtn.right, cardUI.rcDeleteBtn.bottom, 4, 4);
-                        DeleteObject(hbrDel); DeleteObject(hpenDel);
+                        RoundRect(hmemDC, rcBadge.left, rcBadge.top, rcBadge.right, rcBadge.bottom, 3, 3);
+                        DeleteObject(hbrBadge);
 
                         SelectObject(hmemDC, g_State.hFontSmall);
-                        SetTextColor(hmemDC, cardUI.isHoverDelete ? RGB(255, 100, 100) : textSecondary);
-                        DrawTextW(hmemDC, L"✕", -1, &cardUI.rcDeleteBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        SetTextColor(hmemDC, RGB(20, 20, 24));
+                        std::wstring badgeLtr = node.name.size() >= 7 ? node.name.substr(7) : L"A";
+                        DrawTextW(hmemDC, badgeLtr.c_str(), -1, &rcBadge, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                        // Source Name Title
+                        SelectObject(hmemDC, g_State.hFontBold);
+                        SetTextColor(hmemDC, textPrimary);
+                        RECT rcNodeTitle = { rcCard.left + 32, rcCard.top + 5, rcCard.left + 95, rcCard.top + 25 };
+                        DrawTextW(hmemDC, node.name.c_str(), -1, &rcNodeTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                        // Source Type Dropdown Selector Button
+                        cardUI.rcTypeToggle = { rcCard.left + 98, rcCard.top + 4, rcCard.right - (g_State.sourceNodes.size() > 1 ? 32 : 8), rcCard.top + 26 };
+                        COLORREF togBg = cardUI.isHoverToggle ? RGB(45, 45, 50) : RGB(30, 30, 34);
+                        COLORREF togBorder = cardUI.isHoverToggle ? RGB(90, 90, 95) : RGB(55, 55, 60);
+                        HBRUSH hbrTogBg = CreateSolidBrush(togBg);
+                        HPEN hpenTogBg = CreatePen(PS_SOLID, 1, togBorder);
+                        SelectObject(hmemDC, hbrTogBg); SelectObject(hmemDC, hpenTogBg);
+                        RoundRect(hmemDC, cardUI.rcTypeToggle.left, cardUI.rcTypeToggle.top, cardUI.rcTypeToggle.right, cardUI.rcTypeToggle.bottom, 4, 4);
+                        DeleteObject(hbrTogBg); DeleteObject(hpenTogBg);
+
+                        const wchar_t* typeLabel = (node.sourceType == 0) ? L"Fav Group" : ((node.sourceType == 1) ? L"Pool Preset" : L"Train Blueprint");
+                        SelectObject(hmemDC, g_State.hFontSmall);
+                        SetTextColor(hmemDC, textPrimary);
+                        RECT rcTogTxt = { cardUI.rcTypeToggle.left + 6, cardUI.rcTypeToggle.top, cardUI.rcTypeToggle.right - 18, cardUI.rcTypeToggle.bottom };
+                        DrawTextW(hmemDC, typeLabel, -1, &rcTogTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                        DrawSolidTriangle(hmemDC, cardUI.rcTypeToggle.right - 10, (cardUI.rcTypeToggle.top + cardUI.rcTypeToggle.bottom) / 2, textSecondary, true, 3);
+
+                        // Delete Button (if > 1 source)
+                        if (g_State.sourceNodes.size() > 1)
+                        {
+                            cardUI.rcDeleteBtn = { rcCard.right - 26, rcCard.top + 4, rcCard.right - 6, rcCard.top + 26 };
+                            COLORREF delBg = cardUI.isHoverDelete ? RGB(65, 30, 35) : RGB(36, 36, 40);
+                            COLORREF delBorder = cardUI.isHoverDelete ? RGB(200, 60, 60) : borderCol;
+                            HBRUSH hbrDel = CreateSolidBrush(delBg);
+                            HPEN hpenDel = CreatePen(PS_SOLID, 1, delBorder);
+                            SelectObject(hmemDC, hbrDel); SelectObject(hmemDC, hpenDel);
+                            RoundRect(hmemDC, cardUI.rcDeleteBtn.left, cardUI.rcDeleteBtn.top, cardUI.rcDeleteBtn.right, cardUI.rcDeleteBtn.bottom, 4, 4);
+                            DeleteObject(hbrDel); DeleteObject(hpenDel);
+
+                            SelectObject(hmemDC, g_State.hFontSmall);
+                            SetTextColor(hmemDC, cardUI.isHoverDelete ? RGB(255, 100, 100) : textSecondary);
+                            DrawTextW(hmemDC, L"✕", -1, &cardUI.rcDeleteBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        }
+                        else
+                        {
+                            cardUI.rcDeleteBtn = { 0 };
+                        }
+
+                        // Stock Palette Dropdown Picker
+                        cardUI.rcPicker = { rcCard.left + 10, rcCard.top + 30, rcCard.right - 8, rcCard.top + 58 };
+                        COLORREF pickBg = cardUI.isHoverPicker ? RGB(45, 45, 50) : RGB(32, 32, 36);
+                        COLORREF pickBorder = cardUI.isHoverPicker ? RGB(90, 90, 95) : borderCol;
+                        HBRUSH hbrPick = CreateSolidBrush(pickBg);
+                        HPEN hpenPick = CreatePen(PS_SOLID, 1, pickBorder);
+                        SelectObject(hmemDC, hbrPick); SelectObject(hmemDC, hpenPick);
+                        RoundRect(hmemDC, cardUI.rcPicker.left, cardUI.rcPicker.top, cardUI.rcPicker.right, cardUI.rcPicker.bottom, 4, 4);
+                        DeleteObject(hbrPick); DeleteObject(hpenPick);
+
+                        std::wstring summaryStr = GetSourceNodeSummaryText(node);
+                        SelectObject(hmemDC, g_State.hFontMain);
+                        SetTextColor(hmemDC, textPrimary);
+                        RECT rcSumm = { cardUI.rcPicker.left + 10, cardUI.rcPicker.top, cardUI.rcPicker.right - 24, cardUI.rcPicker.bottom };
+                        DrawTextW(hmemDC, summaryStr.c_str(), -1, &rcSumm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                        DrawSolidTriangle(hmemDC, cardUI.rcPicker.right - 14, (cardUI.rcPicker.top + cardUI.rcPicker.bottom) / 2, textSecondary, true, 3);
+
+                        g_State.sourceCardUIs.push_back(cardUI);
+                        curCardY += cardH + 8;
                     }
-                    else
+
+                    // -----------------------------------------------------------------
+                    // CIRCUIT WIRING LINES & ARROWHEADS
+                    // -----------------------------------------------------------------
+                    for (const auto& anchor : wireAnchors)
                     {
-                        cardUI.rcDeleteBtn = { 0 };
+                        const MutatorDlgState::SourceCardUI* pTargetCard = nullptr;
+                        for (const auto& c : g_State.sourceCardUIs)
+                        {
+                            if (c.sourceId == anchor.sourceId) { pTargetCard = &c; break; }
+                        }
+                        if (!pTargetCard && !g_State.sourceCardUIs.empty())
+                        {
+                            pTargetCard = &g_State.sourceCardUIs[0];
+                        }
+                        if (!pTargetCard) continue;
+
+                        int x1 = anchor.ptLeft.x + 1;
+                        int y1 = anchor.ptLeft.y;
+                        int x2 = pTargetCard->rcCard.left - 2;
+                        int y2 = pTargetCard->rcCard.top + 16;
+                        int midX = (x1 + x2) / 2;
+
+                        const auto* pNode = FindSourceNodeById(anchor.sourceId);
+                        COLORREF wireCol = pNode ? pNode->color : RGB(56, 189, 248);
+
+                        HPEN hpenWire = CreatePen(PS_SOLID, 2, wireCol);
+                        HPEN holdPen = (HPEN)SelectObject(hmemDC, hpenWire);
+
+                        MoveToEx(hmemDC, x1, y1, NULL);
+                        LineTo(hmemDC, midX, y1);
+                        LineTo(hmemDC, midX, y2);
+                        LineTo(hmemDC, x2, y2);
+
+                        SelectObject(hmemDC, holdPen);
+                        DeleteObject(hpenWire);
+
+                        // Solid Arrowhead (►)
+                        POINT tri[3] = {
+                            { x2, y2 },
+                            { x2 - 6, y2 - 4 },
+                            { x2 - 6, y2 + 4 }
+                        };
+                        HBRUSH hbrArrow = CreateSolidBrush(wireCol);
+                        SelectObject(hmemDC, hbrArrow);
+                        SelectObject(hmemDC, GetStockObject(NULL_PEN));
+                        Polygon(hmemDC, tri, 3);
+                        DeleteObject(hbrArrow);
                     }
-
-                    // Stock Palette Dropdown Picker
-                    cardUI.rcPicker = { rcCard.left + 12, rcCard.top + 30, rcCard.right - 10, rcCard.top + 56 };
-                    COLORREF pickBg = cardUI.isHoverPicker ? RGB(45, 45, 50) : RGB(32, 32, 36);
-                    COLORREF pickBorder = cardUI.isHoverPicker ? RGB(90, 90, 95) : borderCol;
-                    HBRUSH hbrPick = CreateSolidBrush(pickBg);
-                    HPEN hpenPick = CreatePen(PS_SOLID, 1, pickBorder);
-                    SelectObject(hmemDC, hbrPick); SelectObject(hmemDC, hpenPick);
-                    RoundRect(hmemDC, cardUI.rcPicker.left, cardUI.rcPicker.top, cardUI.rcPicker.right, cardUI.rcPicker.bottom, 4, 4);
-                    DeleteObject(hbrPick); DeleteObject(hpenPick);
-
-                    std::wstring summaryStr = GetSourceNodeSummaryText(node);
-                    SelectObject(hmemDC, g_State.hFontMain);
-                    SetTextColor(hmemDC, textPrimary);
-                    RECT rcSumm = { cardUI.rcPicker.left + 10, cardUI.rcPicker.top, cardUI.rcPicker.right - 24, cardUI.rcPicker.bottom };
-                    DrawTextW(hmemDC, summaryStr.c_str(), -1, &rcSumm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                    RECT rcChev = { cardUI.rcPicker.right - 22, cardUI.rcPicker.top, cardUI.rcPicker.right - 6, cardUI.rcPicker.bottom };
-                    SelectObject(hmemDC, g_State.hFontIcon);
-                    SetTextColor(hmemDC, textSecondary);
-                    DrawTextW(hmemDC, L"\xE70D", -1, &rcChev, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                    g_State.sourceCardUIs.push_back(cardUI);
-                    curCardY += cardH + 8;
-                }
-
-                // -----------------------------------------------------------------
-                // CIRCUIT WIRING LINES & ARROWHEADS
-                // -----------------------------------------------------------------
-                for (const auto& anchor : wireAnchors)
-                {
-                    const MutatorDlgState::SourceCardUI* pTargetCard = nullptr;
-                    for (const auto& c : g_State.sourceCardUIs)
-                    {
-                        if (c.sourceId == anchor.sourceId) { pTargetCard = &c; break; }
-                    }
-                    if (!pTargetCard && !g_State.sourceCardUIs.empty())
-                    {
-                        pTargetCard = &g_State.sourceCardUIs[0];
-                    }
-                    if (!pTargetCard) continue;
-
-                    int x1 = anchor.ptLeft.x + 1;
-                    int y1 = anchor.ptLeft.y;
-                    int x2 = pTargetCard->rcCard.left - 2;
-                    int y2 = pTargetCard->rcCard.top + 16;
-                    int midX = (x1 + x2) / 2;
-
-                    const auto* pNode = FindSourceNodeById(anchor.sourceId);
-                    COLORREF wireCol = pNode ? pNode->color : RGB(56, 189, 248);
-
-                    HPEN hpenWire = CreatePen(PS_SOLID, 2, wireCol);
-                    HPEN holdPen = (HPEN)SelectObject(hmemDC, hpenWire);
-
-                    MoveToEx(hmemDC, x1, y1, NULL);
-                    LineTo(hmemDC, midX, y1);
-                    LineTo(hmemDC, midX, y2);
-                    LineTo(hmemDC, x2, y2);
-
-                    SelectObject(hmemDC, holdPen);
-                    DeleteObject(hpenWire);
-
-                    // Solid Arrowhead (►)
-                    POINT tri[3] = {
-                        { x2, y2 },
-                        { x2 - 6, y2 - 4 },
-                        { x2 - 6, y2 + 4 }
-                    };
-                    HBRUSH hbrArrow = CreateSolidBrush(wireCol);
-                    SelectObject(hmemDC, hbrArrow);
-                    SelectObject(hmemDC, GetStockObject(NULL_PEN));
-                    Polygon(hmemDC, tri, 3);
-                    DeleteObject(hbrArrow);
                 }
             }
 
@@ -3771,8 +4736,11 @@ namespace
             }
 
             // Action Buttons: [Apply / Insert / Replace] & [Cancel]
-            const wchar_t* applyText = (g_State.activeTab == 0) ? L"Apply Mutation" : ((g_State.activeTab == 1) ? L"Insert Units" : L"Execute Repair / Rebuild");
-            const wchar_t* applyIcon = (g_State.activeTab == 2) ? L"\xE896" : L"\xE73E";
+            const wchar_t* applyText = (g_State.activeTab == 0) ? L"Apply Mutation" :
+                ((g_State.activeTab == 1) ? L"Insert Units" :
+                (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit ? L"Execute Unit Purge" : L"Execute Repair / Rebuild"));
+            const wchar_t* applyIcon = (g_State.activeTab == 2) ?
+                (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit ? L"\xE74D" : L"\xE896") : L"\xE73E";
 
             SelectObject(hmemDC, g_State.hFontBold);
             SIZE applySz = { 0 };
@@ -3945,6 +4913,9 @@ void ShowPoolMutatorDialog(
     wcex.style = CS_DBLCLKS;
     wcex.lpfnWndProc = PoolMutatorDlgProc;
     wcex.hInstance = GetModuleHandle(NULL);
+    wcex.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107 /* IDI_TRAINSIMCONSISTBUILDER */));
+    wcex.hIconSm = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+    if (!wcex.hIconSm) wcex.hIconSm = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(108 /* IDI_SMALL */));
     wcex.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wcex.hbrBackground = NULL;
     wcex.lpszClassName = szClassName;
@@ -3970,13 +4941,18 @@ void ShowPoolMutatorDialog(
     if (y < 10) y = 10;
 
     HWND hDlg = CreateWindowExW(
-        0, szClassName, L"Consist Pool Mutator & Injector",
+        WS_EX_APPWINDOW, szClassName, L"Consist Pool Mutator & Injector",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, dlgW, dlgH,
         hWndParent, NULL, GetModuleHandle(NULL), NULL
     );
 
     if (!hDlg) return;
+
+    HICON hIconBig = (HICON)GetClassLongPtrW(hDlg, GCLP_HICON);
+    HICON hIconSm = (HICON)GetClassLongPtrW(hDlg, GCLP_HICONSM);
+    if (hIconBig) SendMessageW(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+    if (hIconSm)  SendMessageW(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hIconSm);
 
     g_hPoolMutatorDlg = hDlg;
 

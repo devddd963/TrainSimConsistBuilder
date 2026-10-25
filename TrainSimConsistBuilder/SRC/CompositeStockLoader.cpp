@@ -160,6 +160,54 @@ namespace CompositeStockLoader
             }
         }
 
+        // Compute transformed composite bounding box on CPU
+        DirectX::XMFLOAT3 cpuMinB = { 1e9f, 1e9f, 1e9f };
+        DirectX::XMFLOAT3 cpuMaxB = { -1e9f, -1e9f, -1e9f };
+        bool hasAnyValidSubCPU = false;
+        for (const auto& sub : outUnit.subShapes)
+        {
+            if (sub && sub->isLoaded && sub->shape.isValid)
+            {
+                DirectX::XMFLOAT3 sMin = sub->shape.boundsMin;
+                DirectX::XMFLOAT3 sMax = sub->shape.boundsMax;
+                DirectX::XMFLOAT3 corners[8] = {
+                    { sMin.x, sMin.y, sMin.z },
+                    { sMax.x, sMin.y, sMin.z },
+                    { sMin.x, sMax.y, sMin.z },
+                    { sMax.x, sMax.y, sMin.z },
+                    { sMin.x, sMin.y, sMax.z },
+                    { sMax.x, sMin.y, sMax.z },
+                    { sMin.x, sMax.y, sMax.z },
+                    { sMax.x, sMax.y, sMax.z }
+                };
+                for (int c = 0; c < 8; ++c)
+                {
+                    DirectX::XMVECTOR v = DirectX::XMLoadFloat3(&corners[c]);
+                    DirectX::XMVECTOR vt = DirectX::XMVector3Transform(v, sub->localMatrix);
+                    DirectX::XMFLOAT3 pt;
+                    DirectX::XMStoreFloat3(&pt, vt);
+                    cpuMinB.x = (std::min)(cpuMinB.x, pt.x);
+                    cpuMinB.y = (std::min)(cpuMinB.y, pt.y);
+                    cpuMinB.z = (std::min)(cpuMinB.z, pt.z);
+                    cpuMaxB.x = (std::max)(cpuMaxB.x, pt.x);
+                    cpuMaxB.y = (std::max)(cpuMaxB.y, pt.y);
+                    cpuMaxB.z = (std::max)(cpuMaxB.z, pt.z);
+                }
+                hasAnyValidSubCPU = true;
+            }
+        }
+        if (hasAnyValidSubCPU && cpuMinB.x < cpuMaxB.x)
+        {
+            outUnit.boundsMin = cpuMinB;
+            outUnit.boundsMax = cpuMaxB;
+            outUnit.center = DirectX::XMFLOAT3((cpuMinB.x + cpuMaxB.x) * 0.5f, (cpuMinB.y + cpuMaxB.y) * 0.5f, (cpuMinB.z + cpuMaxB.z) * 0.5f);
+            float dx = cpuMaxB.x - cpuMinB.x;
+            float dy = cpuMaxB.y - cpuMinB.y;
+            float dz = cpuMaxB.z - cpuMinB.z;
+            outUnit.radius = std::sqrt(dx * dx + dy * dy + dz * dz) * 0.5f;
+            outUnit.isValid = true;
+        }
+
         if (pCancelToken && *pCancelToken) return false;
 
         return true;
@@ -311,27 +359,34 @@ namespace CompositeStockLoader
                 unit.hasSimulatedWheels = true;
             }
 
-            // 8. Transform Sub-Shape Bounding Box to Aggregate Composite Bounds
+            // 8. Transform Sub-Shape Bounding Box to Aggregate Composite Bounds (all 8 corners)
             if (sub->isPrimary || (sub->shape.radius > 0.05f))
             {
-                DirectX::XMVECTOR vMin = DirectX::XMVectorSet(sub->shape.boundsMin.x, sub->shape.boundsMin.y, sub->shape.boundsMin.z, 1.0f);
-                DirectX::XMVECTOR vMax = DirectX::XMVectorSet(sub->shape.boundsMax.x, sub->shape.boundsMax.y, sub->shape.boundsMax.z, 1.0f);
-
-                vMin = DirectX::XMVector3Transform(vMin, sub->localMatrix);
-                vMax = DirectX::XMVector3Transform(vMax, sub->localMatrix);
-
-                DirectX::XMFLOAT3 tMin, tMax;
-                DirectX::XMStoreFloat3(&tMin, vMin);
-                DirectX::XMStoreFloat3(&tMax, vMax);
-
-                minB.x = (std::min)({ minB.x, tMin.x, tMax.x });
-                minB.y = (std::min)({ minB.y, tMin.y, tMax.y });
-                minB.z = (std::min)({ minB.z, tMin.z, tMax.z });
-
-                maxB.x = (std::max)({ maxB.x, tMin.x, tMax.x });
-                maxB.y = (std::max)({ maxB.y, tMin.y, tMax.y });
-                maxB.z = (std::max)({ maxB.z, tMin.z, tMax.z });
-
+                DirectX::XMFLOAT3 sMin = sub->shape.boundsMin;
+                DirectX::XMFLOAT3 sMax = sub->shape.boundsMax;
+                DirectX::XMFLOAT3 corners[8] = {
+                    { sMin.x, sMin.y, sMin.z },
+                    { sMax.x, sMin.y, sMin.z },
+                    { sMin.x, sMax.y, sMin.z },
+                    { sMax.x, sMax.y, sMin.z },
+                    { sMin.x, sMin.y, sMax.z },
+                    { sMax.x, sMin.y, sMax.z },
+                    { sMin.x, sMax.y, sMax.z },
+                    { sMax.x, sMax.y, sMax.z }
+                };
+                for (int c = 0; c < 8; ++c)
+                {
+                    DirectX::XMVECTOR v = DirectX::XMLoadFloat3(&corners[c]);
+                    DirectX::XMVECTOR vt = DirectX::XMVector3Transform(v, sub->localMatrix);
+                    DirectX::XMFLOAT3 pt;
+                    DirectX::XMStoreFloat3(&pt, vt);
+                    minB.x = (std::min)(minB.x, pt.x);
+                    minB.y = (std::min)(minB.y, pt.y);
+                    minB.z = (std::min)(minB.z, pt.z);
+                    maxB.x = (std::max)(maxB.x, pt.x);
+                    maxB.y = (std::max)(maxB.y, pt.y);
+                    maxB.z = (std::max)(maxB.z, pt.z);
+                }
                 hasAnyValidSub = true;
             }
         }

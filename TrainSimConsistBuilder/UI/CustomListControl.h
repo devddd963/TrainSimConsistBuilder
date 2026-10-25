@@ -3,6 +3,7 @@
 #endif
 #pragma once
 #include "CustomScrollBar.h"
+#include "FluentDragGhost.h"
 #include <windows.h>
 #include <commctrl.h>
 #include <uxtheme.h>
@@ -11,6 +12,9 @@
 #include <unordered_set>
 
 typedef std::wstring (*GetCellTextCallback)(int itemIndex, int subItemIndex, void* pParam);
+typedef bool (*DrawRowBackgroundCallback)(HDC hdc, int itemIndex, const RECT& rcRow, bool isSelected, bool isHovered, void* pParam);
+typedef bool (*DrawCellCallback)(HDC hdc, int itemIndex, int subItemIndex, const RECT& rcCell, bool isSelected, bool isHovered, void* pParam);
+typedef bool (*IsCellInteractiveCallback)(int itemIndex, int subItemIndex, void* pParam);
 
 struct CustomColumn {
     std::wstring title;
@@ -43,6 +47,13 @@ private:
     int m_itemCount;
     GetCellTextCallback m_callback;
     void* m_callbackParam;
+    DrawRowBackgroundCallback m_rowBgCallback;
+    void* m_rowBgCallbackParam;
+    DrawCellCallback m_drawCellCallback;
+    void* m_drawCellCallbackParam;
+    IsCellInteractiveCallback m_isCellInteractiveCallback;
+    void* m_isCellInteractiveCallbackParam;
+    bool m_bShowVerticalDividers;
     
     // Scroll state
     int m_scrollX; // pixel scroll offset
@@ -71,6 +82,7 @@ private:
     bool m_bPotentialDrag;
     bool m_bPotentialItemDrag;
     bool m_bIsItemDragging;
+    GhostItemType m_dragGhostType;
     int  m_dropTargetIndex;
     bool m_bAllowRearrange;
     bool m_bAllowTransferSource;
@@ -192,7 +204,7 @@ public:
         }
         return m_selectedIndex;
     }
-    void SetSelectedIndex(int index);
+    void SetSelectedIndex(int index, bool bEnsureVisible = true);
     std::vector<int> GetSelectedIndices() const;
     void SetSelectedIndices(const std::vector<int>& indices);
     void SelectAll();
@@ -221,12 +233,22 @@ public:
     bool IsAllowMarquee() const { return m_bAllowMarquee; }
     void SetDrawCardBorder(bool allow) { m_bDrawCardBorder = allow; Invalidate(); }
     bool IsDrawCardBorder() const { return m_bDrawCardBorder; }
+    void SetRowBackgroundCallback(DrawRowBackgroundCallback cb, void* pParam) { m_rowBgCallback = cb; m_rowBgCallbackParam = pParam; Invalidate(); }
+    void SetDrawCellCallback(DrawCellCallback cb, void* pParam) { m_drawCellCallback = cb; m_drawCellCallbackParam = pParam; Invalidate(); }
+    void SetCellInteractiveCallback(IsCellInteractiveCallback cb, void* pParam) { m_isCellInteractiveCallback = cb; m_isCellInteractiveCallbackParam = pParam; }
+    void SetShowVerticalDividers(bool bShow) { m_bShowVerticalDividers = bShow; Invalidate(); }
+    bool IsShowVerticalDividers() const { return m_bShowVerticalDividers; }
+    void SetRowHeight(int height) { m_rowHeight = height; Invalidate(); }
+    int  GetRowHeight() const { return m_rowHeight; }
     void SetInlineCopyColumn(int colIndex) { m_inlineCopyCol = colIndex; Invalidate(); }
     int  GetInlineCopyColumn() const { return m_inlineCopyCol; }
     void SetDropTargetIndex(int idx) { m_dropTargetIndex = idx; Invalidate(); }
     int  GetDropTargetIndex() const { return m_dropTargetIndex; }
     bool IsItemDragging() const { return m_bIsItemDragging; }
     void CancelItemDrag();
+    void SetDragGhostType(GhostItemType type) { m_dragGhostType = type; }
+    GhostItemType GetDragGhostType() const { return m_dragGhostType; }
+    int  GetScrollX() const { return m_scrollX; }
 
     // Primary Section & Auto-Fit Helpers
     int  GetPrimaryLeftSectionWidth() const;
@@ -238,6 +260,8 @@ public:
     bool IsAutoFitLastColumn() const { return m_bAutoFitLastColumn; }
 
     // Drop Target & Drag Auto-Scroll Math Helpers
+    int  GetHeaderHeight() const { return m_headerHeight; }
+    int  GetItemIndexFromPoint(POINT ptClient) const;
     int  GetDropIndexFromPoint(POINT ptClient) const;
     int  GetDropIndexFromScreenPoint(POINT ptScreen) const;
     void CheckDragAutoScroll(POINT ptClient);

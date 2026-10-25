@@ -1,4 +1,5 @@
 #include "CommandBar.h"
+#include "../SRC/Updater.h"
 #include <uxtheme.h>
 #include <vsstyle.h>
 
@@ -12,6 +13,7 @@ struct CommandItem
     BOOL isRightAligned;
     int fixedWidth;
     RECT rc;
+    BOOL isVisible;
 };
 
 struct CommandBarState
@@ -78,20 +80,21 @@ static HFONT CreateSystemUiFont(int pointSize, int weight = FW_NORMAL)
 }
 
 static CommandItem g_Items[] = {
-    { CMD_ACTION_NEW_CONSIST,        L"\xE710", L"New Consist",        FALSE, FALSE, FALSE, 100, {0} },
-    { CMD_ACTION_CLONE_CONSIST,      L"\xE8C8", L"Clone Consist",      FALSE, FALSE, FALSE, 105, {0} },
-    { CMD_ACTION_SAVE_CONSISTS,      L"\xE74E", L"Save Consist(s)",    TRUE,  FALSE, FALSE, 130, {0} },
-    { CMD_ACTION_REVERSE_CONSIST,    L"\xE8EC", L"Reverse Consist",    FALSE, FALSE, FALSE, 115, {0} },
-    { CMD_ACTION_DELETE_CONSISTS,    L"\xE74D", L"Delete Consist(s)",   FALSE, FALSE, FALSE, 120, {0} },
-    { CMD_ACTION_STOCK_INFO,         L"\xE946", L"Stock Info",         FALSE, FALSE, TRUE,  95,  {0} },
-    { CMD_ACTION_SHAPE_VIEWER,       L"\xE7B7", L"3D Visual Studio",   FALSE, FALSE, TRUE,  135, {0} },
-    { CMD_ACTION_TRAIN_CONFIGS,      L"\xE7C0", L"Train Configs",      FALSE, FALSE, TRUE,  115, {0} },
-    { CMD_ACTION_POOL_MANAGER,       L"\xE71D", L"Pool Manager",       FALSE, FALSE, TRUE,  105, {0} },
-    { CMD_ACTION_POOL_MUTATOR,       L"\xE790", L"Pool Mutator",       FALSE, FALSE, TRUE,  105, {0} },
-    { CMD_ACTION_BATCH_WIZARD,       L"\xE9D9", L"Batch Consists",     FALSE, FALSE, TRUE,  105, {0} },
-    { CMD_ACTION_REFRESH_CONSISTS,   L"\xE72C", L"Refresh Consists",   FALSE, FALSE, TRUE,  120, {0} },
-    { CMD_ACTION_REFRESH_STOCKS,     L"\xE777", L"Refresh Stock Library", FALSE, FALSE, TRUE, 145, {0} },
-    { CMD_ACTION_ABOUT,              L"\xE946", L"v9.3.0",             FALSE, FALSE, TRUE,  78,  {0} }
+    { CMD_ACTION_NEW_CONSIST,        L"\xE710", L"New Consist",        FALSE, FALSE, FALSE, 100, {0}, TRUE },
+    { CMD_ACTION_CLONE_CONSIST,      L"\xE8C8", L"Clone Consist",      FALSE, FALSE, FALSE, 105, {0}, TRUE },
+    { CMD_ACTION_SAVE_CONSISTS,      L"\xE74E", L"Save Consist(s)",    TRUE,  FALSE, FALSE, 130, {0}, TRUE },
+    { CMD_ACTION_REVERSE_CONSIST,    L"\xE8EC", L"Reverse Consist",    FALSE, FALSE, FALSE, 115, {0}, TRUE },
+    { CMD_ACTION_DELETE_CONSISTS,    L"\xE74D", L"Delete Consist(s)",   FALSE, FALSE, FALSE, 120, {0}, TRUE },
+    { CMD_ACTION_STOCK_INFO,         L"\xE946", L"Stock Info",         FALSE, FALSE, TRUE,  95,  {0}, TRUE },
+    { CMD_ACTION_SHAPE_VIEWER,       L"\xE7B7", L"3D Visual Studio",   FALSE, FALSE, TRUE,  135, {0}, TRUE },
+    { CMD_ACTION_TRAIN_CONFIGS,      L"\xE7C0", L"Train Configs",      FALSE, FALSE, TRUE,  115, {0}, TRUE },
+    { CMD_ACTION_POOL_MANAGER,       L"\xE71D", L"Pool Manager",       FALSE, FALSE, TRUE,  105, {0}, TRUE },
+    { CMD_ACTION_POOL_MUTATOR,       L"\xE790", L"Pool Mutator",       FALSE, FALSE, TRUE,  105, {0}, TRUE },
+    { CMD_ACTION_BATCH_WIZARD,       L"\xE9D9", L"Batch Consists",     FALSE, FALSE, TRUE,  105, {0}, TRUE },
+    { CMD_ACTION_BATCH_SOUND,        L"\xE916", L"Sound Mutator",      FALSE, FALSE, TRUE,  115, {0}, FALSE },
+    { CMD_ACTION_REFRESH_CONSISTS,   L"\xE72C", L"Refresh Consists",   FALSE, FALSE, TRUE,  120, {0}, TRUE },
+    { CMD_ACTION_REFRESH_STOCKS,     L"\xE777", L"Refresh Stock Library", FALSE, FALSE, TRUE, 145, {0}, TRUE },
+    { CMD_ACTION_ABOUT,              L"\xE946", L"v" TSCB_VERSION_WSTR, FALSE, FALSE, TRUE,  78,  {0}, TRUE }
 };
 
 static const int g_NumItems = sizeof(g_Items) / sizeof(g_Items[0]);
@@ -114,6 +117,12 @@ static void RecalculateItemLayout(int barWidth, int barHeight, HDC hdc = NULL)
     // Auto-calculate exact compact fixedWidth for each item with 4-6px side padding
     for (int i = 0; i < g_NumItems; ++i)
     {
+        if (!g_Items[i].isVisible)
+        {
+            g_Items[i].rc = { 0, 0, 0, 0 };
+            continue;
+        }
+
         SIZE sz = { 0 };
         if (g_Items[i].label && wcslen(g_Items[i].label) > 0)
         {
@@ -144,6 +153,12 @@ static void RecalculateItemLayout(int barWidth, int barHeight, HDC hdc = NULL)
     // Layout left-aligned items
     for (int i = 0; i < g_NumItems; ++i)
     {
+        if (!g_Items[i].isVisible)
+        {
+            g_Items[i].rc = { 0, 0, 0, 0 };
+            continue;
+        }
+
         if (!g_Items[i].isRightAligned)
         {
             g_Items[i].rc.left = currentLeftX;
@@ -158,6 +173,12 @@ static void RecalculateItemLayout(int barWidth, int barHeight, HDC hdc = NULL)
     // Layout right-aligned items from right edge inward (in reverse order)
     for (int i = g_NumItems - 1; i >= 0; --i)
     {
+        if (!g_Items[i].isVisible)
+        {
+            g_Items[i].rc = { 0, 0, 0, 0 };
+            continue;
+        }
+
         if (g_Items[i].isRightAligned)
         {
             g_Items[i].rc.right = currentRightX;
@@ -175,6 +196,7 @@ static int HitTestCommandItem(int x, int y)
     POINT pt = { x, y };
     for (int i = 0; i < g_NumItems; ++i)
     {
+        if (!g_Items[i].isVisible) continue;
         if (PtInRect(&g_Items[i].rc, pt))
         {
             return i;
@@ -318,6 +340,7 @@ static LRESULT CALLBACK CommandBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         // 2. Draw Command Items
         for (int i = 0; i < g_NumItems; ++i)
         {
+            if (!g_Items[i].isVisible) continue;
             RECT rcCell = g_Items[i].rc;
 
             RECT rcLeftHighlight = rcCell;
@@ -557,6 +580,20 @@ HWND CreateCommandBar(HWND hParent, HINSTANCE hInstance, int x, int y, int width
 {
     RegisterCommandBarClass(hInstance);
 
+    static wchar_t s_aboutLabel[32] = { 0 };
+    if (s_aboutLabel[0] == 0)
+    {
+        swprintf_s(s_aboutLabel, L"v%ls", Updater::GetCurrentVersion().c_str());
+        for (int i = 0; i < g_NumItems; ++i)
+        {
+            if (g_Items[i].id == CMD_ACTION_ABOUT)
+            {
+                g_Items[i].label = s_aboutLabel;
+                break;
+            }
+        }
+    }
+
     HWND hBar = CreateWindowExW(
         0, L"CommandBarClass", L"",
         WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
@@ -608,5 +645,82 @@ RECT CommandBar_GetButtonRect(HWND hCommandBar, int actionId)
         }
     }
     return rc;
+}
+
+void CommandBar_SetButtonVisible(HWND hCommandBar, int actionId, BOOL bVisible)
+{
+    for (int i = 0; i < g_NumItems; ++i)
+    {
+        if (g_Items[i].id == actionId)
+        {
+            if (g_Items[i].isVisible != bVisible)
+            {
+                g_Items[i].isVisible = bVisible;
+                if (hCommandBar && IsWindow(hCommandBar))
+                {
+                    RECT rc;
+                    GetClientRect(hCommandBar, &rc);
+                    HDC hdc = GetDC(hCommandBar);
+                    RecalculateItemLayout(rc.right - rc.left, rc.bottom - rc.top, hdc);
+                    ReleaseDC(hCommandBar, hdc);
+                    InvalidateRect(hCommandBar, NULL, FALSE);
+                }
+            }
+            break;
+        }
+    }
+}
+
+void CommandBar_SetTabMode(HWND hCommandBar, int activeTab)
+{
+    for (int i = 0; i < g_NumItems; ++i)
+    {
+        int id = g_Items[i].id;
+        if (activeTab == 2) // Sound Studio Tab (Tab 3 in UI)
+        {
+            if (id == CMD_ACTION_NEW_CONSIST ||
+                id == CMD_ACTION_CLONE_CONSIST ||
+                id == CMD_ACTION_REVERSE_CONSIST ||
+                id == CMD_ACTION_DELETE_CONSISTS ||
+                id == CMD_ACTION_TRAIN_CONFIGS ||
+                id == CMD_ACTION_POOL_MANAGER ||
+                id == CMD_ACTION_POOL_MUTATOR ||
+                id == CMD_ACTION_BATCH_WIZARD ||
+                id == CMD_ACTION_REFRESH_CONSISTS)
+            {
+                g_Items[i].isVisible = FALSE;
+            }
+            else
+            {
+                if (id == CMD_ACTION_BATCH_SOUND)
+                {
+                    g_Items[i].label = L"Sound Mutator";
+                }
+                g_Items[i].isVisible = TRUE; // Shows Save Changes, Sound Mutator, Stock Info, 3D Visual Studio, Refresh Stocks, About
+            }
+        }
+        else // Main Consists (Tab 0) and Activity Consists (Tab 1)
+        {
+            if (id == CMD_ACTION_BATCH_SOUND)
+            {
+                g_Items[i].label = L"Sound Mutator";
+                g_Items[i].isVisible = FALSE; // Hidden on main and activity consist tabs
+            }
+            else
+            {
+                g_Items[i].isVisible = TRUE;
+            }
+        }
+    }
+
+    if (hCommandBar && IsWindow(hCommandBar))
+    {
+        RECT rc;
+        GetClientRect(hCommandBar, &rc);
+        HDC hdc = GetDC(hCommandBar);
+        RecalculateItemLayout(rc.right - rc.left, rc.bottom - rc.top, hdc);
+        ReleaseDC(hCommandBar, hdc);
+        InvalidateRect(hCommandBar, NULL, FALSE);
+    }
 }
 

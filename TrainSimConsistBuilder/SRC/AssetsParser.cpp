@@ -23,7 +23,7 @@ volatile BOOL g_bCancelStockScan = FALSE;
 
 std::string ReadConFileToAscii(const std::wstring& filePath)
 {
-    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return "";
 
     DWORD fileSize = GetFileSize(hFile, NULL);
@@ -33,28 +33,68 @@ std::string ReadConFileToAscii(const std::wstring& filePath)
         return "";
     }
 
-    std::vector<char> buffer(fileSize);
+    std::vector<unsigned char> buffer(fileSize);
     DWORD bytesRead = 0;
-    if (!ReadFile(hFile, buffer.data(), fileSize, &bytesRead, NULL))
+    if (!ReadFile(hFile, buffer.data(), fileSize, &bytesRead, NULL) || bytesRead == 0)
     {
         CloseHandle(hFile);
         return "";
     }
     CloseHandle(hFile);
+    buffer.resize(bytesRead);
 
-    std::string asciiStr;
-    asciiStr.reserve(bytesRead);
-
-    for (DWORD i = 0; i < bytesRead; i++)
+    // 1. Detect UTF-16 LE with BOM (0xFF, 0xFE)
+    if (buffer.size() >= 2 && buffer[0] == 0xFF && buffer[1] == 0xFE)
     {
-        char c = buffer[i];
-        if (c != 0 && (unsigned char)c != 0xFF && (unsigned char)c != 0xFE)
+        size_t numWChars = (buffer.size() - 2) / 2;
+        const wchar_t* pWChars = (const wchar_t*)(buffer.data() + 2);
+        int len = WideCharToMultiByte(CP_UTF8, 0, pWChars, (int)numWChars, NULL, 0, NULL, NULL);
+        if (len <= 0) return "";
+        std::string utf8(len, '\0');
+        WideCharToMultiByte(CP_UTF8, 0, pWChars, (int)numWChars, &utf8[0], len, NULL, NULL);
+        return utf8;
+    }
+
+    // 2. Detect UTF-16 LE without BOM (check if second and fourth bytes are null)
+    if (buffer.size() >= 4 && buffer[1] == 0x00 && buffer[3] == 0x00)
+    {
+        size_t numWChars = buffer.size() / 2;
+        const wchar_t* pWChars = (const wchar_t*)buffer.data();
+        int len = WideCharToMultiByte(CP_UTF8, 0, pWChars, (int)numWChars, NULL, 0, NULL, NULL);
+        if (len > 0)
         {
-            asciiStr.push_back(c);
+            std::string utf8(len, '\0');
+            WideCharToMultiByte(CP_UTF8, 0, pWChars, (int)numWChars, &utf8[0], len, NULL, NULL);
+            return utf8;
         }
     }
 
-    return asciiStr;
+    // 3. Detect UTF-8 with BOM (0xEF, 0xBB, 0xBF)
+    if (buffer.size() >= 3 && buffer[0] == 0xEF && buffer[1] == 0xBB && buffer[2] == 0xBF)
+    {
+        return std::string(buffer.begin() + 3, buffer.end());
+    }
+
+    // 4. Check if valid UTF-8; if invalid, fallback to converting CP_ACP (ANSI) to UTF-8
+    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char*)buffer.data(), (int)buffer.size(), NULL, 0);
+    if (wlen <= 0)
+    {
+        int cpwlen = MultiByteToWideChar(CP_ACP, 0, (const char*)buffer.data(), (int)buffer.size(), NULL, 0);
+        if (cpwlen > 0)
+        {
+            std::wstring cpws(cpwlen, L'\0');
+            MultiByteToWideChar(CP_ACP, 0, (const char*)buffer.data(), (int)buffer.size(), &cpws[0], cpwlen);
+            int u8len = WideCharToMultiByte(CP_UTF8, 0, cpws.data(), cpwlen, NULL, 0, NULL, NULL);
+            if (u8len > 0)
+            {
+                std::string u8str(u8len, '\0');
+                WideCharToMultiByte(CP_UTF8, 0, cpws.data(), cpwlen, &u8str[0], u8len, NULL, NULL);
+                return u8str;
+            }
+        }
+    }
+
+    return std::string(buffer.begin(), buffer.end());
 }
 
 std::wstring ExtractTagValue(const std::string& ascii, const std::string& tag)

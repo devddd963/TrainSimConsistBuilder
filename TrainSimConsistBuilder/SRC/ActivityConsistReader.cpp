@@ -47,6 +47,45 @@ namespace ActivityConsistReader {
             return utf8;
         }
 
+        // Detect UTF-16 LE without BOM
+        if (buffer.size() >= 4 && buffer[1] == 0x00 && buffer[3] == 0x00)
+        {
+            size_t numWChars = buffer.size() / 2;
+            const wchar_t* pWChars = (const wchar_t*)buffer.data();
+            int len = WideCharToMultiByte(CP_UTF8, 0, pWChars, (int)numWChars, NULL, 0, NULL, NULL);
+            if (len > 0)
+            {
+                std::string utf8(len, '\0');
+                WideCharToMultiByte(CP_UTF8, 0, pWChars, (int)numWChars, &utf8[0], len, NULL, NULL);
+                return utf8;
+            }
+        }
+
+        // Detect UTF-8 with BOM
+        if (buffer.size() >= 3 && buffer[0] == 0xEF && buffer[1] == 0xBB && buffer[2] == 0xBF)
+        {
+            return std::string(buffer.begin() + 3, buffer.end());
+        }
+
+        // Check if valid UTF-8; if invalid, fallback to converting CP_ACP (ANSI) to UTF-8
+        int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char*)buffer.data(), (int)buffer.size(), NULL, 0);
+        if (wlen <= 0)
+        {
+            int cpwlen = MultiByteToWideChar(CP_ACP, 0, (const char*)buffer.data(), (int)buffer.size(), NULL, 0);
+            if (cpwlen > 0)
+            {
+                std::wstring cpws(cpwlen, L'\0');
+                MultiByteToWideChar(CP_ACP, 0, (const char*)buffer.data(), (int)buffer.size(), &cpws[0], cpwlen);
+                int u8len = WideCharToMultiByte(CP_UTF8, 0, cpws.data(), cpwlen, NULL, 0, NULL, NULL);
+                if (u8len > 0)
+                {
+                    std::string u8str(u8len, '\0');
+                    WideCharToMultiByte(CP_UTF8, 0, cpws.data(), cpwlen, &u8str[0], u8len, NULL, NULL);
+                    return u8str;
+                }
+            }
+        }
+
         return std::string(buffer.begin(), buffer.end());
     }
 
@@ -400,6 +439,8 @@ namespace ActivityConsistReader {
             {
                 con.isBroken = true;
             }
+            con.savedUnits = con.units;
+            con.isDirty = false;
         }
 
         LOG_INFO("ActivityConsistReader: Parsed '%ls' (File: '%ls', Embedded Consists: %zu)",

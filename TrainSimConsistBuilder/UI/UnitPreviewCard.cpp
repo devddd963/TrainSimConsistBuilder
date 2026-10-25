@@ -246,7 +246,7 @@ struct UnitPreviewState
     // Camera Orbit / Pan / Zoom
     float camYaw = -45.0f;
     float camPitch = 15.0f;
-    float camDistance = 22.0f;
+    float camDistance = 26.0f;
     DirectX::XMFLOAT3 camTarget = { 0.0f, 1.8f, 0.0f };
 
     bool isOrbiting = false;
@@ -784,6 +784,45 @@ static void RenderPreviewFrame(UnitPreviewState* pState)
     pState->pSwapChain->Present(1, 0);
 }
 
+// -------------------------------------------------------------
+// Optimal Camera Distance Calculation (Fit-to-Frustum)
+// Prevents clipping of tall rolling stock (e.g. Double-Stack containers)
+// -------------------------------------------------------------
+static float CalculateOptimalPreviewDistance(UnitPreviewState* pState)
+{
+    if (!pState || !pState->compositeStock.isValid) return 26.0f;
+
+    RECT rc = { 0 };
+    if (pState->hViewportWnd && IsWindow(pState->hViewportWnd))
+        GetClientRect(pState->hViewportWnd, &rc);
+    else if (pState->hWnd && IsWindow(pState->hWnd))
+        GetClientRect(pState->hWnd, &rc);
+
+    int vpW = rc.right - rc.left;
+    int vpH = rc.bottom - rc.top;
+    if (vpW <= 0) vpW = 500;
+    if (vpH <= 0) vpH = 220;
+
+    float aspect = (float)vpW / (float)(std::max)(1, vpH);
+    float fovY = DirectX::XMConvertToRadians(28.0f);
+    float tanHalfY = tanf(fovY * 0.5f);
+    float tanHalfX = tanHalfY * aspect;
+
+    float dy = pState->compositeStock.boundsMax.y - pState->compositeStock.boundsMin.y;
+    float radius = pState->compositeStock.radius;
+
+    // Vertical Fit: Distance required so dy + track bed padding fits in vertical frustum with 35% margin for ample headroom
+    float distY = ((dy + 1.2f) * 1.35f) / (2.0f * tanHalfY);
+
+    // Horizontal Fit for spherical bounds with 20% margin
+    float distX = (radius * 1.20f) / tanHalfX;
+
+    // Standard radial distance for showroom 3/4 perspective (zoomed out to give clean margins)
+    float distRadius = radius * 2.35f;
+
+    return (std::max)({ 16.0f, distRadius, distY, distX });
+}
+
 static LRESULT CALLBACK PreviewViewportProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     UnitPreviewState* pState = (UnitPreviewState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
@@ -869,7 +908,7 @@ static LRESULT CALLBACK PreviewViewportProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             pState->camYaw = -45.0f;
             pState->camPitch = 15.0f;
             pState->camTarget = pState->compositeStock.isValid ? pState->compositeStock.center : DirectX::XMFLOAT3(0.0f, 1.8f, 0.0f);
-            pState->camDistance = pState->compositeStock.isValid ? (std::max)(10.0f, pState->compositeStock.radius * 2.1f) : 22.0f;
+            pState->camDistance = CalculateOptimalPreviewDistance(pState);
             InvalidateRect(hWnd, NULL, FALSE);
         }
         return 0;
@@ -1078,6 +1117,14 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
                 SetWindowPos(pState->hViewportWnd, NULL, 1, 29, vpW, vpH, SWP_NOZORDER | SWP_NOACTIVATE);
             }
             ResizeD3D11(pState, vpW, vpH);
+            if (pState->compositeStock.isValid)
+            {
+                float safeDist = CalculateOptimalPreviewDistance(pState);
+                if (pState->camDistance < safeDist * 0.90f)
+                {
+                    pState->camDistance = safeDist;
+                }
+            }
             InvalidateRect(hWnd, NULL, TRUE);
         }
         return 0;
@@ -1123,7 +1170,7 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             pState->camYaw = -45.0f;
             pState->camPitch = 15.0f;
             pState->camTarget = pState->compositeStock.isValid ? pState->compositeStock.center : DirectX::XMFLOAT3(0.0f, 1.8f, 0.0f);
-            pState->camDistance = pState->compositeStock.isValid ? (std::max)(10.0f, pState->compositeStock.radius * 2.1f) : 22.0f;
+            pState->camDistance = CalculateOptimalPreviewDistance(pState);
             if (pState->hViewportWnd) InvalidateRect(pState->hViewportWnd, NULL, FALSE);
             return 0;
         }
@@ -1251,22 +1298,43 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
 
                 if (pState->hasModel)
                 {
-                    // Compute tighter bounding box
+                    // Compute accurate aggregate bounding box transformed by local matrices
                     DirectX::XMFLOAT3 cMin = { 1e9f, 1e9f, 1e9f };
                     DirectX::XMFLOAT3 cMax = { -1e9f, -1e9f, -1e9f };
+                    bool hasValid = false;
                     for (const auto& sub : pState->compositeStock.subShapes)
                     {
                         if (sub && sub->shape.isValid)
                         {
-                            cMin.x = (std::min)(cMin.x, sub->shape.boundsMin.x);
-                            cMin.y = (std::min)(cMin.y, sub->shape.boundsMin.y);
-                            cMin.z = (std::min)(cMin.z, sub->shape.boundsMin.z);
-                            cMax.x = (std::max)(cMax.x, sub->shape.boundsMax.x);
-                            cMax.y = (std::max)(cMax.y, sub->shape.boundsMax.y);
-                            cMax.z = (std::max)(cMax.z, sub->shape.boundsMax.z);
+                            DirectX::XMFLOAT3 sMin = sub->shape.boundsMin;
+                            DirectX::XMFLOAT3 sMax = sub->shape.boundsMax;
+                            DirectX::XMFLOAT3 corners[8] = {
+                                { sMin.x, sMin.y, sMin.z },
+                                { sMax.x, sMin.y, sMin.z },
+                                { sMin.x, sMax.y, sMin.z },
+                                { sMax.x, sMax.y, sMin.z },
+                                { sMin.x, sMin.y, sMax.z },
+                                { sMax.x, sMin.y, sMax.z },
+                                { sMin.x, sMax.y, sMax.z },
+                                { sMax.x, sMax.y, sMax.z }
+                            };
+                            for (int c = 0; c < 8; ++c)
+                            {
+                                DirectX::XMVECTOR v = DirectX::XMLoadFloat3(&corners[c]);
+                                DirectX::XMVECTOR vt = DirectX::XMVector3Transform(v, sub->localMatrix);
+                                DirectX::XMFLOAT3 pt;
+                                DirectX::XMStoreFloat3(&pt, vt);
+                                cMin.x = (std::min)(cMin.x, pt.x);
+                                cMin.y = (std::min)(cMin.y, pt.y);
+                                cMin.z = (std::min)(cMin.z, pt.z);
+                                cMax.x = (std::max)(cMax.x, pt.x);
+                                cMax.y = (std::max)(cMax.y, pt.y);
+                                cMax.z = (std::max)(cMax.z, pt.z);
+                            }
+                            hasValid = true;
                         }
                     }
-                    if (cMin.x < cMax.x)
+                    if (hasValid && cMin.x < cMax.x)
                     {
                         pState->compositeStock.boundsMin = cMin;
                         pState->compositeStock.boundsMax = cMax;
@@ -1278,7 +1346,7 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
                     }
 
                     pState->camTarget = pState->compositeStock.center;
-                    pState->camDistance = (std::max)(10.0f, pState->compositeStock.radius * 2.1f);
+                    pState->camDistance = CalculateOptimalPreviewDistance(pState);
                     pState->camYaw = -45.0f;
                     pState->camPitch = 15.0f;
 

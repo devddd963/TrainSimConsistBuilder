@@ -25,6 +25,7 @@
 namespace
 {
     static HWND g_hActiveDropDownWnd = NULL;
+    static DWORD s_dwLastAnchorCloseTick = 0;
 
     struct DropDownInternalState
     {
@@ -525,6 +526,12 @@ namespace
             return 0;
         }
 
+        case WM_SETCURSOR:
+        {
+            SetCursor(LoadCursor(NULL, IDC_ARROW));
+            return TRUE;
+        }
+
         case WM_MOUSEMOVE:
         {
             if (!pState) break;
@@ -572,6 +579,9 @@ namespace
                 }
             }
 
+            // Ensure cursor is always standard arrow (never pointing hand)
+            SetCursor(LoadCursor(NULL, IDC_ARROW));
+
             if (hitIdx != pState->hoverIndex)
             {
                 pState->hoverIndex = hitIdx;
@@ -615,6 +625,7 @@ namespace
                 // Check if click was inside anchor rect (toggle behavior)
                 if (PtInRect(&pState->rcAnchorScreen, ptScreen))
                 {
+                    s_dwLastAnchorCloseTick = GetTickCount();
                     ReleaseCapture();
                     DestroyWindow(hWnd);
                     return 0;
@@ -780,6 +791,7 @@ namespace
 
             if (PtInRect(&pState->rcAnchorScreen, ptScreen))
             {
+                s_dwLastAnchorCloseTick = GetTickCount();
                 ReleaseCapture();
                 DestroyWindow(hWnd);
                 return 0;
@@ -1004,6 +1016,25 @@ int CustomDropDownMenu::ShowSingleSelect(
     MSG msg;
     while (!state.isDone && GetMessageW(&msg, NULL, 0, 0))
     {
+        if (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST)
+        {
+            POINT ptScreen = msg.pt;
+            RECT rcWnd;
+            GetWindowRect(hWnd, &rcWnd);
+            if (!PtInRect(&rcWnd, ptScreen))
+            {
+                if (msg.message == WM_MOUSEMOVE)
+                {
+                    if (state.hoverIndex != -1)
+                    {
+                        state.hoverIndex = -1;
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                    SetCursor(LoadCursor(NULL, IDC_ARROW));
+                }
+            }
+        }
+
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE)
         {
             state.selectedId = 0;
@@ -1022,6 +1053,21 @@ int CustomDropDownMenu::ShowSingleSelect(
     }
     g_hActiveDropDownWnd = NULL;
     g_pCurrentState = nullptr;
+
+    // Discard any trailing mouse button release so it doesn't leak into underlying parent window controls
+    if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0)
+    {
+        MSG flushMsg;
+        DWORD dwStart = GetTickCount();
+        while ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 && (GetTickCount() - dwStart < 400))
+        {
+            if (PeekMessageW(&flushMsg, NULL, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE))
+            {
+                if (flushMsg.message == WM_LBUTTONUP) break;
+            }
+            Sleep(5);
+        }
+    }
 
     return state.selectedId;
 }
@@ -1146,6 +1192,25 @@ bool CustomDropDownMenu::ShowMultiSelect(
     MSG msg;
     while (!state.isDone && GetMessageW(&msg, NULL, 0, 0))
     {
+        if (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST)
+        {
+            POINT ptScreen = msg.pt;
+            RECT rcWnd;
+            GetWindowRect(hWnd, &rcWnd);
+            if (!PtInRect(&rcWnd, ptScreen))
+            {
+                if (msg.message == WM_MOUSEMOVE)
+                {
+                    if (state.hoverIndex != -1)
+                    {
+                        state.hoverIndex = -1;
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                    SetCursor(LoadCursor(NULL, IDC_ARROW));
+                }
+            }
+        }
+
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE)
         {
             state.isDone = true;
@@ -1164,6 +1229,21 @@ bool CustomDropDownMenu::ShowMultiSelect(
     g_hActiveDropDownWnd = NULL;
     g_pCurrentState = nullptr;
 
+    // Discard any trailing mouse button release so it doesn't leak into underlying parent window controls
+    if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0)
+    {
+        MSG flushMsg;
+        DWORD dwStart = GetTickCount();
+        while ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 && (GetTickCount() - dwStart < 350))
+        {
+            if (PeekMessageW(&flushMsg, NULL, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE))
+            {
+                if (flushMsg.message == WM_LBUTTONUP) break;
+            }
+            Sleep(5);
+        }
+    }
+
     items = state.items;
     return true;
 }
@@ -1181,4 +1261,15 @@ void CustomDropDownMenu::CloseActive()
 bool CustomDropDownMenu::IsActive()
 {
     return (g_hActiveDropDownWnd != NULL && IsWindow(g_hActiveDropDownWnd));
+}
+
+bool CustomDropDownMenu::WasClosedByAnchor(DWORD thresholdMs)
+{
+    DWORD elapsed = GetTickCount() - s_dwLastAnchorCloseTick;
+    if (elapsed < thresholdMs)
+    {
+        s_dwLastAnchorCloseTick = 0;
+        return true;
+    }
+    return false;
 }

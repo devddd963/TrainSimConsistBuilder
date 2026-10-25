@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
 #include <vector>
@@ -13,7 +13,7 @@ namespace ActivityConsistWriter {
     };
 
     /**
-     * Creates a safe .act.bak backup file before modifying.
+     * Creates a safe .act.TSCB_BACKUP backup file before modifying.
      */
     bool CreateBackup(const std::wstring& actFilePath);
 

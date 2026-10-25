@@ -24,3 +24,4 @@ void CustomTitleBar_UpdateWindowState(HWND hTitleBar);
 void CustomTitleBar_SetTitle(HWND hTitleBar, const wchar_t* title);
 void CustomTitleBar_SetTabs(HWND hTitleBar, const std::vector<TitleBarTabItem>& tabs);
 void CustomTitleBar_SetCloseOnly(HWND hTitleBar, BOOL bCloseOnly);
+void CustomTitleBar_SetNeutralDarkTheme(HWND hTitleBar, BOOL bNeutralDark);

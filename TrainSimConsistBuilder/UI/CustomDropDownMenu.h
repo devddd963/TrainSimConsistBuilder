@@ -140,4 +140,7 @@ public:
 
     // Checks if any dropdown menu is currently active/open.
     static bool IsActive();
+
+    // Checks if a dropdown was just closed by clicking on its anchor (to support one-click open, one-click close toggle)
+    static bool WasClosedByAnchor(DWORD thresholdMs = 300);
 };

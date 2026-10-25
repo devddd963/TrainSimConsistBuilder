@@ -1279,6 +1279,9 @@ void ShowStockInfoDialog(HWND hWndParent, const std::wstring& filePath, const st
         wcex.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
         wcex.lpfnWndProc = StockInfoWndProc;
         wcex.hInstance = hInstance;
+        wcex.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(107 /* IDI_TRAINSIMCONSISTBUILDER */));
+        wcex.hIconSm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(107), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+        if (!wcex.hIconSm) wcex.hIconSm = LoadIconW(hInstance, MAKEINTRESOURCEW(108 /* IDI_SMALL */));
         wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
         wcex.hbrBackground = NULL;
         wcex.lpszClassName = L"StockInfoDialogClass";
@@ -1308,7 +1311,7 @@ void ShowStockInfoDialog(HWND hWndParent, const std::wstring& filePath, const st
     int y = rcParent.top + (rcParent.bottom - rcParent.top - height) / 2;
 
     HWND hWnd = CreateWindowExW(
-        0,
+        WS_EX_APPWINDOW,
         L"StockInfoDialogClass",
         L"Stock Specification Inspector - TrainSim Consist Builder",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
@@ -1317,6 +1320,11 @@ void ShowStockInfoDialog(HWND hWndParent, const std::wstring& filePath, const st
 
     if (hWnd)
     {
+        HICON hIconBig = (HICON)GetClassLongPtrW(hWnd, GCLP_HICON);
+        HICON hIconSm = (HICON)GetClassLongPtrW(hWnd, GCLP_HICONSM);
+        if (hIconBig) SendMessageW(hWnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+        if (hIconSm)  SendMessageW(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSm);
+
         // DWM Rounded Corners & Dark Mode
         DWORD corner = 2; // DWMWCP_ROUND
         DwmSetWindowAttribute(hWnd, (DWMWINDOWATTRIBUTE)33, &corner, sizeof(corner));

@@ -14,6 +14,7 @@ namespace ActivityConsistReader {
         int objectIndex = 0;        // 0-based sequential index of the ActivityObject
         ConsistReader::TrainConfig trainCfg;
         std::vector<ConsistReader::UnitInfo> units;
+        std::vector<ConsistReader::UnitInfo> savedUnits;
         int totalUnits = 0;
         bool isBroken = false;
         bool hasMissingStock = false;

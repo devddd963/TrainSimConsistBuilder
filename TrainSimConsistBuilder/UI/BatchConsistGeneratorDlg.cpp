@@ -2453,12 +2453,13 @@ void ShowBatchConsistGeneratorDialog(HWND hWndParent, int presetIndex)
         wcex.cbClsExtra = 0;
         wcex.cbWndExtra = 0;
         wcex.hInstance = GetModuleHandleW(NULL);
-        wcex.hIcon = NULL;
+        wcex.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107 /* IDI_TRAINSIMCONSISTBUILDER */));
         wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
         wcex.hbrBackground = NULL;
         wcex.lpszMenuName = NULL;
         wcex.lpszClassName = szClassName;
-        wcex.hIconSm = NULL;
+        wcex.hIconSm = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+        if (!wcex.hIconSm) wcex.hIconSm = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(108 /* IDI_SMALL */));
 
         RegisterClassExW(&wcex);
         s_ExportRegistered = true;
@@ -2525,7 +2526,7 @@ void ShowBatchConsistGeneratorDialog(HWND hWndParent, int presetIndex)
     int y = rcParent.top + (rcParent.bottom - rcParent.top - dlgH) / 2;
 
     HWND hDlg = CreateWindowExW(
-        0, szClassName, L"Batch Consist Export & Generation",
+        WS_EX_APPWINDOW, szClassName, L"Batch Consist Export & Generation",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, dlgW, dlgH, hWndParent, NULL, GetModuleHandleW(NULL), pState
     );
@@ -2535,6 +2536,11 @@ void ShowBatchConsistGeneratorDialog(HWND hWndParent, int presetIndex)
         delete pState;
         return;
     }
+
+    HICON hIconBig = (HICON)GetClassLongPtrW(hDlg, GCLP_HICON);
+    HICON hIconSm = (HICON)GetClassLongPtrW(hDlg, GCLP_HICONSM);
+    if (hIconBig) SendMessageW(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+    if (hIconSm)  SendMessageW(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hIconSm);
 
     g_hBatchGeneratorDlg = hDlg;
 

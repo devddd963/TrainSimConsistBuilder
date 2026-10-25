@@ -4094,9 +4094,9 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                         menuItems.push_back(ContextMenuItem::Action(ID_ADD_CUSTOM, L"\xE710", L"Add New Role to DB..."));
                         menuItems.push_back(ContextMenuItem::Action(ID_RESTORE_DEFAULTS, L"\xE777", L"Restore Default Roles"));
 
-                        POINT ptMenu = { ctrl.rc.left, ctrl.rc.bottom + 2 };
-                        ClientToScreen(hWnd, &ptMenu);
-                        int choice = ModernContextMenu::Show(hWnd, ptMenu.x, ptMenu.y, menuItems, TRUE, 220);
+                        RECT rcAnchorScreen = ctrl.rc;
+                        MapWindowPoints(hWnd, NULL, (LPPOINT)&rcAnchorScreen, 2);
+                        int choice = ModernContextMenu::Show(hWnd, rcAnchorScreen.left, rcAnchorScreen.bottom + 2, menuItems, TRUE, 220, &rcAnchorScreen);
 
                         if (choice >= 1000 && choice < roleCmdBase)
                         {
@@ -4965,6 +4965,9 @@ void ShowTrainConfigStudioDialog(HWND hWndParent, int initialTab)
         wcex.style = CS_DBLCLKS;
         wcex.lpfnWndProc = TrainConfigStudioWndProc;
         wcex.hInstance = GetModuleHandleW(NULL);
+        wcex.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107 /* IDI_TRAINSIMCONSISTBUILDER */));
+        wcex.hIconSm = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+        if (!wcex.hIconSm) wcex.hIconSm = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(108 /* IDI_SMALL */));
         wcex.hCursor = LoadCursorW(NULL, IDC_ARROW);
         wcex.hbrBackground = NULL;
         wcex.lpszClassName = szClassName;
@@ -4993,7 +4996,7 @@ void ShowTrainConfigStudioDialog(HWND hWndParent, int initialTab)
     int y = rcParent.top + (rcParent.bottom - rcParent.top - dlgH) / 2;
 
     HWND hDlg = CreateWindowExW(
-        0, szClassName, L"Train Config Studio",
+        WS_EX_APPWINDOW, szClassName, L"Train Config Studio",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, dlgW, dlgH,
         hWndParent, NULL, GetModuleHandleW(NULL), pState
@@ -5004,6 +5007,11 @@ void ShowTrainConfigStudioDialog(HWND hWndParent, int initialTab)
         delete pState;
         return;
     }
+
+    HICON hIconBig = (HICON)GetClassLongPtrW(hDlg, GCLP_HICON);
+    HICON hIconSm = (HICON)GetClassLongPtrW(hDlg, GCLP_HICONSM);
+    if (hIconBig) SendMessageW(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+    if (hIconSm)  SendMessageW(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hIconSm);
 
     g_hTrainConfigStudioDlg = hDlg;
 

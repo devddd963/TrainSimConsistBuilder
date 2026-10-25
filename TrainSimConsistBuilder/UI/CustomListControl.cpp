@@ -31,6 +31,10 @@ CustomListControl::CustomListControl()
       m_vScroll(ScrollBarOrientation::Vertical),
       m_hScroll(ScrollBarOrientation::Horizontal),
       m_isVirtual(false), m_itemCount(0), m_callback(NULL), m_callbackParam(NULL),
+      m_rowBgCallback(NULL), m_rowBgCallbackParam(NULL),
+      m_drawCellCallback(NULL), m_drawCellCallbackParam(NULL),
+      m_isCellInteractiveCallback(NULL), m_isCellInteractiveCallbackParam(NULL),
+      m_bShowVerticalDividers(true),
       m_scrollX(0), m_scrollY(0), m_rowHeight(22), m_headerHeight(28), m_selectedIndex(-1),
       m_isMultiSelect(false), m_anchorRow(-1), m_isMarqueeSelecting(false),
       m_hoveredRow(-1), m_hoveredCol(-1), m_pressedRow(-1), m_pressedCol(-1),
@@ -50,6 +54,7 @@ CustomListControl::CustomListControl()
     m_bPotentialDrag(false),
     m_bPotentialItemDrag(false),
     m_bIsItemDragging(false),
+    m_dragGhostType(GhostItemType::VehicleUnit),
     m_dropTargetIndex(-1),
     m_bAllowRearrange(false),
     m_bAllowTransferSource(false),
@@ -337,7 +342,7 @@ void CustomListControl::SetItemCount(int count)
 // ---------------------------------------------------------------------------
 // Selection
 // ---------------------------------------------------------------------------
-void CustomListControl::SetSelectedIndex(int index)
+void CustomListControl::SetSelectedIndex(int index, bool bEnsureVisible)
 {
     int itemCount = GetItemCount();
     if (index < -1 || index >= itemCount) return;
@@ -349,9 +354,21 @@ void CustomListControl::SetSelectedIndex(int index)
     {
         m_selectedIndices.insert(index);
         m_selectedOrder.push_back(index);
-        EnsureVisible(index);
+        if (bEnsureVisible)
+        {
+            EnsureVisible(index);
+        }
     }
     Invalidate();
+
+    if (m_hWnd && IsWindow(m_hWnd))
+    {
+        NMHDR nmhdr = { 0 };
+        nmhdr.hwndFrom = m_hWnd;
+        nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+        nmhdr.code     = LVN_ITEMCHANGED;
+        SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+    }
 }
 
 void CustomListControl::SetMultiSelect(bool bEnable)
@@ -812,31 +829,6 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         int endRow     = startRow + visibleRows;
         if (endRow > itemCount) endRow = itemCount;
 
-        // --- Draw unified vertical column separators top-to-bottom within rcList ---
-        HPEN hPen    = CreatePen(PS_SOLID, 1, dividerCol);
-        HPEN hOldPen = (HPEN)SelectObject(hMemDC, hPen);
-
-        if (m_bShowSelectionGutter)
-        {
-            int xGutter = GetGutterWidth();
-            MoveToEx(hMemDC, xGutter, 0, NULL);
-            LineTo(hMemDC, xGutter, rcList.bottom);
-        }
-
-        int xAccumDiv = GetGutterWidth() - m_scrollX;
-        for (size_t c = 0; c < m_columns.size() - 1; ++c)
-        {
-            xAccumDiv += m_columns[c].width;
-            if (xAccumDiv > GetGutterWidth() && xAccumDiv < listW)
-            {
-                MoveToEx(hMemDC, xAccumDiv, m_headerHeight, NULL);
-                LineTo(hMemDC, xAccumDiv, rcList.bottom);
-            }
-        }
-
-        SelectObject(hMemDC, hOldPen);
-        DeleteObject(hPen);
-
         // --- Draw row cells with strict GDI clipping to rcList ---
         int savedDCRows = SaveDC(hMemDC);
         IntersectClipRect(hMemDC, 0, m_headerHeight, listW, rcList.bottom);
@@ -847,15 +839,22 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         int rowPillRight = (std::max)(listW - 4, rightOfColumns);
         if (rowPillRight < 4) rowPillRight = 4;
 
+        // Pass 1: Draw Row Pill Highlight & Selection background
         for (int r = startRow; r < endRow; ++r)
         {
+            bool isRowSel = IsRowSelected(r);
+            bool isRowHover = (r == m_hoveredRow && !isRowSel);
             int yTop = m_headerHeight + (r - m_scrollY) * m_rowHeight;
             RECT rcRow = { 4, yTop + 1, rowPillRight, yTop + m_rowHeight - 1 };
 
-            bool isRowSel = IsRowSelected(r);
-            bool isRowHover = (r == m_hoveredRow && !isRowSel);
+            if (m_rowBgCallback)
+            {
+                if (m_rowBgCallback(hMemDC, r, rcRow, isRowSel, isRowHover, m_rowBgCallbackParam))
+                {
+                    continue;
+                }
+            }
 
-            // Draw Row Pill Highlight & Selection (Simple, clean Fluent selection surface)
             if (isRowSel || isRowHover)
             {
                 COLORREF pillCol = isRowSel ? RGB(35, 65, 105) : RGB(38, 38, 44);
@@ -871,6 +870,41 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 DeleteObject(hPillBr);
                 DeleteObject(hPillPen);
             }
+        }
+
+        // Pass 2: Draw unified vertical column separators top-to-bottom across row backgrounds
+        if (m_bShowVerticalDividers)
+        {
+            HPEN hPen    = CreatePen(PS_SOLID, 1, dividerCol);
+            HPEN hOldPen = (HPEN)SelectObject(hMemDC, hPen);
+
+            if (m_bShowSelectionGutter)
+            {
+                int xGutter = GetGutterWidth();
+                MoveToEx(hMemDC, xGutter, m_headerHeight, NULL);
+                LineTo(hMemDC, xGutter, rcList.bottom);
+            }
+
+            int xAccumDiv = GetGutterWidth() - m_scrollX;
+            for (size_t c = 0; c < m_columns.size() - 1; ++c)
+            {
+                xAccumDiv += m_columns[c].width;
+                if (xAccumDiv > GetGutterWidth() && xAccumDiv < listW)
+                {
+                    MoveToEx(hMemDC, xAccumDiv, m_headerHeight, NULL);
+                    LineTo(hMemDC, xAccumDiv, rcList.bottom);
+                }
+            }
+
+            SelectObject(hMemDC, hOldPen);
+            DeleteObject(hPen);
+        }
+
+        // Pass 3: Draw row cells (checkboxes, text, buttons)
+        for (int r = startRow; r < endRow; ++r)
+        {
+            int yTop = m_headerHeight + (r - m_scrollY) * m_rowHeight;
+            bool isRowSel = IsRowSelected(r);
 
             // Draw Checkbox in Selection Gutter
             if (m_bShowSelectionGutter)
@@ -952,6 +986,16 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
 
                 if (rcCell.right > GetGutterWidth() && rcCell.left < listW)
                 {
+                    if (m_drawCellCallback)
+                    {
+                        bool isCellHovered = (r == m_hoveredRow && (int)c == m_hoveredCol);
+                        if (m_drawCellCallback(hMemDC, r, (int)c, rcCell, isRowSel, isCellHovered, m_drawCellCallbackParam))
+                        {
+                            xAccum += colWidth;
+                            continue;
+                        }
+                    }
+
                     std::wstring cellText = GetCellText(r, (int)c);
                     if (m_columns[c].title == L"Orientation")
                     {
@@ -1045,7 +1089,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                     if (m_columns[c].align == 1) fmt = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS;
                     else if (m_columns[c].align == 2) fmt = DT_RIGHT  | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS;
 
-                    if (c == 0 && cellText.rfind(L"● ", 0) == 0)
+                    if ((c == 0 || c == 1) && cellText.rfind(L"● ", 0) == 0)
                     {
                         int dotRadius = 4;
                         int dotX = rcText.left + dotRadius + 1;
@@ -1900,6 +1944,15 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             return TRUE;
         }
 
+        if (m_isCellInteractiveCallback && m_hoveredRow >= 0 && m_hoveredCol >= 0)
+        {
+            if (m_isCellInteractiveCallback(m_hoveredRow, m_hoveredCol, m_isCellInteractiveCallbackParam))
+            {
+                SetCursor(LoadCursor(NULL, IDC_HAND));
+                return TRUE;
+            }
+        }
+
         int xAccum = GetGutterWidth() - m_scrollX;
         bool nearBoundary = false;
         if (m_columns.size() > 1)
@@ -2076,8 +2129,21 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                     xPos = nextX;
                 }
 
-                // Check if Orientation column button was clicked
-                if (clickedCol >= 0 && m_columns[clickedCol].title == L"Orientation")
+                // Check if Orientation column button or custom interactive cell was clicked
+                bool isInteractiveCell = false;
+                if (clickedCol >= 0)
+                {
+                    if (m_columns[clickedCol].title == L"Orientation")
+                    {
+                        isInteractiveCell = true;
+                    }
+                    else if (m_isCellInteractiveCallback && m_isCellInteractiveCallback(clickedRow, clickedCol, m_isCellInteractiveCallbackParam))
+                    {
+                        isInteractiveCell = true;
+                    }
+                }
+
+                if (isInteractiveCell)
                 {
                     m_pressedRow = clickedRow;
                     m_pressedCol = clickedCol;
@@ -2436,12 +2502,26 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
 
                 std::vector<DragGhostItem> ghostItems;
                 std::vector<int> selList = GetSelectedIndices();
+                if (selList.empty() && m_selectedIndex >= 0)
+                {
+                    selList.push_back(m_selectedIndex);
+                }
                 for (int selIdx : selList)
                 {
                     DragGhostItem item;
-                    item.name = GetCellText(selIdx, 0);
-                    std::wstring typeStr = GetCellText(selIdx, 1);
-                    item.isEngine = (typeStr != L"Freight" && typeStr != L"Passenger" && typeStr != L"Tender");
+                    item.type = m_dragGhostType;
+                    if (m_dragGhostType == GhostItemType::SoundFile)
+                    {
+                        item.name = GetCellText(selIdx, 0);
+                        item.subtitle = GetCellText(selIdx, 1);
+                        item.isEngine = false;
+                    }
+                    else
+                    {
+                        item.name = GetCellText(selIdx, 0);
+                        std::wstring typeStr = GetCellText(selIdx, 1);
+                        item.isEngine = (typeStr != L"Freight" && typeStr != L"Passenger" && typeStr != L"Tender");
+                    }
                     ghostItems.push_back(item);
                 }
 
@@ -2590,9 +2670,13 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                         {
                             isInteractiveBtnHover = true;
                         }
+                        else if (m_isCellInteractiveCallback && m_isCellInteractiveCallback(candidateRow, m_hoveredCol, m_isCellInteractiveCallbackParam))
+                        {
+                            isInteractiveBtnHover = true;
+                        }
                     }
 
-                    if (x < nameRightX || isInteractiveBtnHover)
+                    if (x < nameRightX || isInteractiveBtnHover || m_drawCellCallback != NULL)
                     {
                         m_hoveredRow = candidateRow;
                     }
@@ -3452,6 +3536,14 @@ void CustomListControl::CancelItemDrag()
     StopAutoScroll();
     FluentDragGhost::Hide();
     Invalidate();
+}
+
+int CustomListControl::GetItemIndexFromPoint(POINT ptClient) const
+{
+    if (ptClient.y <= m_headerHeight) return -1;
+    int row = m_scrollY + (ptClient.y - m_headerHeight) / m_rowHeight;
+    if (row < 0 || row >= GetItemCount()) return -1;
+    return row;
 }
 
 int CustomListControl::GetDropIndexFromPoint(POINT ptClient) const

@@ -20,6 +20,7 @@
 #define CMD_ACTION_STOCK_INFO         15
 #define CMD_ACTION_SHAPE_VIEWER       16
 #define CMD_ACTION_TRAIN_CONFIGS      20
+#define CMD_ACTION_BATCH_SOUND        22
 #define CMD_ACTION_POOL_MUTATOR       13
 #define CMD_ACTION_MORE               11
 #define CMD_ACTION_DETAILS            12
@@ -29,4 +30,6 @@ BOOL RegisterCommandBarClass(HINSTANCE hInstance);
 HWND CreateCommandBar(HWND hParent, HINSTANCE hInstance, int x, int y, int width, int height, UINT_PTR controlId);
 void CommandBar_SetDarkMode(HWND hCommandBar, BOOL bDarkMode);
 void CommandBar_SetButtonText(HWND hCommandBar, int actionId, const wchar_t* newLabel, int newWidth = 0);
+void CommandBar_SetButtonVisible(HWND hCommandBar, int actionId, BOOL bVisible);
+void CommandBar_SetTabMode(HWND hCommandBar, int activeTab);
 RECT CommandBar_GetButtonRect(HWND hCommandBar, int actionId);

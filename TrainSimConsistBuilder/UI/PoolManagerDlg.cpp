@@ -4265,6 +4265,9 @@ void ShowPoolManagerDialog(HWND hWndParent, int initialTab)
         wcex.style = CS_DBLCLKS;
         wcex.lpfnWndProc = WizardDlgProc;
         wcex.hInstance = GetModuleHandleW(NULL);
+        wcex.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107 /* IDI_TRAINSIMCONSISTBUILDER */));
+        wcex.hIconSm = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+        if (!wcex.hIconSm) wcex.hIconSm = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(108 /* IDI_SMALL */));
         wcex.hCursor = LoadCursorW(NULL, IDC_ARROW);
         wcex.hbrBackground = NULL;
         wcex.lpszClassName = szClassName;
@@ -4293,7 +4296,7 @@ void ShowPoolManagerDialog(HWND hWndParent, int initialTab)
     int y = rcParent.top + (rcParent.bottom - rcParent.top - dlgH) / 2;
 
     HWND hDlg = CreateWindowExW(
-        0, szClassName, L"Consist Pool Manager",
+        WS_EX_APPWINDOW, szClassName, L"Consist Pool Manager",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, dlgW, dlgH,
         hWndParent, NULL, GetModuleHandleW(NULL), pState
@@ -4304,6 +4307,11 @@ void ShowPoolManagerDialog(HWND hWndParent, int initialTab)
         delete pState;
         return;
     }
+
+    HICON hIconBig = (HICON)GetClassLongPtrW(hDlg, GCLP_HICON);
+    HICON hIconSm = (HICON)GetClassLongPtrW(hDlg, GCLP_HICONSM);
+    if (hIconBig) SendMessageW(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+    if (hIconSm)  SendMessageW(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hIconSm);
 
     g_hPoolManagerDlg = hDlg;
 

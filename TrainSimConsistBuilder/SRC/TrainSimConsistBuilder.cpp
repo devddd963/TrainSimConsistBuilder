@@ -17,9 +17,12 @@ ActivePane g_ActivePane = PANE_CONSIST;
 #include <windowsx.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 #include "TrainConfig.h"
 #include "../../TSCBResources/TSCBResources.h"
+#include "../../Common/Version.h"
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "shell32.lib")
 
 // Global Variables
 HINSTANCE hInst;
@@ -85,6 +88,7 @@ static std::wstring g_szPaneSearchQuery[3] = { L"", L"", L"" };
 
 std::vector<size_t> g_FilteredStockIndicesPane[3];
 #define g_FilteredStockIndices (g_FilteredStockIndicesPane[0])
+std::vector<size_t> g_FilteredSoundIndices;
 
 // Tree Node Handles
 CustomTreeNode* g_pNodeEngines = nullptr;
@@ -100,6 +104,9 @@ CustomTreeNode* g_pNodePassenger = nullptr;
 CustomTreeNode* g_pNodeFreight = nullptr;
 CustomTreeNode* g_pNodeTender = nullptr;
 
+static HANDLE g_hSoundScanThread = NULL;
+
+#include "SoundScanner.h"
 #include "AssetsParser.h"
 #include "../UI/FilterPopup.h"
 #include "../UI/ModernMessageBox.h"
@@ -117,7 +124,14 @@ CustomTreeNode* g_pNodeTender = nullptr;
 #include "../UI/3D-VisualStudio.h"
 #include "../UI/UnitPreviewCard.h"
 #include "../UI/TrainConfigStudioDlg.h"
+#include "../UI/SoundStudio.h"
+#include "../UI/SmsPoolManagerDlg.h"
+#include "../UI/BatchSoundMutatorDlg.h"
+#include "../UI/SmsStreamMutatorDlg.h"
 #include "StockSpecReader.h"
+#include "SmsParser.h"
+
+HWND g_hRollingStockStudio = NULL;
 
 LRESULT CALLBACK TabSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 #include "../UI/CustomListControl.h"
@@ -133,11 +147,22 @@ CustomListControl g_AssetList;
 CustomListControl g_AssetList2;
 CustomListControl g_AssetList3;
 CustomListControl g_EditorUnitList;
+CustomListControl g_SoundList;
 CustomTreeView g_RouteTreeView;
 CustomTreeView g_CategoryTreeView;
 
 HWND g_hAssetList2 = NULL;
 HWND g_hAssetList3 = NULL;
+HWND g_hSoundList = NULL;
+HWND g_hSoundSearchEdit = NULL;
+std::wstring g_szSoundSearchQuery = L"";
+
+enum StockDeckTab {
+    STOCK_DECK_ROLLING_STOCK = 0,
+    STOCK_DECK_SOUND_SMS = 1
+};
+static StockDeckTab g_StockDeckTab = STOCK_DECK_ROLLING_STOCK;
+
 HWND g_hPaneCatBtn[3] = { NULL, NULL, NULL };
 HWND g_hPaneSearchEdit[3] = { NULL, NULL, NULL };
 void PopulateAssetGridPane(int paneIdx, CustomTreeNode* hSelected = nullptr);
@@ -181,6 +206,8 @@ HWND g_hHoveredEdit = NULL; // Track which edit box is hovered
 static void SetActivePane(ActivePane newPane, HWND hWnd = NULL);
 static void UpdateUnitPreviewFromSelected();
 std::wstring AssetListGetCellText(int itemIndex, int subItemIndex, void* pParam);
+std::wstring SoundListGetCellText(int itemIndex, int subItemIndex, void* pParam);
+static void RefreshSoundList();
 static void RefreshEditorUnitList(bool preserveSelection = true);
 static void DeleteSelectedConsistUnits(HWND hWnd);
 static void ClearClipboard(HWND hWnd);
@@ -211,6 +238,8 @@ BOOL g_bAutoSave = FALSE;
 std::wstring g_szConsistSearchQuery = L"";
 std::wstring g_szStockSearchQuery = L"";
 std::wstring g_szBasePath = L"";
+std::vector<ConsistReader::UnitInfo> g_LoadedConsistUnits;
+std::wstring g_szCurrentConsistFile;
 
 enum class UnitHealthStatus
 {
@@ -360,9 +389,9 @@ HWND g_hSplitterTopDeck = NULL; // Horizontal Splitter directly under 3D Live Un
 int g_wConsist = 600;            // Left Pane Total Width
 int g_hConsistSplit = 380;       // Top Deck (Consists List) Height
 int g_wCategorySplit = 130;      // Default width of Category Tree panel (smaller default)
-int g_hSection3Height = 220;     // Default height of Section 3 (3D Visual Consist View)
-int g_wUnitPreviewWidth = 480;   // Default width of 3D Live Unit Preview Card (matching screenshot)
-int g_hTopCardsHeight = 220;     // Default height of Top Cards (matching Train Details full height)
+int g_wUnitPreviewWidth = 600;   // Default width of 3D Live Unit Preview Card (expanded for clear stock preview)
+int g_hTopCardsHeight = 280;     // Default height of Top Cards (accommodating enlarged unit preview card)
+int g_hSection3Height = 220;     // Default height of Section 3 (Visual Consist View)
 HWND g_hRouteTree = NULL;         // Routes & Activities TreeView (Top Deck on Activity Tab)
 int g_ActiveTab = 0;
 
@@ -631,6 +660,24 @@ DragState g_DragState = DRAG_NONE;
 void ResetConsistEditorWorkspace(HWND hWnd);
 void PopulateRouteActivityTree();
 void PopulateConsistListFromCache();
+static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename);
+
+static void OpenFileInDefaultEditor(HWND hWnd, const std::wstring& filePath)
+{
+    if (filePath.empty()) return;
+    if (GetFileAttributesW(filePath.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        ShowModernMessageBox(hWnd, (L"File not found on disk:\r\n" + filePath).c_str(), L"Open File", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    HINSTANCE hInst = ShellExecuteW(NULL, L"open", filePath.c_str(), NULL, NULL, SW_SHOWNORMAL);
+    if ((INT_PTR)hInst <= 32)
+    {
+        // Fallback to notepad if no associated editor
+        ShellExecuteW(NULL, L"open", L"notepad.exe", (L"\"" + filePath + L"\"").c_str(), NULL, SW_SHOWNORMAL);
+    }
+}
 
 void SwitchActiveConsistTab(HWND hWnd, int newSel)
 {
@@ -641,9 +688,102 @@ void SwitchActiveConsistTab(HWND hWnd, int newSel)
         {
             CustomTitleBar_SetActiveTab(g_hCustomTitleBar, g_ActiveTab);
         }
+        CommandBar_SetTabMode(g_hCommandBar, g_ActiveTab);
 
-        if (g_ActiveTab == 1) // Activity Consists Tab
+        if (g_ActiveTab == 2) // Sound Editing Tab
         {
+            if (g_hRollingStockStudio)
+            {
+                RollingStockStudio_SetVisible(g_hRollingStockStudio, true);
+            }
+            if (g_hEditorPane)       ShowWindow(g_hEditorPane,       SW_HIDE);
+            if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg,  SW_HIDE);
+            if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,     SW_HIDE);
+            if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_HIDE);
+            if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_HIDE);
+            if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId,  SW_HIDE);
+            if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,   SW_HIDE);
+            if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_HIDE);
+            if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_HIDE);
+            if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
+            if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_HIDE);
+            if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_HIDE);
+            if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_HIDE);
+            if (g_hSectionMetrics)   ShowWindow(g_hSectionMetrics,   SW_HIDE);
+            if (g_hUnitPreviewCard)  ShowWindow(g_hUnitPreviewCard,  SW_HIDE);
+            if (g_hEditorUnitList)   ShowWindow(g_hEditorUnitList,   SW_HIDE);
+            if (g_hVisualConsistView) ShowWindow(g_hVisualConsistView, SW_HIDE);
+
+            g_ConsistList.Clear();
+            g_ConsistList.ClearColumns();
+            g_ConsistList.AddColumn(L"Name", 240, 0);
+            g_ConsistList.AddColumn(L"Units", 80, 0);
+            g_ConsistList.AddColumn(L"Status", 100, 0);
+            g_ConsistList.AddColumn(L"Modified", 140, 0);
+            PopulateConsistListFromCache();
+            SetWindowTextW(g_hConsistHeader, L"  Consists (Sound Studio)");
+            CommandBar_SetButtonText(g_hCommandBar, CMD_ACTION_SAVE_CONSISTS, L"Save Changes", 145);
+            int subTab = 0;
+            if (g_hRollingStockStudio && IsWindow(g_hRollingStockStudio))
+            {
+                subTab = SoundStudio_GetActiveSubTab(g_hRollingStockStudio);
+            }
+            CommandBar_SetButtonText(g_hCommandBar, CMD_ACTION_BATCH_SOUND, subTab == 1 ? L"SMS Mutator" : L"Sound Mutator", 145);
+
+            // Select a valid healthy consist for Sound Studio
+            int foundIdx = -1;
+            for (int r = 0; r < g_ConsistList.GetItemCount(); ++r)
+            {
+                if (g_ConsistList.GetCellText(r, 4) == g_szCurrentConsistFile)
+                {
+                    foundIdx = r;
+                    break;
+                }
+            }
+
+            if (foundIdx >= 0)
+            {
+                g_ConsistList.SetSelectedIndex(foundIdx, true);
+                if (!g_LoadedConsistUnits.empty() && g_hRollingStockStudio)
+                {
+                    std::wstring basePath = g_szBasePath;
+                    RollingStockStudio_SetConsist(g_hRollingStockStudio, g_szCurrentConsistFile, basePath, g_LoadedConsistUnits);
+                }
+            }
+            else if (g_ConsistList.GetItemCount() > 0)
+            {
+                // Current consist was broken (Missing Stock) or not present in filtered list; load first healthy consist
+                g_ConsistList.SetSelectedIndex(0, true);
+                std::wstring firstFile = g_ConsistList.GetCellText(0, 4);
+                LoadAndDisplayConsist(hWnd, firstFile);
+            }
+            else
+            {
+                if (g_hRollingStockStudio)
+                {
+                    std::wstring basePath = g_szBasePath;
+                    RollingStockStudio_SetConsist(g_hRollingStockStudio, L"", basePath, {});
+                }
+            }
+
+            g_StockDeckTab = STOCK_DECK_SOUND_SMS;
+            if (g_SoundCache.empty() && !g_szBasePath.empty())
+            {
+                g_hSoundScanThread = StartSoundScan(hWnd, g_szBasePath, false);
+            }
+            if (g_hSoundList && IsWindow(g_hSoundList))
+            {
+                g_SoundList.SetAllowTransferSource(subTab == 0);
+            }
+            RefreshSoundList();
+        }
+        else if (g_ActiveTab == 1) // Activity Consists Tab
+        {
+            g_StockDeckTab = STOCK_DECK_ROLLING_STOCK;
+            if (g_hRollingStockStudio)
+            {
+                RollingStockStudio_SetVisible(g_hRollingStockStudio, false);
+            }
             ResetConsistEditorWorkspace(hWnd);
             PopulateRouteActivityTree();
             g_ConsistList.Clear();
@@ -659,6 +799,12 @@ void SwitchActiveConsistTab(HWND hWnd, int newSel)
         }
         else // Main Consists Tab (Tab 0)
         {
+            g_StockDeckTab = STOCK_DECK_ROLLING_STOCK;
+            if (g_hRollingStockStudio)
+            {
+                RollingStockStudio_SetVisible(g_hRollingStockStudio, false);
+            }
+            std::wstring curFile = g_szCurrentConsistFile;
             ResetConsistEditorWorkspace(hWnd);
             g_ConsistList.Clear();
             g_ConsistList.ClearColumns();
@@ -674,6 +820,11 @@ void SwitchActiveConsistTab(HWND hWnd, int newSel)
             if (g_hEditTrainName)   SendMessage(g_hEditTrainName,   EM_SETREADONLY, FALSE, 0);
             if (g_hEditMaxVelocity) SendMessage(g_hEditMaxVelocity, EM_SETREADONLY, FALSE, 0);
             if (g_hEditPerfFactor)  SendMessage(g_hEditPerfFactor,  EM_SETREADONLY, FALSE, 0);
+
+            if (!curFile.empty())
+            {
+                LoadAndDisplayConsist(hWnd, curFile);
+            }
         }
 
         if (g_hEditFileName)    InvalidateRect(g_hEditFileName,    NULL, TRUE);
@@ -688,8 +839,6 @@ void SwitchActiveConsistTab(HWND hWnd, int newSel)
     }
 }
         // 0 = MAIN CONSISTS, 1 = ACTIVITY CONSISTS
-std::vector<ConsistReader::UnitInfo> g_LoadedConsistUnits;
-std::wstring g_szCurrentConsistFile;
 static bool g_bIsLoadingConsist = false;
 
 struct ConsistHistoryStep {
@@ -702,13 +851,21 @@ static std::vector<ConsistHistoryStep> g_RedoStack;
 struct ConsistSessionState {
     std::wstring fileName;
     ConsistReader::TrainConfig trainCfg;
+    ConsistReader::TrainConfig savedTrainCfg;
     std::vector<ConsistReader::UnitInfo> units;
+    std::vector<ConsistReader::UnitInfo> savedUnits;
     std::vector<int> selectedIndices;
     int scrollY = 0;
     bool isDirty = false;
     std::vector<ConsistHistoryStep> undoStack;
     std::vector<ConsistHistoryStep> redoStack;
 };
+
+struct ActivityUndoState {
+    std::vector<ConsistHistoryStep> undoStack;
+    std::vector<ConsistHistoryStep> redoStack;
+};
+static std::unordered_map<int, ActivityUndoState> g_ActivityUndoStacks;
 static std::unordered_map<std::wstring, ConsistSessionState> g_ConsistSessions;
 
 
@@ -801,7 +958,7 @@ extern "C" __declspec(dllexport) int TSCB_Run(HINSTANCE hInstance, LPWSTR lpCmdL
     g_hbrDarkBackground = CreateSolidBrush(UITheme::DarkBackground);
 
     LOG_INFO("===============================================================================");
-    LOG_INFO(" Train Sim Consist Builder v9.3.0 (Native Core Engine) - Session Initialized");
+    LOG_INFO(" Train Sim Consist Builder v" TSCB_VERSION_STR " (Native Core Engine) - Session Initialized");
     LOG_INFO("===============================================================================");
 
     INITCOMMONCONTROLSEX icex;
@@ -908,6 +1065,11 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
         return FALSE;
     }
 
+    HICON hIconBig = (HICON)GetClassLongPtrW(hWnd, GCLP_HICON);
+    HICON hIconSm = (HICON)GetClassLongPtrW(hWnd, GCLP_HICONSM);
+    if (hIconBig) SendMessageW(hWnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+    if (hIconSm)  SendMessageW(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSm);
+
     DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hWnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
@@ -942,7 +1104,7 @@ static DragState GetSplitterUnderMouse(int x, int y, int width, int height)
     int bottomY = paneY + g_hConsistSplit + 9;
     if (x >= 0 && x < g_wConsist && x >= (g_wCategorySplit - 6) && x <= (g_wCategorySplit + 15))
     {
-        if (y >= bottomY + 28)
+        if (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK && g_StockViewMode == StockViewMode::Single && y >= bottomY + 28)
         {
             return DRAG_SPLIT3;
         }
@@ -1097,6 +1259,7 @@ static void OnRouteActivitySelected(HWND hWnd, CustomTreeNode* pItem)
     {
         // Root route node selected: clear activity consist list and reset workspace
         g_CurrentActivityData = ActivityConsistReader::ActivityData();
+        g_ActivityUndoStacks.clear();
         g_CurrentActivityFilePath = L"";
         g_ConsistList.Clear();
         SetWindowTextW(g_hConsistHeader, L"  Activity Consists");
@@ -1226,6 +1389,10 @@ static void PopulateConsistListFromCache()
         if (!MatchModifiedFilter(item.ftLastWriteTime, g_ConsistList.GetActiveFilters(3)))
             continue;
 
+        // In Sound Studio (Tab 2), broken consists (Missing Stock / Missing Shape) are not listed or processed
+        if (g_ActiveTab == 2 && (statusStr == L"Missing Stock" || statusStr == L"Missing Shape" || statusStr == L"Broken"))
+            continue;
+
         std::wstring displayName = item.szName;
         if (itSess != g_ConsistSessions.end() && itSess->second.isDirty)
         {
@@ -1239,7 +1406,14 @@ static void PopulateConsistListFromCache()
     }
 
     wchar_t szHeader[128];
-    swprintf_s(szHeader, 128, L"  Consists Manager [ Total: %d • Broken: %d ]", totalConsists, brokenConsists);
+    if (g_ActiveTab == 2)
+    {
+        swprintf_s(szHeader, 128, L"  Consists (Sound Studio) [ Ready: %d ]", totalConsists);
+    }
+    else
+    {
+        swprintf_s(szHeader, 128, L"  Consists Manager [ Total: %d • Broken: %d ]", totalConsists, brokenConsists);
+    }
     SetWindowTextW(g_hConsistHeader, szHeader);
 
     int curSortCol = g_ConsistList.GetSortColumn();
@@ -1932,7 +2106,7 @@ static LRESULT CALLBACK ModernEditSubclassProc(
 
     case WM_SETCURSOR:
     {
-        if (uIdSubclass >= 40 && uIdSubclass <= 42)
+        if ((uIdSubclass >= 40 && uIdSubclass <= 42) || uIdSubclass == 45)
         {
             POINT pt;
             GetCursorPos(&pt);
@@ -1958,7 +2132,7 @@ static LRESULT CALLBACK ModernEditSubclassProc(
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK:
     {
-        if (uIdSubclass >= 40 && uIdSubclass <= 42)
+        if ((uIdSubclass >= 40 && uIdSubclass <= 42) || uIdSubclass == 45)
         {
             POINT pt = { (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) };
             RECT rc;
@@ -1969,11 +2143,19 @@ static LRESULT CALLBACK ModernEditSubclassProc(
                 SetWindowTextW(hWnd, L"");
                 InvalidateRect(hWnd, NULL, TRUE);
                 UpdateWindow(hWnd);
-                int paneIdx = (int)(uIdSubclass - 40);
-                if (paneIdx >= 0 && paneIdx < 3)
+                if (uIdSubclass == 45)
                 {
-                    g_szPaneSearchQuery[paneIdx] = L"";
-                    PopulateAssetGridPane(paneIdx);
+                    g_szSoundSearchQuery = L"";
+                    RefreshSoundList();
+                }
+                else
+                {
+                    int paneIdx = (int)(uIdSubclass - 40);
+                    if (paneIdx >= 0 && paneIdx < 3)
+                    {
+                        g_szPaneSearchQuery[paneIdx] = L"";
+                        PopulateAssetGridPane(paneIdx);
+                    }
                 }
                 SetFocus(hWnd);
                 return 0;
@@ -2001,7 +2183,7 @@ static LRESULT CALLBACK ModernEditSubclassProc(
         break;
 
     case WM_GETDLGCODE:
-        if (uIdSubclass >= 40 && uIdSubclass <= 42)
+        if ((uIdSubclass >= 40 && uIdSubclass <= 42) || uIdSubclass == 45)
         {
             if (lParam && ((MSG*)lParam)->message == WM_KEYDOWN && ((MSG*)lParam)->wParam == VK_RETURN)
                 return DLGC_WANTALLKEYS;
@@ -2010,7 +2192,7 @@ static LRESULT CALLBACK ModernEditSubclassProc(
 
     case WM_CHAR:
     {
-        if (uIdSubclass >= 40 && uIdSubclass <= 42)
+        if ((uIdSubclass >= 40 && uIdSubclass <= 42) || uIdSubclass == 45)
         {
             if (wParam == VK_RETURN)
                 return 0;
@@ -2106,7 +2288,7 @@ static LRESULT CALLBACK ModernEditSubclassProc(
     }
 
     case WM_KEYDOWN:
-        if (uIdSubclass >= 40 && uIdSubclass <= 42)
+        if ((uIdSubclass >= 40 && uIdSubclass <= 42) || uIdSubclass == 45)
         {
             if (wParam == VK_RETURN)
                 return 0;
@@ -2115,11 +2297,19 @@ static LRESULT CALLBACK ModernEditSubclassProc(
                 SetWindowTextW(hWnd, L"");
                 InvalidateRect(hWnd, NULL, TRUE);
                 UpdateWindow(hWnd);
-                int paneIdx = (int)(uIdSubclass - 40);
-                if (paneIdx >= 0 && paneIdx < 3)
+                if (uIdSubclass == 45)
                 {
-                    g_szPaneSearchQuery[paneIdx] = L"";
-                    PopulateAssetGridPane(paneIdx);
+                    g_szSoundSearchQuery = L"";
+                    RefreshSoundList();
+                }
+                else
+                {
+                    int paneIdx = (int)(uIdSubclass - 40);
+                    if (paneIdx >= 0 && paneIdx < 3)
+                    {
+                        g_szPaneSearchQuery[paneIdx] = L"";
+                        PopulateAssetGridPane(paneIdx);
+                    }
                 }
                 return 0;
             }
@@ -2128,7 +2318,7 @@ static LRESULT CALLBACK ModernEditSubclassProc(
 
     case WM_MOUSEMOVE:
     {
-        if (uIdSubclass >= 40 && uIdSubclass <= 42 && GetWindowTextLengthW(hWnd) > 0)
+        if (((uIdSubclass >= 40 && uIdSubclass <= 42) || uIdSubclass == 45) && GetWindowTextLengthW(hWnd) > 0)
         {
             InvalidateRect(hWnd, NULL, FALSE);
         }
@@ -2212,7 +2402,7 @@ static LRESULT CALLBACK ModernEditSubclassProc(
                 DeleteObject(hRgnClip);
 
                 // 4. For search controls: draw placeholder when empty and unfocused, plus right icon (clear '✕' \xE711 or search glass \xE721)
-                if (uIdSubclass >= 40 && uIdSubclass <= 42)
+                if ((uIdSubclass >= 40 && uIdSubclass <= 42) || uIdSubclass == 45)
                 {
                     if (!focused && !hasText)
                     {
@@ -2224,7 +2414,8 @@ static LRESULT CALLBACK ModernEditSubclassProc(
                         HFONT hFont = (HFONT)SendMessage(hWnd, WM_GETFONT, 0, 0);
                         if (!hFont) hFont = hUIFont;
                         HGDIOBJ hOldF = SelectObject(hMemDC, hFont ? hFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
-                        DrawTextW(hMemDC, L"Search...", -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        const wchar_t* pszPlaceholder = (uIdSubclass == 45) ? L"Search sound files (SMS) by name or folder..." : L"Search...";
+                        DrawTextW(hMemDC, pszPlaceholder, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
                         SelectObject(hMemDC, hOldF);
                     }
 
@@ -2858,6 +3049,35 @@ static LRESULT CALLBACK PaneCatBtnSubclassProc(
 }
 
 static int s_hoverStockHeaderBtn = -1; // 0 = Single, 1 = Dual, 2 = Triple
+static int s_hoverStockDeckTab = -1;   // 0 = Rolling Stock, 1 = Sound SMS
+
+static RECT GetStockDeckTabRect(const RECT& rcClient, int tabIndex)
+{
+    const int TAB_H = 22;
+    const int TAB_Y = (rcClient.bottom - TAB_H) / 2;
+    if (tabIndex == 0)
+    {
+        RECT rc = { 8, TAB_Y, 8 + 115, TAB_Y + TAB_H };
+        return rc;
+    }
+    else
+    {
+        RECT rc = { 8 + 115 + 6, TAB_Y, 8 + 115 + 6 + 140, TAB_Y + TAB_H };
+        return rc;
+    }
+}
+
+static int HitTestStockDeckTab(HWND hWnd, POINT pt)
+{
+    RECT rcClient;
+    GetClientRect(hWnd, &rcClient);
+    for (int t = 0; t < 2; ++t)
+    {
+        RECT rcTab = GetStockDeckTabRect(rcClient, t);
+        if (PtInRect(&rcTab, pt)) return t;
+    }
+    return -1;
+}
 
 static RECT GetStockModeBtnRect(const RECT& rcClient, int modeIndex)
 {
@@ -2904,8 +3124,14 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         RECT rcClient;
         GetClientRect(hWnd, &rcClient);
 
-        // Check if cursor is over one of the mode pill buttons
-        if (HitTestStockModeBtn(hWnd, ptClient) >= 0)
+        // Check if cursor is over one of the bottom deck tabs
+        if (HitTestStockDeckTab(hWnd, ptClient) >= 0)
+        {
+            return HTCLIENT;
+        }
+
+        // Check if cursor is over one of the mode pill buttons (only active in Rolling Stock mode)
+        if (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK && HitTestStockModeBtn(hWnd, ptClient) >= 0)
         {
             return HTCLIENT;
         }
@@ -2923,7 +3149,8 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         POINT pt;
         GetCursorPos(&pt);
         ScreenToClient(hWnd, &pt);
-        if (HitTestStockModeBtn(hWnd, pt) >= 0)
+        if (HitTestStockDeckTab(hWnd, pt) >= 0 ||
+            (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK && HitTestStockModeBtn(hWnd, pt) >= 0))
         {
             SetCursor(LoadCursor(NULL, IDC_HAND));
             return TRUE;
@@ -2934,10 +3161,13 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
     case WM_MOUSEMOVE:
     {
         POINT pt = { (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) };
-        int hit = HitTestStockModeBtn(hWnd, pt);
-        if (hit != s_hoverStockHeaderBtn)
+        int tabHit = HitTestStockDeckTab(hWnd, pt);
+        int modeHit = (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK) ? HitTestStockModeBtn(hWnd, pt) : -1;
+
+        if (tabHit != s_hoverStockDeckTab || modeHit != s_hoverStockHeaderBtn)
         {
-            s_hoverStockHeaderBtn = hit;
+            s_hoverStockDeckTab = tabHit;
+            s_hoverStockHeaderBtn = modeHit;
             TRACKMOUSEEVENT tme = { sizeof(TRACKMOUSEEVENT), TME_LEAVE, hWnd, 0 };
             TrackMouseEvent(&tme);
             InvalidateRect(hWnd, NULL, FALSE);
@@ -2947,9 +3177,10 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
 
     case WM_MOUSELEAVE:
     {
-        if (s_hoverStockHeaderBtn != -1)
+        if (s_hoverStockHeaderBtn != -1 || s_hoverStockDeckTab != -1)
         {
             s_hoverStockHeaderBtn = -1;
+            s_hoverStockDeckTab = -1;
             InvalidateRect(hWnd, NULL, FALSE);
         }
         break;
@@ -2960,46 +3191,73 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         HWND hParent = GetParent(hWnd);
         SetActivePane(PANE_STOCK, hParent);
         POINT pt = { (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) };
-        int hit = HitTestStockModeBtn(hWnd, pt);
-        if (hit >= 0)
+
+        int tabHit = HitTestStockDeckTab(hWnd, pt);
+        if (tabHit >= 0)
         {
-            StockViewMode newMode = (StockViewMode)hit;
-            if (newMode != g_StockViewMode)
+            if (tabHit != (int)g_StockDeckTab)
             {
-                g_StockViewMode = newMode;
+                g_StockDeckTab = (StockDeckTab)tabHit;
+                if (g_StockDeckTab == STOCK_DECK_SOUND_SMS)
+                {
+                    if (g_SoundCache.empty() && !g_szBasePath.empty())
+                    {
+                        StartSoundScan(hParent, g_szBasePath, false);
+                    }
+                    RefreshSoundList();
+                }
+                InvalidateRect(hWnd, NULL, TRUE);
                 if (hParent)
                 {
-                    // Populate active pane(s)
-                    if (g_StockViewMode == StockViewMode::Single)
-                    {
-                        CustomTreeNode* hSel = g_CategoryTreeView.GetSelectedNode();
-                        PopulateAssetGridPane(0, hSel);
-                    }
-                    else if (g_StockViewMode == StockViewMode::Dual)
-                    {
-                        PopulateAssetGridPane(0);
-                        PopulateAssetGridPane(1);
-                    }
-                    else if (g_StockViewMode == StockViewMode::Triple)
-                    {
-                        PopulateAssetGridPane(0);
-                        PopulateAssetGridPane(1);
-                        PopulateAssetGridPane(2);
-                    }
-
                     RECT rcParent;
                     GetClientRect(hParent, &rcParent);
                     SendMessage(hParent, WM_SIZE, 0, MAKELPARAM(rcParent.right, rcParent.bottom));
                     InvalidateRect(hParent, NULL, TRUE);
                 }
-                InvalidateRect(hWnd, NULL, TRUE);
             }
             return 0;
         }
-        else
+
+        if (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK)
         {
-            if (g_hAssetList) SetFocus(g_hAssetList);
+            int hit = HitTestStockModeBtn(hWnd, pt);
+            if (hit >= 0)
+            {
+                StockViewMode newMode = (StockViewMode)hit;
+                if (newMode != g_StockViewMode)
+                {
+                    g_StockViewMode = newMode;
+                    if (hParent)
+                    {
+                        if (g_StockViewMode == StockViewMode::Single)
+                        {
+                            CustomTreeNode* hSel = g_CategoryTreeView.GetSelectedNode();
+                            PopulateAssetGridPane(0, hSel);
+                        }
+                        else if (g_StockViewMode == StockViewMode::Dual)
+                        {
+                            PopulateAssetGridPane(0);
+                            PopulateAssetGridPane(1);
+                        }
+                        else if (g_StockViewMode == StockViewMode::Triple)
+                        {
+                            PopulateAssetGridPane(0);
+                            PopulateAssetGridPane(1);
+                            PopulateAssetGridPane(2);
+                        }
+
+                        RECT rcParent;
+                        GetClientRect(hParent, &rcParent);
+                        SendMessage(hParent, WM_SIZE, 0, MAKELPARAM(rcParent.right, rcParent.bottom));
+                        InvalidateRect(hParent, NULL, TRUE);
+                    }
+                    InvalidateRect(hWnd, NULL, TRUE);
+                }
+                return 0;
+            }
         }
+
+        if (g_hAssetList) SetFocus(g_hAssetList);
         break;
     }
 
@@ -3034,31 +3292,20 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         FillRect(hMemDC, &rc, hbr);
         DeleteObject(hbr);
 
-        // Header Title text
-        wchar_t szText[256] = { 0 };
-        GetWindowTextW(hWnd, szText, 256);
-
         HFONT hFont = (HFONT)SendMessage(hWnd, WM_GETFONT, 0, 0);
         if (!hFont) hFont = hUIFont;
         HFONT hOldFont = NULL;
         if (hFont) hOldFont = (HFONT)SelectObject(hMemDC, hFont);
 
         SetBkMode(hMemDC, TRANSPARENT);
-        SetTextColor(hMemDC, isActive ? RGB(255, 255, 255) : UITheme::TextPrimary);
 
-        // Compute title text rect ending before the mode buttons
-        RECT rcBtnSingle = GetStockModeBtnRect(rc, 0);
-        RECT rcText = { 10, 0, rcBtnSingle.left - 10, rc.bottom };
-        DrawTextW(hMemDC, szText, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-        // Draw 3 Mode Switch Pill Buttons: [ Single ] [ Dual ] [ Triple ]
-        const wchar_t* btnLabels[3] = { L"Single", L"Dual", L"Triple" };
-
-        for (int m = 0; m < 3; ++m)
+        // 1. Draw Stock Deck Tabs on the left: [ Rolling Stock ] and [ Sound Files (.sms) ]
+        const wchar_t* deckTabLabels[2] = { L"Rolling Stock", L"Sound Files (.sms)" };
+        for (int t = 0; t < 2; ++t)
         {
-            RECT rcBtn = GetStockModeBtnRect(rc, m);
-            bool isCurrent = (g_StockViewMode == (StockViewMode)m);
-            bool isHovered = (s_hoverStockHeaderBtn == m);
+            RECT rcTab = GetStockDeckTabRect(rc, t);
+            bool isCurrent = (g_StockDeckTab == (StockDeckTab)t);
+            bool isHovered = (s_hoverStockDeckTab == t);
 
             COLORREF bgPill = isCurrent ? RGB(0, 120, 215) : (isHovered ? RGB(60, 60, 68) : RGB(40, 40, 46));
             COLORREF borderPill = isCurrent ? RGB(60, 160, 255) : (isHovered ? RGB(85, 85, 95) : RGB(58, 58, 65));
@@ -3069,7 +3316,7 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             HBRUSH hOldBr = (HBRUSH)SelectObject(hMemDC, hbrPill);
             HPEN hOldP = (HPEN)SelectObject(hMemDC, hPenPill);
 
-            RoundRect(hMemDC, rcBtn.left, rcBtn.top, rcBtn.right, rcBtn.bottom, 6, 6);
+            RoundRect(hMemDC, rcTab.left, rcTab.top, rcTab.right, rcTab.bottom, 6, 6);
 
             SelectObject(hMemDC, hOldP);
             SelectObject(hMemDC, hOldBr);
@@ -3077,7 +3324,74 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
             DeleteObject(hbrPill);
 
             SetTextColor(hMemDC, textPill);
-            DrawTextW(hMemDC, btnLabels[m], -1, &rcBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(hMemDC, deckTabLabels[t], -1, &rcTab, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+
+        // 2. Summary text next to tabs
+        int summaryStartX = 8 + 115 + 6 + 140 + 12;
+        RECT rcBtnSingle = GetStockModeBtnRect(rc, 0);
+        int summaryEndX = (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK) ? (rcBtnSingle.left - 10) : (rc.right - 10);
+        RECT rcSummary = { summaryStartX, 0, summaryEndX, rc.bottom };
+
+        SetTextColor(hMemDC, isActive ? RGB(255, 255, 255) : UITheme::TextMuted);
+
+        wchar_t szSummary[256] = { 0 };
+        if (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK)
+        {
+            EnterCriticalSection(&g_StockCacheCS);
+            int totalItems = (int)g_StockCache.size();
+            int engineCount = 0;
+            int wagonCount = 0;
+            for (const auto& item : g_StockCache)
+            {
+                if (item.szExtension == L".eng") engineCount++;
+                else if (item.szExtension == L".wag") wagonCount++;
+            }
+            LeaveCriticalSection(&g_StockCacheCS);
+            swprintf_s(szSummary, 256, L"[ Total: %d \x00B7 Engines: %d \x00B7 Wagons: %d ]", totalItems, engineCount, wagonCount);
+        }
+        else
+        {
+            EnterCriticalSection(&g_SoundCacheCS);
+            size_t soundCount = g_SoundCache.size();
+            size_t filteredCount = g_FilteredSoundIndices.size();
+            LeaveCriticalSection(&g_SoundCacheCS);
+            if (soundCount > 0)
+                swprintf_s(szSummary, 256, L"[ Discovered: %zu .sms files in TRAINSET | Listed: %zu ]", soundCount, filteredCount);
+            else
+                swprintf_s(szSummary, 256, L"[ Scanning .sms files in TRAINSET... ]");
+        }
+        DrawTextW(hMemDC, szSummary, -1, &rcSummary, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+        // 3. Draw Mode Switch Pill Buttons ONLY if in Rolling Stock mode
+        if (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK)
+        {
+            const wchar_t* btnLabels[3] = { L"Single", L"Dual", L"Triple" };
+            for (int m = 0; m < 3; ++m)
+            {
+                RECT rcBtn = GetStockModeBtnRect(rc, m);
+                bool isCurrent = (g_StockViewMode == (StockViewMode)m);
+                bool isHovered = (s_hoverStockHeaderBtn == m);
+
+                COLORREF bgPill = isCurrent ? RGB(0, 120, 215) : (isHovered ? RGB(60, 60, 68) : RGB(40, 40, 46));
+                COLORREF borderPill = isCurrent ? RGB(60, 160, 255) : (isHovered ? RGB(85, 85, 95) : RGB(58, 58, 65));
+                COLORREF textPill = isCurrent ? RGB(255, 255, 255) : (isHovered ? RGB(240, 240, 240) : RGB(180, 180, 185));
+
+                HBRUSH hbrPill = CreateSolidBrush(bgPill);
+                HPEN hPenPill = CreatePen(PS_SOLID, 1, borderPill);
+                HBRUSH hOldBr = (HBRUSH)SelectObject(hMemDC, hbrPill);
+                HPEN hOldP = (HPEN)SelectObject(hMemDC, hPenPill);
+
+                RoundRect(hMemDC, rcBtn.left, rcBtn.top, rcBtn.right, rcBtn.bottom, 6, 6);
+
+                SelectObject(hMemDC, hOldP);
+                SelectObject(hMemDC, hOldBr);
+                DeleteObject(hPenPill);
+                DeleteObject(hbrPill);
+
+                SetTextColor(hMemDC, textPill);
+                DrawTextW(hMemDC, btnLabels[m], -1, &rcBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
         }
 
         if (hOldFont) SelectObject(hMemDC, hOldFont);
@@ -3312,6 +3626,75 @@ void PopulateAssetGrid(CustomTreeNode* hSelected = nullptr)
         PopulateAssetGridPane(0);
         PopulateAssetGridPane(1);
         PopulateAssetGridPane(2);
+    }
+}
+
+std::wstring SoundListGetCellText(int itemIndex, int subItemIndex, void* pParam)
+{
+    std::wstring text = L"";
+    EnterCriticalSection(&g_SoundCacheCS);
+    if (itemIndex >= 0 && itemIndex < (int)g_FilteredSoundIndices.size())
+    {
+        size_t globalIdx = g_FilteredSoundIndices[itemIndex];
+        if (globalIdx < g_SoundCache.size())
+        {
+            const ScannedSoundItem& item = g_SoundCache[globalIdx];
+            if (subItemIndex == 0) text = item.szFileName;
+            else if (subItemIndex == 1) text = item.szFolder;
+            else if (subItemIndex == 2) text = item.szRelativePath;
+        }
+    }
+    LeaveCriticalSection(&g_SoundCacheCS);
+    return text;
+}
+
+static void RefreshSoundList()
+{
+    InitSoundScanner();
+    EnterCriticalSection(&g_SoundCacheCS);
+    g_FilteredSoundIndices.clear();
+
+    for (size_t i = 0; i < g_SoundCache.size(); ++i)
+    {
+        const auto& item = g_SoundCache[i];
+        if (!g_szSoundSearchQuery.empty())
+        {
+            if (!StringContainsIgnoreCase(item.szFileName, g_szSoundSearchQuery) &&
+                !StringContainsIgnoreCase(item.szFolder, g_szSoundSearchQuery) &&
+                !StringContainsIgnoreCase(item.szRelativePath, g_szSoundSearchQuery))
+            {
+                continue;
+            }
+        }
+        g_FilteredSoundIndices.push_back(i);
+    }
+    LeaveCriticalSection(&g_SoundCacheCS);
+
+    int sortCol = g_SoundList.GetSortColumn();
+    if (sortCol >= 0)
+    {
+        bool ascending = g_SoundList.IsSortAscending();
+        EnterCriticalSection(&g_SoundCacheCS);
+        std::sort(g_FilteredSoundIndices.begin(), g_FilteredSoundIndices.end(), [sortCol, ascending](size_t a, size_t b) {
+            const auto& itemA = g_SoundCache[a];
+            const auto& itemB = g_SoundCache[b];
+            int cmp = 0;
+            if (sortCol == 0) cmp = _wcsicmp(itemA.szFileName.c_str(), itemB.szFileName.c_str());
+            else if (sortCol == 1) cmp = _wcsicmp(itemA.szFolder.c_str(), itemB.szFolder.c_str());
+            else if (sortCol == 2) cmp = _wcsicmp(itemA.szRelativePath.c_str(), itemB.szRelativePath.c_str());
+            if (cmp == 0) cmp = _wcsicmp(itemA.szFileName.c_str(), itemB.szFileName.c_str());
+            return ascending ? (cmp < 0) : (cmp > 0);
+        });
+        LeaveCriticalSection(&g_SoundCacheCS);
+    }
+
+    g_SoundList.SetItemCount((int)g_FilteredSoundIndices.size());
+    g_SoundList.ClearSelection();
+    g_SoundList.Invalidate();
+
+    if (g_hStockHeader)
+    {
+        InvalidateRect(g_hStockHeader, NULL, FALSE);
     }
 }
 
@@ -3843,6 +4226,15 @@ static void GetActiveTargetConsistsAndUnits(std::vector<std::wstring>& outConsis
             std::wstring fullPath = EnsureConsistFilePath(g_szBasePath, g_szCurrentConsistFile);
             if (!fullPath.empty()) outConsists.push_back(fullPath);
         }
+        if (outConsists.empty() && g_ConsistList.GetItemCount() > 0)
+        {
+            std::wstring fname = g_ConsistList.GetCellText(0, 4);
+            if (!fname.empty())
+            {
+                std::wstring fullPath = EnsureConsistFilePath(g_szBasePath, fname);
+                if (!fullPath.empty()) outConsists.push_back(fullPath);
+            }
+        }
     }
     outUnits = GetSelectedConsistUnitIndices();
 }
@@ -3855,6 +4247,122 @@ static void SyncPoolMutatorSelectionIfOpen()
         std::vector<int> selUnits;
         GetActiveTargetConsistsAndUnits(selConsists, selUnits);
         PoolMutatorDlg_UpdateSelection(selConsists, selUnits);
+    }
+}
+
+static void SyncBatchSoundMutatorSelectionIfOpen()
+{
+    if (BatchSoundMutatorDlg_IsOpen())
+    {
+        std::vector<std::wstring> selConsists;
+        std::vector<int> selUnits;
+        GetActiveTargetConsistsAndUnits(selConsists, selUnits);
+        BatchSoundMutatorDlg_UpdateSelection(selConsists);
+    }
+}
+
+static void GatherConsistSmsFiles(
+    std::vector<SmsCategorizedTargetInput>& outEngineSms,
+    std::vector<SmsCategorizedTargetInput>& outWagonSms
+)
+{
+    outEngineSms.clear();
+    outWagonSms.clear();
+
+    std::wstring bp = g_szBasePath;
+    if (!bp.empty() && bp.back() != L'\\') bp += L'\\';
+
+    std::vector<std::wstring> selConsists;
+    std::vector<int> selUnits;
+    GetActiveTargetConsistsAndUnits(selConsists, selUnits);
+
+    auto processUnits = [&](const std::vector<ConsistReader::UnitInfo>& units, const std::wstring& consistName) {
+        for (int idx = 0; idx < (int)units.size(); ++idx)
+        {
+            const auto& u = units[idx];
+            std::wstring fullStockFolder = bp + L"TRAINS\\TRAINSET\\" + u.parentDir;
+            std::wstring fullPath = fullStockFolder + L"\\" + u.uid + (u.isEngine ? L".eng" : L".wag");
+            RSSUnitSoundInfo info;
+            if (SoundStudio_ParseUnitSound(fullPath, fullStockFolder, bp, info))
+            {
+                auto addS = [&](const RSSSoundEntry& s, const std::wstring& slotName) {
+                    if (s.existsOnDisk && !s.fullDiskPath.empty())
+                    {
+                        SmsCategorizedTargetInput item;
+                        item.fullPath = s.fullDiskPath;
+                        item.usage.consistName = consistName;
+                        item.usage.unitUid = u.uid;
+                        item.usage.unitIndex = idx + 1; // 1-based position in consist
+                        item.usage.isEngine = u.isEngine;
+                        item.usage.soundSlot = slotName;
+
+                        if (u.isEngine) outEngineSms.push_back(item);
+                        else outWagonSms.push_back(item);
+                    }
+                };
+
+                for (const auto& s : info.wagonSounds)
+                {
+                    addS(s, u.isEngine ? L"Wagon/Tender Sound" : L"Wagon Sound");
+                }
+                for (const auto& s : info.engineSounds)
+                {
+                    addS(s, L"Engine Sound");
+                }
+                for (const auto& s : info.orts3dCabSounds)
+                {
+                    addS(s, L"Cab Sound");
+                }
+                for (const auto& s : info.insideSounds)
+                {
+                    addS(s, L"Interior Sound");
+                }
+            }
+        }
+    };
+
+    if (!selConsists.empty())
+    {
+        for (const auto& conPath : selConsists)
+        {
+            if (conPath.rfind(L"ACTIVITY:", 0) == 0)
+            {
+                try {
+                    int cIdx = std::stoi(conPath.substr(9));
+                    if (cIdx >= 0 && cIdx < (int)g_CurrentActivityData.consists.size())
+                    {
+                        std::wstring cName = L"Activity Consist #" + std::to_wstring(cIdx + 1);
+                        processUnits(g_CurrentActivityData.consists[cIdx].units, cName);
+                    }
+                } catch (...) {}
+            }
+            else
+            {
+                try {
+                    auto cData = ConsistReader::LoadConsist(conPath);
+                    size_t ls = conPath.find_last_of(L"\\/");
+                    std::wstring cName = (ls != std::wstring::npos) ? conPath.substr(ls + 1) : conPath;
+                    processUnits(cData.units, cName);
+                } catch (...) {}
+            }
+        }
+    }
+    else if (!g_LoadedConsistUnits.empty())
+    {
+        std::wstring cName = g_szCurrentConsistFile;
+        size_t ls = cName.find_last_of(L"\\/");
+        if (ls != std::wstring::npos) cName = cName.substr(ls + 1);
+        processUnits(g_LoadedConsistUnits, cName);
+    }
+}
+
+static void SyncSmsStreamMutatorSelectionIfOpen()
+{
+    if (SmsStreamMutatorDlg_IsOpen())
+    {
+        std::vector<SmsCategorizedTargetInput> engFiles, wagFiles;
+        GatherConsistSmsFiles(engFiles, wagFiles);
+        SmsStreamMutatorDlg_SetCategorizedTargetsWithUsage(engFiles, wagFiles);
     }
 }
 
@@ -3898,6 +4406,12 @@ static void UpdateUnitPreviewFromSelected()
 
     if (g_ActivePane == PANE_STOCK)
     {
+        if (g_StockDeckTab == STOCK_DECK_SOUND_SMS)
+        {
+            UnitPreviewCard_Clear(g_hUnitPreviewCard);
+            return;
+        }
+
         // 1. Stock Manager active: Inspect first selected item (anchor) in active Asset List (Pane 1, 2, or 3)
         CustomListControl* pActiveAssetList = &g_AssetList;
         if (g_StockViewMode == StockViewMode::Dual || g_StockViewMode == StockViewMode::Triple)
@@ -4192,14 +4706,58 @@ static void UpdateConsistManagerRow(const std::wstring& filename)
     }
 }
 
+static void UpdateActivityConsistRow(int consistIndex)
+{
+    if (consistIndex < 0 || consistIndex >= (int)g_CurrentActivityData.consists.size()) return;
+
+    const auto& con = g_CurrentActivityData.consists[consistIndex];
+    std::wstring consistKey = g_CurrentActivityFilePath + L"#" + con.id;
+
+    for (int r = 0; r < g_ConsistList.GetItemCount(); ++r)
+    {
+        std::wstring rIdxStr = g_ConsistList.GetCellText(r, 3);
+        if (_wtoi(rIdxStr.c_str()) == consistIndex)
+        {
+            std::wstring curName = g_ConsistList.GetCellText(r, 0);
+            if (curName.rfind(L"● ", 0) == 0)
+            {
+                curName = curName.substr(2);
+            }
+
+            if (con.isDirty)
+            {
+                g_ConsistList.SetCellText(r, 0, L"● " + curName);
+            }
+            else
+            {
+                g_ConsistList.SetCellText(r, 0, curName);
+            }
+
+            g_ConsistList.SetCellText(r, 1, std::to_wstring(con.units.size()));
+            std::wstring statusStr = EvaluateAndUpdateConsistStatus(consistKey, con.units, !con.isDirty);
+            g_ConsistList.SetCellText(r, 2, statusStr);
+            g_ConsistList.Invalidate();
+            break;
+        }
+    }
+}
+
 static void SaveCurrentConsistSessionState()
 {
     if (g_ActiveTab == 1)
     {
         if (g_CurrentActivityConsistIndex >= 0 && g_CurrentActivityConsistIndex < (int)g_CurrentActivityData.consists.size())
         {
-            g_CurrentActivityData.consists[g_CurrentActivityConsistIndex].units = g_LoadedConsistUnits;
-            g_CurrentActivityData.consists[g_CurrentActivityConsistIndex].totalUnits = (int)g_LoadedConsistUnits.size();
+            auto& con = g_CurrentActivityData.consists[g_CurrentActivityConsistIndex];
+            con.units = g_LoadedConsistUnits;
+            con.totalUnits = (int)g_LoadedConsistUnits.size();
+            g_ActivityUndoStacks[g_CurrentActivityConsistIndex].undoStack = g_UndoStack;
+            g_ActivityUndoStacks[g_CurrentActivityConsistIndex].redoStack = g_RedoStack;
+            if (!g_bAutoSave)
+            {
+                con.isDirty = (con.units != con.savedUnits);
+                UpdateActivityConsistRow(g_CurrentActivityConsistIndex);
+            }
         }
         return;
     }
@@ -4227,6 +4785,12 @@ static void SaveCurrentConsistSessionState()
     session.trainCfg.name = szName;
     session.trainCfg.maxVelocity = _wtof(szVelocity);
     session.trainCfg.perfFactor = _wtof(szPerf);
+
+    if (!g_bAutoSave)
+    {
+        session.isDirty = (session.units != session.savedUnits || session.trainCfg != session.savedTrainCfg);
+        UpdateConsistManagerRow(g_szCurrentConsistFile);
+    }
 }
 
 static bool SaveConsistSessionToDisk(HWND hWnd, const std::wstring& filename)
@@ -4253,6 +4817,8 @@ static bool SaveConsistSessionToDisk(HWND hWnd, const std::wstring& filename)
     );
     if (success)
     {
+        it->second.savedUnits = it->second.units;
+        it->second.savedTrainCfg = it->second.trainCfg;
         it->second.isDirty = false;
         UpdateConsistManagerRow(filename);
         LOG_INFO("Saved consist '%ls' to disk (%zu units).", filename.c_str(), it->second.units.size());
@@ -4506,6 +5072,10 @@ bool ApplyPoolMutationToSessions(
                         outResult.errorMessage = err;
                     }
                 }
+                else if (bcon.actionExecutionMode == 2) // Purge / Remove Selected Units
+                {
+                    okApply = PoolMutator::PurgeUnitsVector(con.units, bcon.brokenUnits, err, repCount);
+                }
                 else // In-Place Unit Replacement
                 {
                     okApply = PoolMutator::RepairUnitsVector(con.units, bcon.brokenUnits, options, err, repCount);
@@ -4513,7 +5083,7 @@ bool ApplyPoolMutationToSessions(
 
                 if (okApply)
                 {
-                    con.isDirty = true;
+                    con.isDirty = (con.units != con.savedUnits);
                     con.totalUnits = (int)con.units.size();
                     outResult.processedCount++;
                     outResult.repairedUnitsCount += repCount;
@@ -4545,23 +5115,7 @@ bool ApplyPoolMutationToSessions(
                         }
                     }
 
-                    for (int r = 0; r < g_ConsistList.GetItemCount(); ++r)
-                    {
-                        std::wstring rIdxStr = g_ConsistList.GetCellText(r, 3);
-                        if (_wtoi(rIdxStr.c_str()) == cIdx)
-                        {
-                            std::wstring curName = g_ConsistList.GetCellText(r, 0);
-                            if (curName.rfind(L"● ", 0) != 0)
-                            {
-                                g_ConsistList.SetCellText(r, 0, L"● " + curName);
-                            }
-                            g_ConsistList.SetCellText(r, 1, std::to_wstring(con.totalUnits));
-                            std::wstring statusStr = EvaluateAndUpdateConsistStatus(consistKey, con.units, !con.isDirty);
-                            g_ConsistList.SetCellText(r, 2, statusStr);
-                            g_ConsistList.Invalidate();
-                            break;
-                        }
-                    }
+                    UpdateActivityConsistRow(cIdx);
                 }
             }
             else
@@ -4578,7 +5132,9 @@ bool ApplyPoolMutationToSessions(
                         auto& sess = g_ConsistSessions[filename];
                         sess.fileName = filename;
                         sess.trainCfg = data.trainCfg;
+                        sess.savedTrainCfg = data.trainCfg;
                         sess.units = data.units;
+                        sess.savedUnits = data.units;
                         sess.isDirty = false;
                     } catch (...) {
                         continue;
@@ -4620,6 +5176,10 @@ bool ApplyPoolMutationToSessions(
                         outResult.errorMessage = err;
                     }
                 }
+                else if (bcon.actionExecutionMode == 2) // Purge / Remove Selected Units
+                {
+                    okApply = PoolMutator::PurgeUnitsVector(sess.units, bcon.brokenUnits, err, repCount);
+                }
                 else // In-Place Unit Replacement
                 {
                     okApply = PoolMutator::RepairUnitsVector(sess.units, bcon.brokenUnits, options, err, repCount);
@@ -4627,7 +5187,7 @@ bool ApplyPoolMutationToSessions(
 
                 if (okApply)
                 {
-                    sess.isDirty = true;
+                    sess.isDirty = (sess.units != sess.savedUnits || sess.trainCfg != sess.savedTrainCfg);
                     outResult.processedCount++;
                     outResult.repairedUnitsCount += repCount;
                     outResult.affectedFiles.push_back(path);
@@ -4759,7 +5319,7 @@ bool ApplyPoolMutationToSessions(
 
             if (mutated)
             {
-                con.isDirty = true;
+                con.isDirty = (con.units != con.savedUnits);
                 con.totalUnits = (int)con.units.size();
                 outResult.processedCount++;
                 std::wstring dispName = con.name.empty() ? (L"Activity Consist #" + std::to_wstring(cIdx + 1)) : con.name;
@@ -4791,24 +5351,7 @@ bool ApplyPoolMutationToSessions(
                     }
                 }
 
-                // Update row in g_ConsistList
-                for (int r = 0; r < g_ConsistList.GetItemCount(); ++r)
-                {
-                    std::wstring rIdxStr = g_ConsistList.GetCellText(r, 3);
-                    if (_wtoi(rIdxStr.c_str()) == cIdx)
-                    {
-                        std::wstring curName = g_ConsistList.GetCellText((int)r, 0);
-                        if (curName.rfind(L"● ", 0) != 0)
-                        {
-                            g_ConsistList.SetCellText((int)r, 0, L"● " + curName);
-                        }
-                        g_ConsistList.SetCellText((int)r, 1, std::to_wstring(con.totalUnits));
-                        std::wstring statusStr = EvaluateAndUpdateConsistStatus(consistKey, con.units, !con.isDirty);
-                        g_ConsistList.SetCellText((int)r, 2, statusStr);
-                        g_ConsistList.Invalidate();
-                        break;
-                    }
-                }
+                UpdateActivityConsistRow(cIdx);
             }
             else if (outResult.errorMessage.empty() && !err.empty())
             {
@@ -4829,7 +5372,9 @@ bool ApplyPoolMutationToSessions(
                 auto& sess = g_ConsistSessions[filename];
                 sess.fileName = filename;
                 sess.trainCfg = data.trainCfg;
+                sess.savedTrainCfg = data.trainCfg;
                 sess.units = data.units;
+                sess.savedUnits = data.units;
                 sess.isDirty = false;
             } catch (...) {
                 continue;
@@ -4870,7 +5415,7 @@ bool ApplyPoolMutationToSessions(
 
         if (mutated)
         {
-            sess.isDirty = true;
+            sess.isDirty = (sess.units != sess.savedUnits || sess.trainCfg != sess.savedTrainCfg);
             outResult.processedCount++;
             outResult.affectedFiles.push_back(path);
             anyModified = true;
@@ -4928,26 +5473,6 @@ static void PushUndoState(const std::wstring& actionDesc)
     {
         g_UndoStack.erase(g_UndoStack.begin());
     }
-
-    if (!g_szCurrentConsistFile.empty())
-    {
-        g_ConsistSessions[g_szCurrentConsistFile].isDirty = true;
-        UpdateConsistManagerRow(g_szCurrentConsistFile);
-    }
-    else if (g_ActiveTab == 1 && g_CurrentActivityConsistIndex >= 0 && g_CurrentActivityConsistIndex < (int)g_CurrentActivityData.consists.size())
-    {
-        g_CurrentActivityData.consists[g_CurrentActivityConsistIndex].isDirty = true;
-        int sel = g_ConsistList.GetSelectedIndex();
-        if (sel >= 0)
-        {
-            std::wstring curName = g_ConsistList.GetCellText(sel, 0);
-            if (curName.rfind(L"● ", 0) != 0)
-            {
-                g_ConsistList.SetCellText(sel, 0, L"● " + curName);
-                g_ConsistList.Invalidate();
-            }
-        }
-    }
 }
 
 static void PerformUndo(HWND hWnd)
@@ -4971,33 +5496,11 @@ static void PerformUndo(HWND hWnd)
 
     if (!g_szCurrentConsistFile.empty())
     {
-        if (!g_bAutoSave)
-        {
-            g_ConsistSessions[g_szCurrentConsistFile].isDirty = true;
-        }
         UpdateConsistManagerRow(g_szCurrentConsistFile);
     }
     else if (g_ActiveTab == 1 && g_CurrentActivityConsistIndex >= 0 && g_CurrentActivityConsistIndex < (int)g_CurrentActivityData.consists.size())
     {
-        if (!g_bAutoSave)
-        {
-            g_CurrentActivityData.consists[g_CurrentActivityConsistIndex].isDirty = true;
-        }
-        g_CurrentActivityData.consists[g_CurrentActivityConsistIndex].units = g_LoadedConsistUnits;
-        g_CurrentActivityData.consists[g_CurrentActivityConsistIndex].totalUnits = (int)g_LoadedConsistUnits.size();
-        int sel = g_ConsistList.GetSelectedIndex();
-        if (sel >= 0)
-        {
-            std::wstring curName = g_ConsistList.GetCellText(sel, 0);
-            if (!g_bAutoSave && curName.rfind(L"● ", 0) != 0)
-            {
-                g_ConsistList.SetCellText(sel, 0, L"● " + curName);
-            }
-            g_ConsistList.SetCellText(sel, 1, std::to_wstring(g_LoadedConsistUnits.size()));
-            std::wstring statusStr = EvaluateAndUpdateConsistStatus(L"ACTIVITY:" + std::to_wstring(g_CurrentActivityConsistIndex), g_LoadedConsistUnits, g_bAutoSave);
-            g_ConsistList.SetCellText(sel, 2, statusStr);
-            g_ConsistList.Invalidate();
-        }
+        UpdateActivityConsistRow(g_CurrentActivityConsistIndex);
     }
 }
 
@@ -5022,38 +5525,18 @@ static void PerformRedo(HWND hWnd)
 
     if (!g_szCurrentConsistFile.empty())
     {
-        if (!g_bAutoSave)
-        {
-            g_ConsistSessions[g_szCurrentConsistFile].isDirty = true;
-        }
         UpdateConsistManagerRow(g_szCurrentConsistFile);
     }
     else if (g_ActiveTab == 1 && g_CurrentActivityConsistIndex >= 0 && g_CurrentActivityConsistIndex < (int)g_CurrentActivityData.consists.size())
     {
-        if (!g_bAutoSave)
-        {
-            g_CurrentActivityData.consists[g_CurrentActivityConsistIndex].isDirty = true;
-        }
-        g_CurrentActivityData.consists[g_CurrentActivityConsistIndex].units = g_LoadedConsistUnits;
-        g_CurrentActivityData.consists[g_CurrentActivityConsistIndex].totalUnits = (int)g_LoadedConsistUnits.size();
-        int sel = g_ConsistList.GetSelectedIndex();
-        if (sel >= 0)
-        {
-            std::wstring curName = g_ConsistList.GetCellText(sel, 0);
-            if (!g_bAutoSave && curName.rfind(L"● ", 0) != 0)
-            {
-                g_ConsistList.SetCellText(sel, 0, L"● " + curName);
-            }
-            g_ConsistList.SetCellText(sel, 1, std::to_wstring(g_LoadedConsistUnits.size()));
-            std::wstring statusStr = EvaluateAndUpdateConsistStatus(L"ACTIVITY:" + std::to_wstring(g_CurrentActivityConsistIndex), g_LoadedConsistUnits, g_bAutoSave);
-            g_ConsistList.SetCellText(sel, 2, statusStr);
-            g_ConsistList.Invalidate();
-        }
+        UpdateActivityConsistRow(g_CurrentActivityConsistIndex);
     }
 }
 
 static std::vector<ConsistReader::UnitInfo> GetSelectedStockUnitsFromLibrary(HWND hSpecificList = NULL)
 {
+    if (g_StockDeckTab == STOCK_DECK_SOUND_SMS) return {};
+
     std::vector<ConsistReader::UnitInfo> units;
     std::unordered_set<std::wstring> seenKeys;
 
@@ -5731,53 +6214,208 @@ static void PasteConsistUnits(HWND hWnd, PasteTargetMode mode = PASTE_AFTER_SELE
     SaveCurrentConsist(hWnd);
 }
 
-static void ShowClipboardContents(HWND hWnd)
+static void ClearClipboard(HWND hWnd)
 {
-    if (g_ClipboardUnits.empty())
+    g_ClipboardUnits.clear();
+    SoundStudio_ClearSmsClipboard();
+    SmsClipboard_Get().streams.clear();
+    SmsClipboard_Get().sourceSmsPath.clear();
+    if (OpenClipboard(hWnd))
     {
-        ShowModernMessageBox(hWnd, L"Clipboard is currently empty.\r\n\r\nYou can copy units using Ctrl+C from the Consist table or Stock Library.", L"Clipboard Contents", MB_OK | MB_ICONINFORMATION);
+        EmptyClipboard();
+        CloseClipboard();
+    }
+    ShowModernMessageBox(hWnd, L"All clipboards (Rolling Stock, SMS Assignments, and Sound Streams) have been cleared successfully.", L"Clear Clipboard", MB_OK | MB_ICONINFORMATION);
+}
+
+void App_ShowClipboardContents(HWND hWnd)
+{
+    const auto& smsClip = SmsClipboard_Get();
+    bool hasStreams = !smsClip.streams.empty();
+
+    const auto& soundClip = SoundStudio_GetSmsClipboard();
+    bool hasSoundEntry = soundClip.hasEntry && !soundClip.entry.smsFileName.empty();
+
+    // Also check if Windows clipboard has an SMS file path/name
+    std::wstring winClipSms;
+    if (!hasSoundEntry && OpenClipboard(hWnd))
+    {
+        HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+        if (hData)
+        {
+            const wchar_t* pText = (const wchar_t*)GlobalLock(hData);
+            if (pText)
+            {
+                std::wstring s = pText;
+                // trim whitespace
+                size_t first = s.find_first_not_of(L" \t\r\n");
+                size_t last = s.find_last_not_of(L" \t\r\n");
+                if (first != std::wstring::npos && last != std::wstring::npos)
+                {
+                    s = s.substr(first, (last - first + 1));
+                    if (s.size() >= 4)
+                    {
+                        std::wstring ext = s.substr(s.size() - 4);
+                        for (auto& c : ext) c = towlower(c);
+                        if (ext == L".sms")
+                        {
+                            winClipSms = s;
+                        }
+                    }
+                }
+                GlobalUnlock(hData);
+            }
+        }
+        CloseClipboard();
+    }
+
+    bool hasUnits = !g_ClipboardUnits.empty();
+
+    if (!hasStreams && !hasSoundEntry && winClipSms.empty() && !hasUnits)
+    {
+        std::wstring emptyMsg =
+            L"Clipboard is currently empty.\r\n\r\n"
+            L"You can copy items into the clipboard using:\r\n"
+            L"  • Sound Streams (Ctrl+C or [📋 Copy] in SMS Editor)\r\n"
+            L"  • SMS Sound Assignments (Ctrl+C or Right-Click in Consist Sound Matrix)\r\n"
+            L"  • Rolling Stock Units (Ctrl+C from Consist table or Stock Library)";
+        ShowModernMessageBox(hWnd, emptyMsg.c_str(), L"Clipboard Contents", MB_OK | MB_ICONINFORMATION);
         return;
     }
 
-    std::wstring msg = L"Clipboard Contents (" + std::to_wstring(g_ClipboardUnits.size()) + L" Units):\r\n";
-    msg += L"────────────────────────────────────────────────────────\r\n";
+    std::wstring msg;
 
-    for (size_t i = 0; i < g_ClipboardUnits.size(); ++i)
+    // 1. SOUND STREAMS SECTION
+    if (hasStreams)
     {
-        const auto& u = g_ClipboardUnits[i];
-
-        bool isBroken = false;
-        if (u.uid.empty() || u.parentDir.empty())
+        msg += L"🎵 SOUND STREAMS (" + std::to_wstring(smsClip.streams.size()) + L" Streams Copied):\r\n";
+        if (!smsClip.sourceSmsPath.empty())
         {
-            isBroken = true;
+            msg += L"   Source SMS: " + smsClip.sourceSmsPath + L"\r\n";
         }
-        else
-        {
-            std::wstring ext = u.isEngine ? L".eng" : L".wag";
-            std::wstring unitPath = g_szBasePath;
-            if (!unitPath.empty() && unitPath.back() != L'\\') unitPath += L'\\';
-            unitPath += L"TRAINS\\TRAINSET\\" + u.parentDir + L"\\" + u.uid + ext;
+        msg += L"────────────────────────────────────────────────────────\r\n";
 
-            DWORD attr = GetFileAttributesW(unitPath.c_str());
-            if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+        size_t showCount = (smsClip.streams.size() <= 8) ? smsClip.streams.size() : 7;
+        for (size_t i = 0; i < showCount; ++i)
+        {
+            const auto& item = smsClip.streams[i];
+            const auto& st = item.stream;
+            std::wstring title = !st.friendlyTitle.empty() ? st.friendlyTitle : (L"Stream #" + std::to_wstring(st.streamIndex > 0 ? st.streamIndex : (int)(i + 1)));
+
+            std::wstring wavInfo;
+            for (const auto& trig : st.triggers)
+            {
+                for (const auto& f : trig.files)
+                {
+                    if (!f.fileName.empty())
+                    {
+                        wavInfo = f.fileName;
+                        break;
+                    }
+                }
+                if (!wavInfo.empty()) break;
+            }
+
+            wchar_t stBuf[512];
+            swprintf_s(stBuf, 512, L"#%d  %s\r\n    • Priority: %d | Volume: %.2f | Channels: %s\r\n    • Triggers: %d | Curves: %d%s%s\r\n\r\n",
+                (int)(i + 1),
+                title.c_str(),
+                st.priority,
+                st.hasVolume ? st.volume : 1.0f,
+                st.isStereo ? L"Stereo" : L"Mono",
+                (int)st.triggers.size(),
+                (int)st.curves.size(),
+                wavInfo.empty() ? L"" : L" | Audio: ",
+                wavInfo.c_str());
+            msg += stBuf;
+        }
+
+        if (smsClip.streams.size() > showCount)
+        {
+            msg += L"... and " + std::to_wstring(smsClip.streams.size() - showCount) + L" more sound streams in clipboard.\r\n\r\n";
+        }
+    }
+
+    // 2. SOUND SMS ASSIGNMENT SECTION
+    if (hasSoundEntry)
+    {
+        if (hasStreams) msg += L"────────────────────────────────────────────────────────\r\n";
+        msg += L"🔊 SOUND ASSIGNMENT (SMS File):\r\n";
+        msg += L"────────────────────────────────────────────────────────\r\n";
+        const auto& se = soundClip.entry;
+        std::wstring rel = se.parentFolder.empty() ? se.smsFileName : (se.parentFolder + L"\\" + se.smsFileName);
+        std::wstring srcUnit = soundClip.sourceUnitName.empty() ? L"(Direct SMS)" : soundClip.sourceUnitName;
+        if (!soundClip.sourceUnitFolder.empty())
+        {
+            srcUnit += L" [" + soundClip.sourceUnitFolder + L"]";
+        }
+        wchar_t sndBuf[512];
+        swprintf_s(sndBuf, 512, L"    • SMS File: %s\r\n    • Relative Path: %s\r\n    • Slot Category: %s\r\n    • Source Unit: %s\r\n    • Disk Status: %s\r\n\r\n",
+            se.smsFileName.c_str(),
+            rel.c_str(),
+            se.soundType.empty() ? L"Custom" : se.soundType.c_str(),
+            srcUnit.c_str(),
+            se.existsOnDisk ? L"✔ Exists on disk" : L"✖ Missing from disk");
+        msg += sndBuf;
+    }
+    else if (!winClipSms.empty())
+    {
+        if (hasStreams) msg += L"────────────────────────────────────────────────────────\r\n";
+        msg += L"🔊 SOUND ASSIGNMENT (Windows Clipboard Text):\r\n";
+        msg += L"────────────────────────────────────────────────────────\r\n";
+        msg += L"    • Referenced SMS: " + winClipSms + L"\r\n\r\n";
+    }
+
+    // 3. ROLLING STOCK UNITS SECTION
+    if (hasUnits)
+    {
+        if (hasStreams || hasSoundEntry || !winClipSms.empty()) msg += L"────────────────────────────────────────────────────────\r\n";
+        msg += L"🚂 ROLLING STOCK UNITS (" + std::to_wstring(g_ClipboardUnits.size()) + L" Units Copied):\r\n";
+        msg += L"────────────────────────────────────────────────────────\r\n";
+
+        size_t showUnits = (g_ClipboardUnits.size() <= 8) ? g_ClipboardUnits.size() : 7;
+        for (size_t i = 0; i < showUnits; ++i)
+        {
+            const auto& u = g_ClipboardUnits[i];
+
+            bool isBroken = false;
+            if (u.uid.empty() || u.parentDir.empty())
             {
                 isBroken = true;
             }
+            else
+            {
+                std::wstring ext = u.isEngine ? L".eng" : L".wag";
+                std::wstring unitPath = g_szBasePath;
+                if (!unitPath.empty() && unitPath.back() != L'\\') unitPath += L'\\';
+                unitPath += L"TRAINS\\TRAINSET\\" + u.parentDir + L"\\" + u.uid + ext;
+
+                DWORD attr = GetFileAttributesW(unitPath.c_str());
+                if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+                {
+                    isBroken = true;
+                }
+            }
+
+            wchar_t lineBuf[256];
+            swprintf_s(lineBuf, 256, L"#%d  %s (%s)\r\n    • Folder: %s\r\n    • Status: %s\r\n    • Orientation: %s\r\n\r\n",
+                (int)(i + 1),
+                u.uid.c_str(),
+                u.isEngine ? L"Engine" : L"Wagon",
+                u.parentDir.c_str(),
+                isBroken ? L"✖ Broken (Missing)" : L"✔ Healthy",
+                u.isFlipped ? L"🠔 Flipped (Reversed)" : L"➔ Normal");
+            msg += lineBuf;
         }
 
-        wchar_t lineBuf[256];
-        swprintf_s(lineBuf, 256, L"#%d  %s (%s)\r\n    • Folder: %s\r\n    • Status: %s\r\n    • Orientation: %s\r\n\r\n",
-            (int)(i + 1),
-            u.uid.c_str(),
-            u.isEngine ? L"Engine" : L"Wagon",
-            u.parentDir.c_str(),
-            isBroken ? L"✖ Broken (Missing)" : L"✔ Healthy",
-            u.isFlipped ? L"🠔 Flipped (Reversed)" : L"➔ Normal");
-        msg += lineBuf;
+        if (g_ClipboardUnits.size() > showUnits)
+        {
+            msg += L"... and " + std::to_wstring(g_ClipboardUnits.size() - showUnits) + L" more rolling stock units in clipboard.\r\n\r\n";
+        }
     }
 
     std::vector<ModernMsgBoxCustomButton> buttons = {
-        { 101, L"Clear Contents", false },
+        { 101, L"Clear All Clipboards", false },
         { IDOK, L"Close", true }
     };
 
@@ -5788,10 +6426,9 @@ static void ShowClipboardContents(HWND hWnd)
     }
 }
 
-static void ClearClipboard(HWND hWnd)
+static void ShowClipboardContents(HWND hWnd)
 {
-    g_ClipboardUnits.clear();
-    ShowModernMessageBox(hWnd, L"Clipboard has been cleared successfully.", L"Clear Clipboard", MB_OK | MB_ICONINFORMATION);
+    App_ShowClipboardContents(hWnd);
 }
 
 
@@ -5886,6 +6523,8 @@ static bool SaveCurrentConsistDiskOnly(HWND hWnd)
             {
                 auto sess = itOld->second;
                 sess.fileName = targetFileName;
+                sess.savedUnits = sess.units;
+                sess.savedTrainCfg = sess.trainCfg;
                 sess.isDirty = false;
                 g_ConsistSessions.erase(itOld);
                 g_ConsistSessions[targetFileName] = sess;
@@ -5961,7 +6600,16 @@ static bool SaveCurrentConsistDiskOnly(HWND hWnd)
 
         if (!g_szCurrentConsistFile.empty())
         {
-            g_ConsistSessions[g_szCurrentConsistFile].isDirty = false;
+            auto it = g_ConsistSessions.find(g_szCurrentConsistFile);
+            if (it != g_ConsistSessions.end())
+            {
+                it->second.savedUnits = g_LoadedConsistUnits;
+                it->second.savedTrainCfg.trainCfgId = szCfgId;
+                it->second.savedTrainCfg.name = szName;
+                it->second.savedTrainCfg.maxVelocity = maxVelocityKmh;
+                it->second.savedTrainCfg.perfFactor = perfFactorPct;
+                it->second.isDirty = false;
+            }
             UpdateConsistManagerRow(g_szCurrentConsistFile);
         }
     }
@@ -5995,6 +6643,7 @@ static bool SaveActivityConsistByIndex(HWND hWnd, int consistIndex, int listRowI
 
     if (res.success)
     {
+        con.savedUnits = con.units;
         con.isDirty = false;
 
         std::wstring statusStr = EvaluateAndUpdateConsistStatus(consistKey, con.units, true);
@@ -6002,40 +6651,7 @@ static bool SaveActivityConsistByIndex(HWND hWnd, int consistIndex, int listRowI
         con.hasMissingStock = (statusStr == L"Missing Stock");
         con.hasMissingShape = (statusStr == L"Missing Shape");
 
-        int targetRow = -1;
-        if (listRowIndex >= 0 && listRowIndex < g_ConsistList.GetItemCount())
-        {
-            std::wstring rIdxStr = g_ConsistList.GetCellText(listRowIndex, 3);
-            if (_wtoi(rIdxStr.c_str()) == consistIndex)
-            {
-                targetRow = listRowIndex;
-            }
-        }
-        if (targetRow == -1)
-        {
-            for (int r = 0; r < g_ConsistList.GetItemCount(); ++r)
-            {
-                std::wstring rIdxStr = g_ConsistList.GetCellText(r, 3);
-                if (_wtoi(rIdxStr.c_str()) == consistIndex)
-                {
-                    targetRow = r;
-                    break;
-                }
-            }
-        }
-
-        if (targetRow >= 0 && targetRow < g_ConsistList.GetItemCount())
-        {
-            std::wstring curName = g_ConsistList.GetCellText(targetRow, 0);
-            if (curName.rfind(L"● ", 0) == 0)
-            {
-                curName = curName.substr(2);
-            }
-            g_ConsistList.SetCellText(targetRow, 0, curName);
-            g_ConsistList.SetCellText(targetRow, 1, std::to_wstring(con.totalUnits));
-            g_ConsistList.SetCellText(targetRow, 2, statusStr);
-            g_ConsistList.Invalidate();
-        }
+        UpdateActivityConsistRow(consistIndex);
 
         // Update header broken count
         int brokenCount = 0;
@@ -6123,53 +6739,79 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
             auto& sess = g_ConsistSessions[filename];
             sess.fileName = filename;
             sess.trainCfg = trainCfg;
+            sess.savedTrainCfg = trainCfg;
             sess.units = units;
+            sess.savedUnits = units;
             sess.isDirty = false;
         }
 
         // Hide placeholder and show editor controls
-        if (g_hEditorPane)       ShowWindow(g_hEditorPane,      SW_HIDE);
-        if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg, SW_SHOW);
-        if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,     SW_SHOW);
-        if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,   SW_SHOW);
-        if (g_hEditFileName)     ShowWindow(g_hEditFileName,    SW_SHOW);
-        if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId, SW_SHOW);
-        if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,  SW_SHOW);
-        if (g_hSectionMetrics)   ShowWindow(g_hSectionMetrics,   SW_HIDE);
-        if (g_hLabelMetricMass)   ShowWindow(g_hLabelMetricMass,   SW_HIDE);
-        if (g_hEditMetricMass)    ShowWindow(g_hEditMetricMass,    SW_HIDE);
-        if (g_hLabelMetricLength) ShowWindow(g_hLabelMetricLength, SW_HIDE);
-        if (g_hEditMetricLength)  ShowWindow(g_hEditMetricLength,  SW_HIDE);
-        if (g_hLabelMetricPower)  ShowWindow(g_hLabelMetricPower,  SW_HIDE);
-        if (g_hEditMetricPower)   ShowWindow(g_hEditMetricPower,   SW_HIDE);
-        if (g_hLabelMetricRatio)  ShowWindow(g_hLabelMetricRatio,  SW_HIDE);
-        if (g_hEditMetricRatio)   ShowWindow(g_hEditMetricRatio,   SW_HIDE);
-        if (g_hUnitPreviewCard)  ShowWindow(g_hUnitPreviewCard,  SW_SHOW);
-
-        if (g_ActiveTab == 1) // Activity Consists Tab: only Identifier is shown
+        if (g_ActiveTab == 2)
         {
-            if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_HIDE);
-            if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_HIDE);
-            if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_HIDE);
-            if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_HIDE);
+            if (g_hEditorPane)       ShowWindow(g_hEditorPane,      SW_HIDE);
+            if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg, SW_HIDE);
+            if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,    SW_HIDE);
+            if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,   SW_HIDE);
+            if (g_hEditFileName)     ShowWindow(g_hEditFileName,    SW_HIDE);
+            if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId, SW_HIDE);
+            if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,  SW_HIDE);
+            if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,  SW_HIDE);
+            if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,   SW_HIDE);
             if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
             if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_HIDE);
             if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_HIDE);
             if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_HIDE);
+            if (g_hSectionMetrics)   ShowWindow(g_hSectionMetrics,   SW_HIDE);
+            if (g_hUnitPreviewCard)  ShowWindow(g_hUnitPreviewCard,  SW_HIDE);
+            if (g_hEditorUnitList)   ShowWindow(g_hEditorUnitList,   SW_HIDE);
+            if (g_hVisualConsistView) ShowWindow(g_hVisualConsistView, SW_HIDE);
+            if (g_hRollingStockStudio) RollingStockStudio_SetVisible(g_hRollingStockStudio, true);
         }
-        else // Main Consists Tab: show all fields
+        else
         {
-            if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_SHOW);
-            if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_SHOW);
-            if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_SHOW);
-            if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_SHOW);
-            if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_SHOW);
-            if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_SHOW);
-            if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_SHOW);
-            if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_SHOW);
-        }
+            if (g_hEditorPane)       ShowWindow(g_hEditorPane,      SW_HIDE);
+            if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg, SW_SHOW);
+            if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,     SW_SHOW);
+            if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,   SW_SHOW);
+            if (g_hEditFileName)     ShowWindow(g_hEditFileName,    SW_SHOW);
+            if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId, SW_SHOW);
+            if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,  SW_SHOW);
+            if (g_hSectionMetrics)   ShowWindow(g_hSectionMetrics,   SW_HIDE);
+            if (g_hLabelMetricMass)   ShowWindow(g_hLabelMetricMass,   SW_HIDE);
+            if (g_hEditMetricMass)    ShowWindow(g_hEditMetricMass,    SW_HIDE);
+            if (g_hLabelMetricLength) ShowWindow(g_hLabelMetricLength, SW_HIDE);
+            if (g_hEditMetricLength)  ShowWindow(g_hEditMetricLength,  SW_HIDE);
+            if (g_hLabelMetricPower)  ShowWindow(g_hLabelMetricPower,  SW_HIDE);
+            if (g_hEditMetricPower)   ShowWindow(g_hEditMetricPower,   SW_HIDE);
+            if (g_hLabelMetricRatio)  ShowWindow(g_hLabelMetricRatio,  SW_HIDE);
+            if (g_hEditMetricRatio)   ShowWindow(g_hEditMetricRatio,   SW_HIDE);
+            if (g_hUnitPreviewCard)  ShowWindow(g_hUnitPreviewCard,  SW_SHOW);
 
-        if (g_hEditorUnitList)   ShowWindow(g_hEditorUnitList,  SW_SHOW);
+            if (g_ActiveTab == 1) // Activity Consists Tab: only Identifier is shown
+            {
+                if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_HIDE);
+                if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_HIDE);
+                if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_HIDE);
+                if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_HIDE);
+                if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
+                if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_HIDE);
+                if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_HIDE);
+                if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_HIDE);
+            }
+            else // Main Consists Tab: show all fields
+            {
+                if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_SHOW);
+                if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_SHOW);
+                if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_SHOW);
+                if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_SHOW);
+                if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_SHOW);
+                if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_SHOW);
+                if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_SHOW);
+                if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_SHOW);
+            }
+
+            if (g_hEditorUnitList)   ShowWindow(g_hEditorUnitList,  SW_SHOW);
+        }
 
         // Populate edit controls
         if (g_hEditFileName)   SetWindowTextW(g_hEditFileName,   filename.c_str());
@@ -6235,12 +6877,25 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
 
         if (g_hVisualConsistView)
         {
-            if (!VisualConsistView_IsFloating(g_hVisualConsistView))
+            if (g_ActiveTab == 2)
             {
-                ShowWindow(g_hVisualConsistView, SW_SHOW);
+                ShowWindow(g_hVisualConsistView, SW_HIDE);
+            }
+            else
+            {
+                if (!VisualConsistView_IsFloating(g_hVisualConsistView))
+                {
+                    ShowWindow(g_hVisualConsistView, SW_SHOW);
+                }
             }
             VisualConsistView_SetUnits(g_hVisualConsistView, g_LoadedConsistUnits, g_szBasePath, trainCfg.name, filename);
         }
+
+        if (g_ActiveTab == 2 && g_hRollingStockStudio)
+        {
+            RollingStockStudio_SetConsist(g_hRollingStockStudio, filename, g_szBasePath, g_LoadedConsistUnits);
+        }
+
         UpdateConsistManagerRow(filename);
         LOG_INFO("Loaded consist '%ls' with %zu units.", filename.c_str(), g_LoadedConsistUnits.size());
 
@@ -6248,6 +6903,8 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
         UpdateWindow(hWnd);
         g_bIsLoadingConsist = false;
         SyncPoolMutatorSelectionIfOpen();
+        SyncBatchSoundMutatorSelectionIfOpen();
+        SyncSmsStreamMutatorSelectionIfOpen();
     }
     catch (const std::exception& e)
     {
@@ -6321,8 +6978,17 @@ static void LoadAndDisplayActivityConsist(HWND hWnd, int consistIndex)
         g_LoadedConsistUnits = actCon.units;
         g_szCurrentConsistFile = L"";
 
-        g_UndoStack.clear();
-        g_RedoStack.clear();
+        auto itUndo = g_ActivityUndoStacks.find(consistIndex);
+        if (itUndo != g_ActivityUndoStacks.end())
+        {
+            g_UndoStack = itUndo->second.undoStack;
+            g_RedoStack = itUndo->second.redoStack;
+        }
+        else
+        {
+            g_UndoStack.clear();
+            g_RedoStack.clear();
+        }
 
         g_EditorUnitList.ClearAllFilters();
         RefreshEditorUnitList(false);
@@ -6342,6 +7008,8 @@ static void LoadAndDisplayActivityConsist(HWND hWnd, int consistIndex)
         UpdateWindow(hWnd);
         g_bIsLoadingConsist = false;
         SyncPoolMutatorSelectionIfOpen();
+        SyncBatchSoundMutatorSelectionIfOpen();
+        SyncSmsStreamMutatorSelectionIfOpen();
     }
     catch (const std::exception& e)
     {
@@ -6389,8 +7057,10 @@ static void ActionCreateNewConsist(HWND hWnd)
     session.trainCfg.name = dispName;
     session.trainCfg.maxVelocity = 120.0;
     session.trainCfg.perfFactor = 1.0;
+    session.savedTrainCfg = session.trainCfg;
     session.units.clear();
-    session.isDirty = true;
+    session.savedUnits.clear();
+    session.isDirty = false;
     session.undoStack.clear();
     session.redoStack.clear();
     session.selectedIndices.clear();
@@ -6409,7 +7079,7 @@ static void ActionCreateNewConsist(HWND hWnd)
     GetTimeFormatW(LOCALE_USER_DEFAULT, TIME_NOSECONDS, &stLocal, NULL, timeBuf, 64);
     std::wstring friendlyTime = std::wstring(dateBuf) + L" " + timeBuf;
 
-    g_ConsistList.AddItem({ L"● " + dispName, L"0", L"Healthy", friendlyTime, candidateFile });
+    g_ConsistList.AddItem({ dispName, L"0", L"Healthy", friendlyTime, candidateFile });
 
     // Select and load the new consist
     for (int i = 0; i < g_ConsistList.GetItemCount(); ++i)
@@ -6524,7 +7194,9 @@ static void ActionCloneConsist(HWND hWnd)
     cloneSess.trainCfg.name = cloneDispName;
     cloneSess.trainCfg.maxVelocity = srcCfg.maxVelocity;
     cloneSess.trainCfg.perfFactor = srcCfg.perfFactor;
+    cloneSess.savedTrainCfg = cloneSess.trainCfg;
     cloneSess.units = srcUnits;
+    cloneSess.savedUnits = srcUnits;
     cloneSess.isDirty = false;
 
     // Add to list table
@@ -6696,9 +7368,17 @@ static void ActionReverseConsist(HWND hWnd)
         if (it != g_ConsistSessions.end())
         {
             it->second.units = g_LoadedConsistUnits;
-            it->second.isDirty = true;
+            it->second.isDirty = (it->second.units != it->second.savedUnits || it->second.trainCfg != it->second.savedTrainCfg);
         }
         UpdateConsistManagerRow(g_szCurrentConsistFile);
+    }
+    else if (g_ActiveTab == 1 && g_CurrentActivityConsistIndex >= 0 && g_CurrentActivityConsistIndex < (int)g_CurrentActivityData.consists.size())
+    {
+        auto& con = g_CurrentActivityData.consists[g_CurrentActivityConsistIndex];
+        con.units = g_LoadedConsistUnits;
+        con.totalUnits = (int)con.units.size();
+        con.isDirty = (con.units != con.savedUnits);
+        UpdateActivityConsistRow(g_CurrentActivityConsistIndex);
     }
     LOG_INFO("Reversed sequence of consist '%ls' (%zu units).", g_szCurrentConsistFile.c_str(), g_LoadedConsistUnits.size());
 
@@ -6835,6 +7515,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
+    case WM_SOUNDSTUDIO_SUBTABCHANGED:
+    {
+        int subTab = (int)wParam;
+        if (g_hCommandBar && IsWindow(g_hCommandBar) && g_ActiveTab == 2)
+        {
+            if (subTab == 1)
+            {
+                CommandBar_SetButtonText(g_hCommandBar, CMD_ACTION_BATCH_SOUND, L"SMS Mutator", 145);
+            }
+            else
+            {
+                CommandBar_SetButtonText(g_hCommandBar, CMD_ACTION_BATCH_SOUND, L"Sound Mutator", 145);
+            }
+        }
+        // Enable drag transfer source in lower deck ONLY when on Sound Matrix Tab (subTab == 0)
+        // Disable drag in SMS Editor / Studio (subTab == 1) for a direct single-click experience
+        if (g_hSoundList && IsWindow(g_hSoundList))
+        {
+            g_SoundList.SetAllowTransferSource(subTab == 0);
+        }
+        return 0;
+    }
+
     case WM_SETTINGCHANGE:
     case WM_THEMECHANGED:
     {
@@ -6843,6 +7546,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_CREATE:
     {
         InitializeCriticalSection(&g_StockCacheCS);
+        InitSoundScanner();
         PoolManager::InitializePoolPresets();
         PoolManager::InitializeReplacementGroups();
         TrainConfigManager::EnsureDefaultTrainConfigs();
@@ -6887,6 +7591,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (g_hCommandBar)
         {
             CommandBar_SetDarkMode(g_hCommandBar, g_bDarkMode);
+            CommandBar_SetTabMode(g_hCommandBar, g_ActiveTab);
         }
 
         // Ensure treeview and listview classes are registered
@@ -7025,6 +7730,36 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 SendMessageW(g_hPaneSearchEdit[k], EM_SETCUEBANNER, TRUE, (LPARAM)L"Search...");
                 ShowWindow(g_hPaneSearchEdit[k], SW_HIDE);
             }
+        }
+
+        // 8d. Create Dedicated Sound List and Search Edit for Bottom Deck
+        g_hSoundList = g_SoundList.Create(hWnd, 0, 0, 0, 0, IDC_SOUNDLIST);
+        if (g_hSoundList)
+        {
+            g_SoundList.SetMultiSelect(true);
+            g_SoundList.SetAllowRearrange(false);
+            g_SoundList.SetAllowTransferSource(true);
+            g_SoundList.SetDragGhostType(GhostItemType::SoundFile);
+            g_SoundList.SetAllowMarquee(true);
+            g_SoundList.SetShowSelectionGutter(true);
+            g_SoundList.SetVirtualMode(SoundListGetCellText, nullptr);
+            g_SoundList.AddColumn(L"SMS File Name", 280, 0);
+            g_SoundList.AddColumn(L"Folder / Subdirectory", 260, 0);
+            g_SoundList.AddColumn(L"Relative Path", 380, 0);
+            ShowWindow(g_hSoundList, SW_HIDE);
+        }
+
+        g_hSoundSearchEdit = CreateWindowExW(
+            0, L"EDIT", L"",
+            WS_CHILD | ES_LEFT | ES_AUTOHSCROLL | ES_MULTILINE,
+            0, 0, 0, 0, hWnd, (HMENU)IDC_SOUND_SEARCH, hInst, NULL
+        );
+        if (g_hSoundSearchEdit)
+        {
+            SetWindowSubclass(g_hSoundSearchEdit, ModernEditSubclassProc, 45, 0);
+            SendMessage(g_hSoundSearchEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 26));
+            SendMessageW(g_hSoundSearchEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"Search .sms sound files in TRAINSET...");
+            ShowWindow(g_hSoundSearchEdit, SW_HIDE);
         }
 
         // Populate tree
@@ -7170,6 +7905,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             ShowWindow(g_hUnitPreviewCard, SW_SHOW);
         }
 
+        // Rolling Stock Studio (Tab 3 Workspace)
+        g_hRollingStockStudio = CreateRollingStockStudio(hWnd, hInst, 0, 0, 0, 0, 8998);
+        if (g_hRollingStockStudio)
+        {
+            RollingStockStudio_SetVisible(g_hRollingStockStudio, false);
+            RollingStockStudio_SetDarkMode(g_hRollingStockStudio, g_bDarkMode);
+        }
+
         // Create Dedicated Splitter Windows
         g_hSplitter1 = CreateWindowExW(
             0, L"TSCBSplitter", L"",
@@ -7239,6 +7982,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (g_hAssetList)        SendMessage(g_hAssetList,       WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
             if (g_hAssetList2)       SendMessage(g_hAssetList2,      WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
             if (g_hAssetList3)       SendMessage(g_hAssetList3,      WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
+            if (g_hSoundList)        SendMessage(g_hSoundList,       WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
+            if (g_hSoundSearchEdit)  SendMessage(g_hSoundSearchEdit, WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
             for (int k = 0; k < 3; ++k)
             {
                 if (g_hPaneCatBtn[k])     SendMessage(g_hPaneCatBtn[k],     WM_SETFONT, (WPARAM)hUIFont, MAKELPARAM(TRUE, 0));
@@ -7493,6 +8238,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
         if (wmEvent == EN_CHANGE)
         {
+            if (wmId == IDC_SOUND_SEARCH && g_hSoundSearchEdit)
+            {
+                wchar_t buf[256] = { 0 };
+                GetWindowTextW(g_hSoundSearchEdit, buf, 256);
+                g_szSoundSearchQuery = buf;
+                InvalidateRect(g_hSoundSearchEdit, NULL, FALSE);
+                UpdateWindow(g_hSoundSearchEdit);
+                RefreshSoundList();
+                return 0;
+            }
+
             if (wmId >= IDC_PANE_SEARCH_0 && wmId <= IDC_PANE_SEARCH_2)
             {
                 int paneIdx = wmId - IDC_PANE_SEARCH_0;
@@ -7517,8 +8273,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
                 if (!g_szCurrentConsistFile.empty())
                 {
-                    g_ConsistSessions[g_szCurrentConsistFile].isDirty = true;
-                    UpdateConsistManagerRow(g_szCurrentConsistFile);
+                    auto it = g_ConsistSessions.find(g_szCurrentConsistFile);
+                    if (it != g_ConsistSessions.end())
+                    {
+                        wchar_t szCfgId[256] = { 0 };
+                        wchar_t szName[256] = { 0 };
+                        wchar_t szVelocity[256] = { 0 };
+                        wchar_t szPerf[256] = { 0 };
+                        if (g_hEditTrainCfgId)  GetWindowTextW(g_hEditTrainCfgId,  szCfgId,    256);
+                        if (g_hEditTrainName)   GetWindowTextW(g_hEditTrainName,   szName,     256);
+                        if (g_hEditMaxVelocity) GetWindowTextW(g_hEditMaxVelocity, szVelocity, 256);
+                        if (g_hEditPerfFactor)  GetWindowTextW(g_hEditPerfFactor,  szPerf,     256);
+
+                        it->second.trainCfg.trainCfgId = szCfgId;
+                        it->second.trainCfg.name = szName;
+                        it->second.trainCfg.maxVelocity = _wtof(szVelocity);
+                        it->second.trainCfg.perfFactor = _wtof(szPerf);
+
+                        it->second.isDirty = (it->second.units != it->second.savedUnits || it->second.trainCfg != it->second.savedTrainCfg);
+                        UpdateConsistManagerRow(g_szCurrentConsistFile);
+                    }
                 }
             }
         }
@@ -7529,6 +8303,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
                 SaveCurrentConsist(hWnd);
             }
+        }
+
+        if (wmId == IDC_SOUNDLIST && wmEvent >= 1000 && wmEvent < 2000)
+        {
+            int colIndex = wmEvent - 1000;
+            g_SoundList.SortByColumn(colIndex, true);
+            RefreshSoundList();
+            return 0;
         }
 
         if ((wmId == IDC_ASSETLIST || wmId == IDC_ASSETLIST2 || wmId == IDC_ASSETLIST3) && wmEvent >= 1000 && wmEvent < 2000)
@@ -7916,6 +8698,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     }
 
+    case WM_SOUND_SCAN_COMPLETE:
+    {
+        RefreshSoundList();
+        if (g_hStockHeader)
+        {
+            InvalidateRect(g_hStockHeader, NULL, FALSE);
+        }
+        return 0;
+    }
+
     case WM_STOCK_SCAN_PROGRESS:
     {
         size_t current = (size_t)wParam;
@@ -7961,11 +8753,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         else if (g_ActivePane == PANE_STOCK)
         {
-            g_szStockSearchQuery = szSearch;
-            if (g_hCategoryTree)
+            if (g_StockDeckTab == STOCK_DECK_SOUND_SMS)
             {
-                CustomTreeNode* hSelected = g_CategoryTreeView.GetSelectedNode();
-                PopulateAssetGrid(hSelected);
+                g_szSoundSearchQuery = szSearch;
+                if (g_hSoundSearchEdit) SetWindowTextW(g_hSoundSearchEdit, szSearch);
+                RefreshSoundList();
+            }
+            else
+            {
+                g_szStockSearchQuery = szSearch;
+                if (g_hCategoryTree)
+                {
+                    CustomTreeNode* hSelected = g_CategoryTreeView.GetSelectedNode();
+                    PopulateAssetGrid(hSelected);
+                }
             }
         }
     }
@@ -8026,7 +8827,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 SaveCurrentConsistSessionState();
                 std::vector<int> selRows = g_ConsistList.GetSelectedIndices();
 
-                if (g_ActiveTab == 1)
+                if (g_ActiveTab == 2)
+                {
+                    SoundStudio_SaveAllChanges(g_hRollingStockStudio);
+                }
+                else if (g_ActiveTab == 1)
                 {
                     if (selRows.size() > 1)
                     {
@@ -8224,7 +9029,33 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case CMD_ACTION_BATCH_WIZARD:
             ShowBatchConsistGeneratorDialog(hWnd);
             break;
+        case CMD_ACTION_BATCH_SOUND:
+        {
+            int subTab = 0;
+            if (g_hRollingStockStudio && IsWindow(g_hRollingStockStudio))
+            {
+                subTab = SoundStudio_GetActiveSubTab(g_hRollingStockStudio);
+            }
+
+            if (g_ActiveTab == 2 && subTab == 1)
+            {
+                // In Sound Studio -> SMS Editor sub-tab: Launch SMS Mutator
+                std::vector<SmsCategorizedTargetInput> engFiles, wagFiles;
+                GatherConsistSmsFiles(engFiles, wagFiles);
+                ShowSmsStreamMutatorDialog(hWnd, g_szBasePath, {}, 0, nullptr, {}, {}, engFiles, wagFiles);
+            }
+            else
+            {
+                // In Sound Studio -> Rolling Stock Sound Matrix (sub-tab 0): Launch Sound Mutator
+                std::vector<std::wstring> selConsists;
+                std::vector<int> selUnits;
+                GetActiveTargetConsistsAndUnits(selConsists, selUnits);
+                ShowBatchSoundMutatorDialog(hWnd, g_szBasePath, selConsists, 0);
+            }
+            break;
+        }
         case CMD_ACTION_REFRESH_CONSISTS:
+            SoundStudio_ClearStockSoundCache();
             if (!g_szBasePath.empty())
             {
                 bool hasDirty = false;
@@ -8242,6 +9073,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
             break;
         case CMD_ACTION_REFRESH_STOCKS:
+            SoundStudio_ClearStockSoundCache();
             if (!g_szBasePath.empty())
             {
                 CancelStockScan(g_hStockScanThread);
@@ -8261,7 +9093,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 ContextMenuItem::Action(2, L"\xE8A5", L"Open Logs Folder (AppData\\Logs)"),
                 ContextMenuItem::Separator(),
                 ContextMenuItem::Action(3, L"\xE895", L"Check for Online Updates..."),
-                ContextMenuItem::Action(4, L"\xE946", L"About Train Sim Consist Builder", L"v9.3.0")
+                ContextMenuItem::Action(4, L"\xE946", L"About Train Sim Consist Builder", (L"v" + Updater::GetCurrentVersion()).c_str())
             };
 
             int cmd = ModernContextMenu::Show(hWnd, pt.x, pt.y, aboutItems, TRUE, 260);
@@ -8522,8 +9354,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     case WM_SIZE:
     {
+        if (wParam == SIZE_MINIMIZED)
+            return 0;
+
         int width = LOWORD(lParam);
         int height = HIWORD(lParam);
+        if (width <= 0 || height <= 0)
+            return 0;
 
         if (g_hCustomTitleBar != NULL)
         {
@@ -8602,8 +9439,47 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         int contentHeight = bottomHeight - 29;
         if (contentHeight < 40) contentHeight = 40;
 
-        if (g_StockViewMode == StockViewMode::Single)
+        if (g_StockDeckTab == STOCK_DECK_SOUND_SMS)
         {
+            // Sound SMS mode: Full-width table, no tree view, no multi-pane controls
+            if (g_hCategoryTree != NULL) g_CategoryTreeView.Show(false);
+            if (g_hSplitter3 != NULL) ShowWindow(g_hSplitter3, SW_HIDE);
+
+            for (int k = 0; k < 3; ++k)
+            {
+                if (g_hPaneCatBtn[k]) ShowWindow(g_hPaneCatBtn[k], SW_HIDE);
+                if (g_hPaneSearchEdit[k]) ShowWindow(g_hPaneSearchEdit[k], SW_HIDE);
+            }
+            if (g_hAssetList) ShowWindow(g_hAssetList, SW_HIDE);
+            if (g_hAssetList2) ShowWindow(g_hAssetList2, SW_HIDE);
+            if (g_hAssetList3) ShowWindow(g_hAssetList3, SW_HIDE);
+
+            const int HEADER_BAR_H = 26;
+            const int RIGHT_MARGIN = 4;
+            int availW = wTreeSplitWidth - RIGHT_MARGIN;
+            if (availW < 100) availW = 100;
+
+            if (g_hSoundSearchEdit)
+            {
+                SetWindowPos(g_hSoundSearchEdit, NULL, 0, contentY + 2, availW, HEADER_BAR_H - 4, SWP_NOZORDER | SWP_NOCOPYBITS | SWP_SHOWWINDOW);
+                RECT rcFmt = { 8, 3, availW - 26, HEADER_BAR_H - 4 - 3 };
+                SendMessage(g_hSoundSearchEdit, EM_SETRECT, 0, (LPARAM)&rcFmt);
+                SendMessage(g_hSoundSearchEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 26));
+                InvalidateRect(g_hSoundSearchEdit, NULL, TRUE);
+            }
+
+            int listH = contentHeight - HEADER_BAR_H - 4;
+            if (listH < 30) listH = 30;
+
+            if (g_hSoundList)
+            {
+                SetWindowPos(g_hSoundList, NULL, 0, contentY + HEADER_BAR_H, availW, listH, SWP_NOZORDER | SWP_NOCOPYBITS | SWP_SHOWWINDOW);
+            }
+        }
+        else if (g_StockViewMode == StockViewMode::Single)
+        {
+            if (g_hSoundSearchEdit) ShowWindow(g_hSoundSearchEdit, SW_HIDE);
+            if (g_hSoundList) ShowWindow(g_hSoundList, SW_HIDE);
             // Show Category Tree and Splitter 3
             if (g_hCategoryTree != NULL)
             {
@@ -8653,6 +9529,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         else if (g_StockViewMode == StockViewMode::Dual)
         {
+            if (g_hSoundSearchEdit) ShowWindow(g_hSoundSearchEdit, SW_HIDE);
+            if (g_hSoundList) ShowWindow(g_hSoundList, SW_HIDE);
             // Hide Category Tree, Splitter 3, Pane 2 controls
             if (g_hCategoryTree != NULL) g_CategoryTreeView.Show(false);
             if (g_hSplitter3 != NULL) ShowWindow(g_hSplitter3, SW_HIDE);
@@ -8707,6 +9585,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         else if (g_StockViewMode == StockViewMode::Triple)
         {
+            if (g_hSoundSearchEdit) ShowWindow(g_hSoundSearchEdit, SW_HIDE);
+            if (g_hSoundList) ShowWindow(g_hSoundList, SW_HIDE);
             // Hide Category Tree and Splitter 3
             if (g_hCategoryTree != NULL) g_CategoryTreeView.Show(false);
             if (g_hSplitter3 != NULL) ShowWindow(g_hSplitter3, SW_HIDE);
@@ -8820,6 +9700,55 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         int topAreaHeight = paneHeight - visH - splitterSpace;
         if (topAreaHeight < 100) topAreaHeight = 100;
 
+        if (g_ActiveTab == 2)
+        {
+            if (g_hWorkspaceHeader)   ShowWindow(g_hWorkspaceHeader, SW_HIDE);
+            if (g_hEditorPane)        ShowWindow(g_hEditorPane, SW_HIDE);
+            if (g_hSplitterSection3)  ShowWindow(g_hSplitterSection3, SW_HIDE);
+            if (g_hVisualConsistView) ShowWindow(g_hVisualConsistView, SW_HIDE);
+            if (g_hSectionTrainCfg)   ShowWindow(g_hSectionTrainCfg, SW_HIDE);
+            if (g_hLabelFileName)     ShowWindow(g_hLabelFileName, SW_HIDE);
+            if (g_hLabelTrainCfgId)   ShowWindow(g_hLabelTrainCfgId, SW_HIDE);
+            if (g_hLabelTrainName)    ShowWindow(g_hLabelTrainName, SW_HIDE);
+            if (g_hLabelMaxVelocity)  ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
+            if (g_hLabelPerfFactor)   ShowWindow(g_hLabelPerfFactor, SW_HIDE);
+            if (g_hEditFileName)      ShowWindow(g_hEditFileName, SW_HIDE);
+            if (g_hEditTrainCfgId)    ShowWindow(g_hEditTrainCfgId, SW_HIDE);
+            if (g_hEditTrainName)     ShowWindow(g_hEditTrainName, SW_HIDE);
+            if (g_hEditMaxVelocity)   ShowWindow(g_hEditMaxVelocity, SW_HIDE);
+            if (g_hEditPerfFactor)    ShowWindow(g_hEditPerfFactor, SW_HIDE);
+            if (g_hSectionMetrics)    ShowWindow(g_hSectionMetrics, SW_HIDE);
+            if (g_hLabelMetricMass)   ShowWindow(g_hLabelMetricMass, SW_HIDE);
+            if (g_hLabelMetricLength) ShowWindow(g_hLabelMetricLength, SW_HIDE);
+            if (g_hLabelMetricPower)  ShowWindow(g_hLabelMetricPower, SW_HIDE);
+            if (g_hLabelMetricRatio)  ShowWindow(g_hLabelMetricRatio, SW_HIDE);
+            if (g_hEditMetricMass)    ShowWindow(g_hEditMetricMass, SW_HIDE);
+            if (g_hEditMetricLength)  ShowWindow(g_hEditMetricLength, SW_HIDE);
+            if (g_hEditMetricPower)   ShowWindow(g_hEditMetricPower, SW_HIDE);
+            if (g_hEditMetricRatio)   ShowWindow(g_hEditMetricRatio, SW_HIDE);
+            if (g_hUnitPreviewCard)   ShowWindow(g_hUnitPreviewCard, SW_HIDE);
+            if (g_hSectionUnits)      ShowWindow(g_hSectionUnits, SW_HIDE);
+            if (g_hEditorUnitList)    ShowWindow(g_hEditorUnitList, SW_HIDE);
+
+            if (g_hRollingStockStudio)
+            {
+                int studioX = wLeftPane + 9;
+                int studioY = paneY;
+                int studioW = wEditor;
+                int studioH = paneHeight;
+                RollingStockStudio_Resize(g_hRollingStockStudio, studioX, studioY, studioW, studioH);
+                RollingStockStudio_SetVisible(g_hRollingStockStudio, true);
+            }
+            break;
+        }
+        else
+        {
+            if (g_hRollingStockStudio)
+            {
+                RollingStockStudio_SetVisible(g_hRollingStockStudio, false);
+            }
+        }
+
         // Position Workspace Header (static control)
         if (g_hWorkspaceHeader != NULL)
         {
@@ -8881,7 +9810,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             int leftValX = leftCardX + labelW + 10;
 
             int topY = paneY + 28 + GUTTER;
-            int leftY = topY;
+            int leftY = topY + 8; // Centered vertically relative to the 280px unit preview card
 
             // -------------------------------------------------------
             // Left Card: "TRAIN DETAILS" — centered directly over fields
@@ -9028,7 +9957,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         FillRect(hdc, &rcSplit2, hbrSplit);
 
         // Draw Splitter 3 Gutter (vertical Category Tree vs Asset List separator bar in bottom deck when Single mode, and top deck on Activity tab)
-        if (g_StockViewMode == StockViewMode::Single)
+        if (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK && g_StockViewMode == StockViewMode::Single)
         {
             RECT rcSplit3 = { g_wCategorySplit, bottomY + 28, g_wCategorySplit + 9, rc.bottom };
             FillRect(hdc, &rcSplit3, hbrSplit);
@@ -9042,7 +9971,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         // Draw Section 3 Horizontal Splitter Gutter when docked & expanded
         bool isFloating = (g_hVisualConsistView != NULL && VisualConsistView_IsFloating(g_hVisualConsistView));
         bool isCollapsed = (g_hVisualConsistView != NULL && VisualConsistView_IsCollapsed(g_hVisualConsistView));
-        if (g_hSplitterSection3 && !isFloating && !isCollapsed)
+        if (g_hSplitterSection3 && !isFloating && !isCollapsed && g_ActiveTab != 2)
         {
             int splitY = paneY + (rc.bottom - paneY) - g_hSection3Height - 9;
             RECT rcSplitSec3 = { wLeftPane + 9, splitY, rc.right, splitY + 9 };
@@ -9069,7 +9998,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         LineTo(hdc, wLeftPane, paneY + g_hConsistSplit + 8);
 
         // Draw vertical separator inside Stocks (TreeView on left, ListView on right)
-        if (g_StockViewMode == StockViewMode::Single)
+        if (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK && g_StockViewMode == StockViewMode::Single)
         {
             MoveToEx(hdc, g_wCategorySplit, bottomY + 28, NULL);
             LineTo(hdc, g_wCategorySplit, rc.bottom);
@@ -9152,6 +10081,65 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             NMCELLCLICK* pCell = (NMCELLCLICK*)lParam;
             POINT ptScreen = { pCell->itemIndex, pCell->subItemIndex };
 
+            // Sound Library drag hover over BatchSoundMutator or RollingStockStudio
+            if (pnmh->hwndFrom == g_hSoundList)
+            {
+                const ScannedSoundItem* pDraggedSound = nullptr;
+                int singleSel = g_SoundList.GetFirstSelectedIndex();
+                if (singleSel < 0) singleSel = g_SoundList.GetSelectedIndex();
+                EnterCriticalSection(&g_SoundCacheCS);
+                if (singleSel >= 0 && singleSel < (int)g_FilteredSoundIndices.size())
+                {
+                    size_t globalIdx = g_FilteredSoundIndices[singleSel];
+                    if (globalIdx < g_SoundCache.size())
+                    {
+                        pDraggedSound = &g_SoundCache[globalIdx];
+                    }
+                }
+
+                // 1. Check if hovering over BatchSoundMutatorDlg (Tab 0 SMS Presets)
+                if (BatchSoundMutatorDlg_IsOpen())
+                {
+                    std::wstring actionText;
+                    bool isOverMutator = BatchSoundMutatorDlg_HandleDragHover(ptScreen, pDraggedSound, actionText);
+                    if (isOverMutator)
+                    {
+                        LeaveCriticalSection(&g_SoundCacheCS);
+                        if (g_hRollingStockStudio) RollingStockStudio_ClearDragHover(g_hRollingStockStudio);
+                        FluentDragGhost::Move(ptScreen, true, actionText);
+                        return TRUE;
+                    }
+                    else
+                    {
+                        BatchSoundMutatorDlg_ClearDragHover();
+                    }
+                }
+
+                // 2. Check if hovering over RollingStockStudio (Sound Matrix)
+                if (g_hRollingStockStudio && IsWindow(g_hRollingStockStudio) && IsWindowVisible(g_hRollingStockStudio))
+                {
+                    RECT rcStudio = { 0 };
+                    GetWindowRect(g_hRollingStockStudio, &rcStudio);
+                    if (PtInRect(&rcStudio, ptScreen))
+                    {
+                        std::wstring actionText;
+                        bool isValid = RollingStockStudio_HandleDragHover(g_hRollingStockStudio, ptScreen, pDraggedSound, actionText);
+                        LeaveCriticalSection(&g_SoundCacheCS);
+
+                        FluentDragGhost::Move(ptScreen, isValid, actionText);
+                        return isValid ? TRUE : FALSE;
+                    }
+                    else
+                    {
+                        RollingStockStudio_ClearDragHover(g_hRollingStockStudio);
+                        FluentDragGhost::Move(ptScreen, false, L"");
+                    }
+                }
+
+                LeaveCriticalSection(&g_SoundCacheCS);
+                return FALSE;
+            }
+
             // 1. Check if hovering over Batch Consist Wizard pool cards
             if (BatchWizard_IsActive())
             {
@@ -9220,6 +10208,76 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             NMCELLCLICK* pCell = (NMCELLCLICK*)lParam;
             POINT ptScreen = { pCell->itemIndex, pCell->subItemIndex };
+
+            // Check if dropped from Sound Library into BatchSoundMutator or RollingStockStudio
+            if (pnmh->hwndFrom == g_hSoundList)
+            {
+                std::vector<int> selSounds = g_SoundList.GetSelectedIndices();
+                if (selSounds.empty())
+                {
+                    int singleSel = g_SoundList.GetFirstSelectedIndex();
+                    if (singleSel < 0) singleSel = g_SoundList.GetSelectedIndex();
+                    if (singleSel >= 0) selSounds.push_back(singleSel);
+                }
+
+                // 1. Check if dropped onto BatchSoundMutatorDlg
+                if (BatchSoundMutatorDlg_IsOpen())
+                {
+                    bool droppedOnMutator = false;
+                    EnterCriticalSection(&g_SoundCacheCS);
+                    for (int selIdx : selSounds)
+                    {
+                        if (selIdx >= 0 && selIdx < (int)g_FilteredSoundIndices.size())
+                        {
+                            size_t globalIdx = g_FilteredSoundIndices[selIdx];
+                            if (globalIdx < g_SoundCache.size())
+                            {
+                                const ScannedSoundItem& item = g_SoundCache[globalIdx];
+                                if (BatchSoundMutatorDlg_HandleDrop(ptScreen, item))
+                                {
+                                    droppedOnMutator = true;
+                                }
+                            }
+                        }
+                    }
+                    LeaveCriticalSection(&g_SoundCacheCS);
+                    BatchSoundMutatorDlg_ClearDragHover();
+                    if (droppedOnMutator)
+                    {
+                        if (g_hRollingStockStudio) RollingStockStudio_ClearDragHover(g_hRollingStockStudio);
+                        return 0;
+                    }
+                }
+
+                // 2. Check if dropped onto RollingStockStudio
+                if (g_hRollingStockStudio && IsWindow(g_hRollingStockStudio) && IsWindowVisible(g_hRollingStockStudio))
+                {
+                    RECT rcStudio = { 0 };
+                    GetWindowRect(g_hRollingStockStudio, &rcStudio);
+                    if (PtInRect(&rcStudio, ptScreen))
+                    {
+                        EnterCriticalSection(&g_SoundCacheCS);
+                        for (int selIdx : selSounds)
+                        {
+                            if (selIdx >= 0 && selIdx < (int)g_FilteredSoundIndices.size())
+                            {
+                                size_t globalIdx = g_FilteredSoundIndices[selIdx];
+                                if (globalIdx < g_SoundCache.size())
+                                {
+                                    const ScannedSoundItem& item = g_SoundCache[globalIdx];
+                                    RollingStockStudio_HandleDrop(g_hRollingStockStudio, ptScreen, item);
+                                    break;
+                                }
+                            }
+                        }
+                        LeaveCriticalSection(&g_SoundCacheCS);
+                        RollingStockStudio_ClearDragHover(g_hRollingStockStudio);
+                        return 0;
+                    }
+                }
+                RollingStockStudio_ClearDragHover(g_hRollingStockStudio);
+                return 0;
+            }
 
             // 1. Check if dropped into Batch Consist Wizard pool cards
             if (BatchWizard_IsActive())
@@ -9515,6 +10573,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 menuItems.push_back(ContextMenuItem::Action(19, L"\xE7F4", L"Inspect in 3D Visual Studio (Stock Inspector)...", L"", hasSelection));
                 menuItems.push_back(ContextMenuItem::Action(18, L"\xE7B7", L"View 3D Model in Shape Viewer...", L"", hasSelection));
                 menuItems.push_back(ContextMenuItem::Separator());
+                menuItems.push_back(ContextMenuItem::Action(25, L"\xE70F", L"Open .eng/.wag in Default Editor", L"Enter", hasSelection));
+                menuItems.push_back(ContextMenuItem::Separator());
                 menuItems.push_back(ContextMenuItem::Action(7, L"\xE7A7", L"Undo", L"Ctrl+Z", canUndo));
                 menuItems.push_back(ContextMenuItem::Action(8, L"\xE7A6", L"Redo", L"Ctrl+Y", canRedo));
             }
@@ -9552,6 +10612,26 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             case 20:
             {
                 CopySelectedUnitNamesToClipboard(hWnd);
+                break;
+            }
+            case 25:
+            {
+                if (!selIndices.empty())
+                {
+                    int idx = selIndices[0];
+                    if (idx >= 0 && idx < (int)g_LoadedConsistUnits.size())
+                    {
+                        const auto& u = g_LoadedConsistUnits[idx];
+                        std::wstring fullPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, u.isEngine ? L".eng" : L".wag");
+                        if (GetFileAttributesW(fullPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+                        {
+                            std::wstring altExt = u.isEngine ? L".wag" : L".eng";
+                            std::wstring altPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, altExt);
+                            if (GetFileAttributesW(altPath.c_str()) != INVALID_FILE_ATTRIBUTES) fullPath = altPath;
+                        }
+                        OpenFileInDefaultEditor(hWnd, fullPath);
+                    }
+                }
                 break;
             }
             case 14:
@@ -9621,6 +10701,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             bool hasSelection = !selRows.empty();
 
             std::vector<ContextMenuItem> menuItems = {
+                ContextMenuItem::Action(6, L"\xE916", L"Batch Sound Mutator...", L"", hasSelection),
+                ContextMenuItem::Separator(),
                 ContextMenuItem::Action(1, L"\xE790", L"Mutate Consist(s) from Pool Preset...", L"", hasSelection),
                 ContextMenuItem::Action(2, L"\xE77F", L"Insert Units from Pool Preset...", L"", hasSelection),
                 ContextMenuItem::Separator(),
@@ -9694,6 +10776,137 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             case 3: ActionCloneConsist(hWnd); break;
             case 4: ActionDeleteSelectedConsists(hWnd); break;
             case 5: SendMessage(hWnd, WM_COMMANDBAR_ACTION, CMD_ACTION_SAVE_CONSISTS, 0); break;
+            case 6:
+            {
+                std::vector<std::wstring> selFiles;
+                if (g_ActiveTab == 1)
+                {
+                    for (int r : selRows)
+                    {
+                        std::wstring idxStr = g_ConsistList.GetCellText(r, 3);
+                        if (!idxStr.empty()) selFiles.push_back(L"ACTIVITY:" + idxStr);
+                    }
+                }
+                else
+                {
+                    for (int r : selRows)
+                    {
+                        std::wstring fn = g_ConsistList.GetCellText(r, 4);
+                        if (!fn.empty())
+                        {
+                            std::wstring fp = EnsureConsistFilePath(g_szBasePath, fn);
+                            if (!fp.empty()) selFiles.push_back(fp);
+                        }
+                    }
+                }
+                ShowBatchSoundMutatorDialog(hWnd, g_szBasePath, selFiles, 0);
+                break;
+            }
+            }
+            return 0;
+        }
+
+        if (idCtrl == IDC_SOUNDLIST && (pnmh->code == NM_DBLCLK || pnmh->code == NM_RETURN))
+        {
+            int selSound = g_SoundList.GetSelectedIndex();
+            if (selSound >= 0 && selSound < (int)g_FilteredSoundIndices.size())
+            {
+                EnterCriticalSection(&g_SoundCacheCS);
+                size_t globalIdx = g_FilteredSoundIndices[selSound];
+                std::wstring fullPath = (globalIdx < g_SoundCache.size()) ? g_SoundCache[globalIdx].szFullPath : L"";
+                LeaveCriticalSection(&g_SoundCacheCS);
+
+                if (!fullPath.empty())
+                {
+                    SwitchActiveConsistTab(hWnd, 2);
+                    if (g_hRollingStockStudio)
+                    {
+                        RollingStockStudio_SetDirectSms(g_hRollingStockStudio, fullPath, g_szBasePath);
+                    }
+                }
+            }
+            return 0;
+        }
+
+        if (idCtrl == IDC_SOUNDLIST && pnmh->code == NM_RCELLCLICK)
+        {
+            NMCELLCLICK* pCell = (NMCELLCLICK*)lParam;
+            int screenX = pCell->itemIndex;
+            int screenY = pCell->subItemIndex;
+
+            int selSound = g_SoundList.GetSelectedIndex();
+            bool hasSoundSel = (selSound >= 0 && selSound < (int)g_FilteredSoundIndices.size());
+
+            std::vector<ContextMenuItem> soundMenu = {
+                ContextMenuItem::Action(5, L"\xE70F", L"Open in SMS Editor & Studio", L"Enter", hasSoundSel),
+                ContextMenuItem::Action(4, L"\xE70F", L"Open .sms in Default Text Editor", L"", hasSoundSel),
+                ContextMenuItem::Separator(),
+                ContextMenuItem::Action(1, L"\xE8C8", L"Copy SMS File Name", L"Ctrl+C", hasSoundSel),
+                ContextMenuItem::Action(2, L"\xE8C8", L"Copy Relative Path", L"Ctrl+Shift+C", hasSoundSel),
+                ContextMenuItem::Separator(),
+                ContextMenuItem::Action(3, L"\xE8DA", L"Open Containing Folder in Explorer", L"", hasSoundSel)
+            };
+
+            int cmd = ModernContextMenu::Show(hWnd, screenX, screenY, soundMenu, TRUE);
+            if (hasSoundSel && cmd > 0)
+            {
+                EnterCriticalSection(&g_SoundCacheCS);
+                size_t globalIdx = g_FilteredSoundIndices[selSound];
+                ScannedSoundItem item = (globalIdx < g_SoundCache.size()) ? g_SoundCache[globalIdx] : ScannedSoundItem();
+                LeaveCriticalSection(&g_SoundCacheCS);
+
+                if (!item.szFileName.empty())
+                {
+                    if (cmd == 1)
+                    {
+                        if (OpenClipboard(hWnd))
+                        {
+                            EmptyClipboard();
+                            size_t bytes = (item.szFileName.length() + 1) * sizeof(wchar_t);
+                            HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, bytes);
+                            if (hGlob)
+                            {
+                                memcpy(GlobalLock(hGlob), item.szFileName.c_str(), bytes);
+                                GlobalUnlock(hGlob);
+                                SetClipboardData(CF_UNICODETEXT, hGlob);
+                            }
+                            CloseClipboard();
+                        }
+                    }
+                    else if (cmd == 2)
+                    {
+                        if (OpenClipboard(hWnd))
+                        {
+                            EmptyClipboard();
+                            size_t bytes = (item.szRelativePath.length() + 1) * sizeof(wchar_t);
+                            HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, bytes);
+                            if (hGlob)
+                            {
+                                memcpy(GlobalLock(hGlob), item.szRelativePath.c_str(), bytes);
+                                GlobalUnlock(hGlob);
+                                SetClipboardData(CF_UNICODETEXT, hGlob);
+                            }
+                            CloseClipboard();
+                        }
+                    }
+                    else if (cmd == 3)
+                    {
+                        std::wstring exploreCmd = L"/select,\"" + item.szFullPath + L"\"";
+                        ShellExecuteW(NULL, L"open", L"explorer.exe", exploreCmd.c_str(), NULL, SW_SHOWNORMAL);
+                    }
+                    else if (cmd == 4)
+                    {
+                        OpenFileInDefaultEditor(hWnd, item.szFullPath);
+                    }
+                    else if (cmd == 5)
+                    {
+                        SwitchActiveConsistTab(hWnd, 2);
+                        if (g_hRollingStockStudio)
+                        {
+                            RollingStockStudio_SetDirectSms(g_hRollingStockStudio, item.szFullPath, g_szBasePath);
+                        }
+                    }
+                }
             }
             return 0;
         }
@@ -9744,7 +10957,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 ContextMenuItem::Separator(),
                 ContextMenuItem::Action(17, L"\xE946", L"Inspect Stock Specifications (Stock Info)...", L"", hasStockSel),
                 ContextMenuItem::Action(19, L"\xE7F4", L"Inspect in 3D Visual Studio (Stock Inspector)...", L"", hasStockSel),
-                ContextMenuItem::Action(18, L"\xE7B7", L"View 3D Model in Shape Viewer...", L"", hasStockSel)
+                ContextMenuItem::Action(18, L"\xE7B7", L"View 3D Model in Shape Viewer...", L"", hasStockSel),
+                ContextMenuItem::Separator(),
+                ContextMenuItem::Action(25, L"\xE70F", L"Open .eng/.wag in Default Editor", L"", hasStockSel)
             };
 
             int cmd = ModernContextMenu::Show(hWnd, screenX, screenY, menuItems, TRUE);
@@ -9772,11 +10987,45 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 Show3DVisualStudioDialog(hWnd, targetPath, g_szBasePath);
                 break;
             }
+            case 25:
+            {
+                if (hasStockSel)
+                {
+                    const auto& u = selectedStock[0];
+                    std::wstring fullPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, u.isEngine ? L".eng" : L".wag");
+                    if (GetFileAttributesW(fullPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+                    {
+                        std::wstring altExt = u.isEngine ? L".wag" : L".eng";
+                        std::wstring altPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, altExt);
+                        if (GetFileAttributesW(altPath.c_str()) != INVALID_FILE_ATTRIBUTES) fullPath = altPath;
+                    }
+                    OpenFileInDefaultEditor(hWnd, fullPath);
+                }
+                break;
+            }
             }
             return 0;
         }
 
-        if ((idCtrl == IDC_ASSETLIST || idCtrl == IDC_ASSETLIST2 || idCtrl == IDC_ASSETLIST3) && (pnmh->code == NM_DBLCLK || pnmh->code == NM_RETURN))
+        if ((idCtrl == IDC_ASSETLIST || idCtrl == IDC_ASSETLIST2 || idCtrl == IDC_ASSETLIST3) && pnmh->code == NM_DBLCLK)
+        {
+            std::vector<ConsistReader::UnitInfo> selectedStock = GetSelectedStockUnitsFromLibrary(pnmh->hwndFrom);
+            if (!selectedStock.empty())
+            {
+                const auto& u = selectedStock[0];
+                std::wstring fullPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, u.isEngine ? L".eng" : L".wag");
+                if (GetFileAttributesW(fullPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+                {
+                    std::wstring altExt = u.isEngine ? L".wag" : L".eng";
+                    std::wstring altPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, altExt);
+                    if (GetFileAttributesW(altPath.c_str()) != INVALID_FILE_ATTRIBUTES) fullPath = altPath;
+                }
+                OpenFileInDefaultEditor(hWnd, fullPath);
+            }
+            return 0;
+        }
+
+        if ((idCtrl == IDC_ASSETLIST || idCtrl == IDC_ASSETLIST2 || idCtrl == IDC_ASSETLIST3) && pnmh->code == NM_RETURN)
         {
             std::vector<ConsistReader::UnitInfo> selectedStock = GetSelectedStockUnitsFromLibrary(pnmh->hwndFrom);
             if (!selectedStock.empty())
@@ -9881,7 +11130,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         LoadAndDisplayActivityConsist(hWnd, cIdx);
                     }
                 }
-                else // Main Consists Tab
+                else // Main Consists Tab & Sound Editing Tab
                 {
                     std::wstring filename = g_ConsistList.GetCellText(sel, 4);
                     if (!filename.empty())
@@ -9891,6 +11140,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 }
             }
             SyncPoolMutatorSelectionIfOpen();
+            SyncBatchSoundMutatorSelectionIfOpen();
+            SyncSmsStreamMutatorSelectionIfOpen();
             return 0;
         }
         else if (pnmhdr->hwndFrom == g_hEditorUnitList && (pnmhdr->code == NM_CELLCLICK || pnmhdr->code == NM_CLICK))
@@ -9985,9 +11236,70 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 {
                     VisualConsistView_SetSelected(g_hVisualConsistView, originalIndex);
                 }
+
+                if (SmsStreamMutatorDlg_IsOpen() && originalIndex >= 0 && originalIndex < (int)g_LoadedConsistUnits.size())
+                {
+                    const auto& u = g_LoadedConsistUnits[originalIndex];
+                    std::wstring bp = g_szBasePath;
+                    if (!bp.empty() && bp.back() != L'\\') bp += L'\\';
+                    std::wstring fullStockFolder = bp + L"TRAINS\\TRAINSET\\" + u.parentDir;
+                    std::wstring fullPath = fullStockFolder + L"\\" + u.uid + (u.isEngine ? L".eng" : L".wag");
+                    RSSUnitSoundInfo info;
+                    if (SoundStudio_ParseUnitSound(fullPath, fullStockFolder, bp, info))
+                    {
+                        std::vector<SmsCategorizedTargetInput> engFiles, wagFiles;
+                        std::wstring cName = g_szCurrentConsistFile;
+                        size_t ls = cName.find_last_of(L"\\/");
+                        if (ls != std::wstring::npos) cName = cName.substr(ls + 1);
+
+                        auto addS = [&](const RSSSoundEntry& s, const std::wstring& slot) {
+                            if (s.existsOnDisk && !s.fullDiskPath.empty()) {
+                                SmsCategorizedTargetInput item;
+                                item.fullPath = s.fullDiskPath;
+                                item.usage.consistName = cName;
+                                item.usage.unitUid = u.uid;
+                                item.usage.unitIndex = originalNo;
+                                item.usage.isEngine = u.isEngine;
+                                item.usage.soundSlot = slot;
+
+                                if (u.isEngine) engFiles.push_back(item);
+                                else wagFiles.push_back(item);
+                            }
+                        };
+                        for (const auto& s : info.wagonSounds) addS(s, u.isEngine ? L"Wagon/Tender Sound" : L"Wagon Sound");
+                        for (const auto& s : info.engineSounds) addS(s, L"Engine Sound");
+                        for (const auto& s : info.orts3dCabSounds) addS(s, L"Cab Sound");
+                        for (const auto& s : info.insideSounds) addS(s, L"Interior Sound");
+                        SmsStreamMutatorDlg_SetCategorizedTargetsWithUsage(engFiles, wagFiles);
+                    }
+                }
             }
             UpdateUnitPreviewFromSelected();
             SyncPoolMutatorSelectionIfOpen();
+            return 0;
+        }
+        else if (pnmhdr->hwndFrom == g_hEditorUnitList && (pnmhdr->code == NM_DBLCLK))
+        {
+            int sel = g_EditorUnitList.GetSelectedIndex();
+            if (sel >= 0)
+            {
+                std::wstring strNo = g_EditorUnitList.GetCellText(sel, 0);
+                int originalNo = _wtoi(strNo.c_str());
+                int originalIndex = originalNo - 1;
+                if (originalIndex >= 0 && originalIndex < (int)g_LoadedConsistUnits.size())
+                {
+                    const auto& u = g_LoadedConsistUnits[originalIndex];
+                    std::wstring fullPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, u.isEngine ? L".eng" : L".wag");
+                    if (GetFileAttributesW(fullPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+                    {
+                        std::wstring altExt = u.isEngine ? L".wag" : L".eng";
+                        std::wstring altPath = BuildFullStockPath(g_szBasePath, u.parentDir, u.uid, altExt);
+                        if (GetFileAttributesW(altPath.c_str()) != INVALID_FILE_ATTRIBUTES) fullPath = altPath;
+                    }
+                    OpenFileInDefaultEditor(hWnd, fullPath);
+                    return 0;
+                }
+            }
             return 0;
         }
         else if ((pnmhdr->hwndFrom == g_hAssetList || pnmhdr->hwndFrom == g_hAssetList2 || pnmhdr->hwndFrom == g_hAssetList3) &&
@@ -9995,6 +11307,54 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         {
             SetActivePane(PANE_STOCK, hWnd);
             UpdateUnitPreviewFromSelected();
+
+            if (g_hRollingStockStudio && (g_ActiveTab == 2 || SmsStreamMutatorDlg_IsOpen()))
+            {
+                CustomListControl* pActiveAssetList = &g_AssetList;
+                if (pnmhdr->hwndFrom == g_hAssetList2) pActiveAssetList = &g_AssetList2;
+                else if (pnmhdr->hwndFrom == g_hAssetList3) pActiveAssetList = &g_AssetList3;
+
+                int selIdx = pActiveAssetList->GetFirstSelectedIndex();
+                if (selIdx >= 0 && selIdx < pActiveAssetList->GetItemCount())
+                {
+                    std::wstring fileName = pActiveAssetList->GetCellText(selIdx, 0);
+                    std::wstring category = pActiveAssetList->GetCellText(selIdx, 1);
+                    std::wstring folder = pActiveAssetList->GetCellText(selIdx, 2);
+
+                    StockItem item;
+                    item.szFileName = fileName;
+                    item.szCategory = category;
+                    item.szFolder = folder;
+                    item.szExtension = (category == L"Freight" || category == L"Passenger") ? L".wag" : L".eng";
+
+                    std::wstring basePath = g_szBasePath;
+                    RollingStockStudio_SetDirectStock(g_hRollingStockStudio, item, basePath);
+                }
+            }
+            return 0;
+        }
+        else if (pnmhdr->hwndFrom == g_hSoundList &&
+                 (pnmhdr->code == NM_CLICK || pnmhdr->code == NM_CELLCLICK || pnmhdr->code == NM_RETURN))
+        {
+            // Only inspect/open .sms directly when user is currently active inside the SMS Editor Studio (Sub-Tab 1).
+            // When in Sound Matrix View (Sub-Tab 0) or other tabs, single-click does NOT read or wipe the consist.
+            if (g_ActiveTab == 2 && g_hRollingStockStudio && RollingStockStudio_GetActiveSubTab(g_hRollingStockStudio) == 1)
+            {
+                int selSound = g_SoundList.GetFirstSelectedIndex();
+                if (selSound < 0) selSound = g_SoundList.GetSelectedIndex();
+                if (selSound >= 0 && selSound < (int)g_FilteredSoundIndices.size())
+                {
+                    EnterCriticalSection(&g_SoundCacheCS);
+                    size_t globalIdx = g_FilteredSoundIndices[selSound];
+                    std::wstring fullPath = (globalIdx < g_SoundCache.size()) ? g_SoundCache[globalIdx].szFullPath : L"";
+                    LeaveCriticalSection(&g_SoundCacheCS);
+
+                    if (!fullPath.empty())
+                    {
+                        RollingStockStudio_OpenSmsInEditor(g_hRollingStockStudio, fullPath);
+                    }
+                }
+            }
             return 0;
         }
     }
@@ -10022,11 +11382,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
         }
 
-        size_t totalDirty = dirtyMainFiles.size() + dirtyActivityIndices.size();
+        std::vector<std::wstring> dirtySoundUnits;
+        std::wstring dirtySmsPath;
+        if (g_hRollingStockStudio && IsWindow(g_hRollingStockStudio))
+        {
+            dirtySoundUnits = SoundStudio_GetDirtyUnitNames(g_hRollingStockStudio);
+            dirtySmsPath = SoundStudio_GetDirtySmsFile(g_hRollingStockStudio);
+        }
+
+        size_t totalDirty = dirtyMainFiles.size() + dirtyActivityIndices.size() + dirtySoundUnits.size() + (dirtySmsPath.empty() ? 0 : 1);
 
         if (totalDirty > 0)
         {
-            std::wstring prompt = L"You have " + std::to_wstring(totalDirty) + L" consist" + (totalDirty > 1 ? L"s" : L"") + L" with unsaved changes:\r\n";
+            std::wstring prompt = L"You have " + std::to_wstring(totalDirty) + L" item" + (totalDirty > 1 ? L"s" : L"") + L" with unsaved changes:\r\n";
             prompt += L"────────────────────────────────────────────────────────\r\n";
 
             size_t listed = 0;
@@ -10034,7 +11402,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
                 if (listed < 8)
                 {
-                    prompt += L"  • " + fname + L"\r\n";
+                    prompt += L"  • " + fname + L" (Consist)\r\n";
                     listed++;
                 }
             }
@@ -10058,13 +11426,31 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
                 if (listed < 8)
                 {
-                    prompt += L"  • " + actFileNameOnly + L" - " + g_CurrentActivityData.consists[actIdx].name + L"\r\n";
+                    prompt += L"  • " + actFileNameOnly + L" - " + g_CurrentActivityData.consists[actIdx].name + L" (Activity Consist)\r\n";
                     listed++;
                 }
             }
+
+            for (const auto& uName : dirtySoundUnits)
+            {
+                if (listed < 8)
+                {
+                    prompt += L"  • " + uName + L" (Sound Matrix)\r\n";
+                    listed++;
+                }
+            }
+
+            if (!dirtySmsPath.empty() && listed < 8)
+            {
+                size_t slash = dirtySmsPath.find_last_of(L"\\/");
+                std::wstring smsName = (slash != std::wstring::npos) ? dirtySmsPath.substr(slash + 1) : dirtySmsPath;
+                prompt += L"  • " + smsName + L" (SMS Editor)\r\n";
+                listed++;
+            }
+
             if (totalDirty > 8)
             {
-                prompt += L"  • ... and " + std::to_wstring(totalDirty - 8) + L" more items\r\n";
+                prompt += L"  • ... and " + std::to_wstring(totalDirty - listed) + L" more items\r\n";
             }
             prompt += L"\r\nDo you want to save all changes before exiting?";
 
@@ -10084,6 +11470,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 for (int actIdx : dirtyActivityIndices)
                 {
                     SaveActivityConsistByIndex(hWnd, actIdx, -1);
+                }
+                if (g_hRollingStockStudio && IsWindow(g_hRollingStockStudio))
+                {
+                    if (!dirtySoundUnits.empty())
+                    {
+                        SoundStudio_SaveAllChanges(g_hRollingStockStudio);
+                    }
+                    if (!dirtySmsPath.empty())
+                    {
+                        SoundStudio_SaveCurrentSms(g_hRollingStockStudio);
+                    }
                 }
                 DestroyWindow(hWnd);
                 return 0;
@@ -10106,6 +11503,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     case WM_DESTROY:
         g_bCancelScan = TRUE;
         CancelStockScan(g_hStockScanThread);
+        CancelSoundScan(g_hSoundScanThread);
         if (g_hScanThread != NULL)
         {
             WaitForSingleObject(g_hScanThread, 200);
@@ -10113,6 +11511,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_hScanThread = NULL;
         }
         DeleteCriticalSection(&g_StockCacheCS);
+        CleanupSoundScanner();
 
         // Cancel Consists Directory Watcher Thread
         g_bCancelWatcher = TRUE;

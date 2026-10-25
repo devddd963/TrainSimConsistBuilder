@@ -1352,6 +1352,44 @@ namespace PoolMutator
         return modified;
     }
 
+    bool PurgeUnitsVector(
+        std::vector<ConsistReader::UnitInfo>& units,
+        const std::vector<BrokenUnitInfo>& brokenUnits,
+        std::wstring& outError,
+        int& outPurgedCount)
+    {
+        outError.clear();
+        outPurgedCount = 0;
+
+        std::vector<int> removeIndices;
+        for (const auto& bu : brokenUnits)
+        {
+            if (bu.isSelected && bu.unitIndex >= 0 && bu.unitIndex < (int)units.size())
+            {
+                removeIndices.push_back(bu.unitIndex);
+            }
+        }
+
+        if (removeIndices.empty())
+        {
+            return false;
+        }
+
+        std::sort(removeIndices.rbegin(), removeIndices.rend());
+        removeIndices.erase(std::unique(removeIndices.begin(), removeIndices.end()), removeIndices.end());
+
+        for (int idx : removeIndices)
+        {
+            if (idx >= 0 && idx < (int)units.size())
+            {
+                units.erase(units.begin() + idx);
+                outPurgedCount++;
+            }
+        }
+
+        return (outPurgedCount > 0);
+    }
+
     bool GenerateFullConsistFromSourceNode(
         int sourceId,
         const MutatorOptions& options,
@@ -1691,7 +1729,7 @@ namespace PoolMutator
 
                     if (options.createClones)
                     {
-                        std::wstring bakPath = bcon.filePath + L".bak";
+                        std::wstring bakPath = bcon.filePath + L".TSCB_BACKUP";
                         CopyFileW(bcon.filePath.c_str(), bakPath.c_str(), FALSE);
                     }
 
@@ -1713,7 +1751,7 @@ namespace PoolMutator
                     totalUnitsRepaired += repCount;
                     if (options.createClones)
                     {
-                        std::wstring bakPath = bcon.filePath + L".bak";
+                        std::wstring bakPath = bcon.filePath + L".TSCB_BACKUP";
                         CopyFileW(bcon.filePath.c_str(), bakPath.c_str(), FALSE);
                     }
 

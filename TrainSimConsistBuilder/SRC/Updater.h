@@ -1,12 +1,13 @@
 #pragma once
 #include <windows.h>
 #include <string>
+#include "../../Common/Version.h"
 
 namespace Updater
 {
     const wchar_t APP_TITLE[] = L"Train Sim Consist Builder for Open Rails";
-    const wchar_t APP_VERSION[] = L"9.3.0";
-    const int APP_BUILD_NUMBER = 96000;
+    const wchar_t APP_VERSION[] = TSCB_VERSION_WSTR;
+    const int APP_BUILD_NUMBER = TSCB_BUILD_NUMBER;
     const wchar_t APP_UPDATE_ZIP_NAME[] = L"TrainSimConsistBuilder.zip";
 
 #if defined(_WIN64)

@@ -2,6 +2,8 @@
 
 #include <string>
 #include <vector>
+#include <cmath>
+#include <cwchar>
 
 namespace ConsistReader {
     struct TrainConfig {
@@ -9,6 +11,14 @@ namespace ConsistReader {
         std::wstring name;          // display name e.g. "INTERCITY EXP"
         double      maxVelocity = 0.0;  // km/h (converted from m/s on load)
         double      perfFactor  = 0.0;  // percentage (raw fraction × 100)
+
+        bool operator==(const TrainConfig& o) const {
+            return trainCfgId == o.trainCfgId &&
+                   name == o.name &&
+                   std::fabs(maxVelocity - o.maxVelocity) < 1e-4 &&
+                   std::fabs(perfFactor - o.perfFactor) < 1e-4;
+        }
+        bool operator!=(const TrainConfig& o) const { return !(*this == o); }
     };
 
     struct EngineInfo {
@@ -26,8 +36,16 @@ namespace ConsistReader {
     struct UnitInfo {
         std::wstring uid;
         std::wstring parentDir;
-        bool         isEngine;
+        bool         isEngine = false;
         bool         isFlipped = false;
+
+        bool operator==(const UnitInfo& o) const {
+            return isEngine == o.isEngine &&
+                   isFlipped == o.isFlipped &&
+                   _wcsicmp(uid.c_str(), o.uid.c_str()) == 0 &&
+                   _wcsicmp(parentDir.c_str(), o.parentDir.c_str()) == 0;
+        }
+        bool operator!=(const UnitInfo& o) const { return !(*this == o); }
     };
 
     struct ConsistData {

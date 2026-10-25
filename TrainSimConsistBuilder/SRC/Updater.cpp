@@ -1,12 +1,14 @@
 #include "Updater.h"
 #include "DatabaseManager.h"
 #include <windows.h>
+#include <winver.h>
 #include <shlwapi.h>
 #include <wininet.h>
 #include <shellapi.h>
 #include <string>
 #include <vector>
 #include <sstream>
+#include <fstream>
 #include <algorithm>
 #include <thread>
 #include "../UI/ModernMessageBox.h"
@@ -16,18 +18,81 @@
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "version.lib")
 
 namespace Updater
 {
     static const wchar_t VERSION_JSON_URL[] = L"https://raw.githubusercontent.com/devddd963/TrainSimConsistBuilder/main/Version.json";
 
+    static void QueryModuleVersionInfo(std::wstring& outVersion, int& outBuild)
+    {
+        outVersion.clear();
+        outBuild = 0;
+
+        wchar_t szExe[MAX_PATH] = { 0 };
+        if (GetModuleFileNameW(NULL, szExe, MAX_PATH) == 0) return;
+
+        DWORD dwDummy = 0;
+        DWORD dwSize = GetFileVersionInfoSizeW(szExe, &dwDummy);
+        if (dwSize == 0) return;
+
+        std::vector<BYTE> data(dwSize);
+        if (!GetFileVersionInfoW(szExe, 0, dwSize, data.data())) return;
+
+        // Try reading StringFileInfo ProductVersion
+        LPWSTR lpBuffer = nullptr;
+        UINT uLen = 0;
+        if (VerQueryValueW(data.data(), L"\\StringFileInfo\\040904b0\\ProductVersion", (LPVOID*)&lpBuffer, &uLen) && lpBuffer && uLen > 0)
+        {
+            outVersion = lpBuffer;
+        }
+
+        // Try reading StringFileInfo BuildNumber
+        if (VerQueryValueW(data.data(), L"\\StringFileInfo\\040904b0\\BuildNumber", (LPVOID*)&lpBuffer, &uLen) && lpBuffer && uLen > 0)
+        {
+            outBuild = _wtoi(lpBuffer);
+        }
+
+        // Check VS_FIXEDFILEINFO for version/build if not obtained
+        VS_FIXEDFILEINFO* pFfi = nullptr;
+        if (VerQueryValueW(data.data(), L"\\", (LPVOID*)&pFfi, &uLen) && pFfi)
+        {
+            if (outVersion.empty())
+            {
+                int major = HIWORD(pFfi->dwFileVersionMS);
+                int minor = LOWORD(pFfi->dwFileVersionMS);
+                int patch = HIWORD(pFfi->dwFileVersionLS);
+                wchar_t buf[64];
+                swprintf_s(buf, L"%d.%d.%d", major, minor, patch);
+                outVersion = buf;
+            }
+
+            if (outBuild == 0)
+            {
+                int buildLS = LOWORD(pFfi->dwFileVersionLS);
+                if (buildLS > 0)
+                {
+                    outBuild = buildLS;
+                }
+            }
+        }
+    }
+
     int GetCurrentBuildNumber()
     {
+        std::wstring ver;
+        int build = 0;
+        QueryModuleVersionInfo(ver, build);
+        if (build > 0) return build;
         return APP_BUILD_NUMBER;
     }
 
     std::wstring GetCurrentVersion()
     {
+        std::wstring ver;
+        int build = 0;
+        QueryModuleVersionInfo(ver, build);
+        if (!ver.empty()) return ver;
         return APP_VERSION;
     }
 
@@ -138,6 +203,29 @@ namespace Updater
         return result;
     }
 
+    static bool IsRemoteVersionNewer(const std::wstring& remoteVer, int remoteBuild,
+                                      const std::wstring& currentVer, int currentBuild)
+    {
+        // 1. If both build numbers are specified and valid, compare build numbers
+        if (remoteBuild > 0 && currentBuild > 0)
+        {
+            if (remoteBuild > currentBuild) return true;
+            if (remoteBuild < currentBuild) return false;
+        }
+
+        // 2. Compare semantic version components (Major.Minor.Patch)
+        int rMaj = 0, rMin = 0, rPatch = 0;
+        int cMaj = 0, cMin = 0, cPatch = 0;
+        swscanf_s(remoteVer.c_str(), L"%d.%d.%d", &rMaj, &rMin, &rPatch);
+        swscanf_s(currentVer.c_str(), L"%d.%d.%d", &cMaj, &cMin, &cPatch);
+
+        if (rMaj != cMaj) return rMaj > cMaj;
+        if (rMin != cMin) return rMin > cMin;
+        if (rPatch != cPatch) return rPatch > cPatch;
+
+        return false;
+    }
+
     static bool ParseVersionJson(const std::string& json, UpdateInfo& outInfo)
     {
         if (json.empty()) return false;
@@ -170,7 +258,7 @@ namespace Updater
                 outInfo.remoteVersion + L"/" + APP_UPDATE_ZIP_NAME;
         }
 
-        if (outInfo.remoteBuild > GetCurrentBuildNumber())
+        if (IsRemoteVersionNewer(outInfo.remoteVersion, outInfo.remoteBuild, GetCurrentVersion(), GetCurrentBuildNumber()))
         {
             outInfo.isUpdateAvailable = true;
         }
@@ -374,6 +462,43 @@ namespace Updater
             return false;
         }
 
+        // Determine whether current caller process is 64-bit or 32-bit
+#if defined(_WIN64)
+        bool isCaller64Bit = true;
+#else
+        bool isCaller64Bit = false;
+#endif
+
+        // Dynamically inspect UpdateStaging directory to find target executable
+        std::wstring targetExeName;
+        std::wstring exe64, exe32;
+        WIN32_FIND_DATAW fd;
+        HANDLE hFind = FindFirstFileW((szStagingDir + L"\\*.exe").c_str(), &fd);
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            do {
+                std::wstring name = fd.cFileName;
+                if (name.find(L"32.exe") != std::wstring::npos || name.find(L"32") != std::wstring::npos)
+                {
+                    exe32 = name;
+                }
+                else
+                {
+                    exe64 = name;
+                }
+            } while (FindNextFileW(hFind, &fd));
+            FindClose(hFind);
+        }
+
+        if (isCaller64Bit)
+        {
+            targetExeName = !exe64.empty() ? exe64 : (!exe32.empty() ? exe32 : L"TrainSimConsistBuilder.exe");
+        }
+        else
+        {
+            targetExeName = !exe32.empty() ? exe32 : (!exe64.empty() ? exe64 : L"TrainSimConsistBuilder32.exe");
+        }
+
         // Save installed build and version to database before restart
         DatabaseManager::SetSettingInt(L"InstalledBuild", info.remoteBuild);
         if (!info.remoteVersion.empty())
@@ -382,6 +507,11 @@ namespace Updater
         }
 
         // Create atomic update batch script
+        // 1. Cleans existing .exe and .dll files in root directory (safely leaves AppData, DATABASE, Screenshots, etc. intact)
+        // 2. Copies new binaries and assets from UpdateStaging into root
+        // 3. Cleans staging and zip
+        // 4. Starts the dynamically detected target executable
+        // 5. Deletes the batch script itself
         std::ofstream cmdFile(szHelperCmd, std::ios::out | std::ios::trunc);
         if (!cmdFile.is_open())
         {
@@ -389,16 +519,21 @@ namespace Updater
             return false;
         }
 
+        char szNarrowExe[MAX_PATH] = { 0 };
+        WideCharToMultiByte(CP_ACP, 0, targetExeName.c_str(), -1, szNarrowExe, MAX_PATH, NULL, NULL);
+
         cmdFile << "@echo off\r\n";
         cmdFile << "timeout /t 1 /nobreak >nul\r\n";
+        cmdFile << "del /f /q \"%~dp0..\\*.exe\" >nul 2>&1\r\n";
+        cmdFile << "del /f /q \"%~dp0..\\*.dll\" >nul 2>&1\r\n";
         cmdFile << "xcopy /s /e /y /q \"%~dp0UpdateStaging\\*\" \"%~dp0..\\\" >nul\r\n";
         cmdFile << "rmdir /s /q \"%~dp0UpdateStaging\" >nul 2>&1\r\n";
         cmdFile << "del /f /q \"%~dp0TrainSimConsistBuilder_Update.zip\" >nul 2>&1\r\n";
-        cmdFile << "start \"\" \"%~dp0..\\TrainSimConsistBuilder.exe\"\r\n";
+        cmdFile << "start \"\" \"%~dp0..\\" << szNarrowExe << "\"\r\n";
         cmdFile << "(goto) 2>nul & del \"%~f0\"\r\n";
         cmdFile.close();
 
-        LOG_INFO("Update package ready. Executing '%ls' and restarting...", szHelperCmd.c_str());
+        LOG_INFO("Update package ready. Target executable: %ls. Executing '%ls' and restarting...", targetExeName.c_str(), szHelperCmd.c_str());
 
         // Launch update script hidden and exit immediately to release DLL file locks
         ShellExecuteW(NULL, L"open", szHelperCmd.c_str(), NULL, NULL, SW_HIDE);
@@ -410,7 +545,9 @@ namespace Updater
     {
         std::thread([hWndParent, silent]()
         {
-            std::string json = FetchUrlContent(VERSION_JSON_URL);
+            // Fastly CDN cache-buster: append timestamp nonce to guarantee instant update detection
+            std::wstring urlWithNonce = std::wstring(VERSION_JSON_URL) + L"?t=" + std::to_wstring(GetTickCount64());
+            std::string json = FetchUrlContent(urlWithNonce);
             UpdateInfo info;
             bool success = ParseVersionJson(json, info);
 

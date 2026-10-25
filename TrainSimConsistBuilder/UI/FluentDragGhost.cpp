@@ -79,9 +79,10 @@ void FluentDragGhost::Move(POINT ptScreen, bool isValidDropTarget, const std::ws
 {
     if (!s_hWnd || !IsWindow(s_hWnd)) return;
 
-    bool needsRerender = (s_isValidTarget != isValidDropTarget || s_actionText != actionText);
+    std::wstring effectiveAction = (actionText == L"__PRESERVE__") ? s_actionText : actionText;
+    bool needsRerender = (s_isValidTarget != isValidDropTarget || s_actionText != effectiveAction);
     s_isValidTarget = isValidDropTarget;
-    s_actionText = actionText;
+    s_actionText = effectiveAction;
 
     if (needsRerender)
     {
@@ -213,6 +214,138 @@ void FluentDragGhost::RenderGhost()
                     pixel.rgbRed   = (BYTE)((pixel.rgbRed   * 220) / 255);
                     pixel.rgbGreen = (BYTE)((pixel.rgbGreen * 220) / 255);
                     pixel.rgbBlue  = (BYTE)((pixel.rgbBlue  * 220) / 255);
+                }
+            }
+        }
+
+        POINT ptSrc = { 0, 0 };
+        SIZE szWnd = { totalW, totalH };
+        BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        UpdateLayeredWindow(s_hWnd, hScreenDC, NULL, &szWnd, hMemDC, &ptSrc, 0, &blend, ULW_ALPHA);
+
+        SelectObject(hMemDC, hOldBmp);
+        DeleteObject(hBitmap);
+        DeleteDC(hMemDC);
+        ReleaseDC(NULL, hScreenDC);
+        return;
+    }
+
+    // Handle SoundFile ghost type
+    if (s_items[0].type == GhostItemType::SoundFile)
+    {
+        int cardH = 30;
+        bool hasActionBadge = !s_actionText.empty() || s_isValidTarget;
+        int totalH = cardH + (hasActionBadge ? 28 : 0);
+
+        HFONT hOldFont = (HFONT)SelectObject(hMemDC, s_hFontText ? s_hFontText : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+        SIZE szTitle = { 0 }, szSub = { 0 };
+        GetTextExtentPoint32W(hMemDC, s_items[0].name.c_str(), (int)s_items[0].name.length(), &szTitle);
+        SelectObject(hMemDC, s_hFontBadge);
+        if (!s_items[0].subtitle.empty())
+        {
+            GetTextExtentPoint32W(hMemDC, s_items[0].subtitle.c_str(), (int)s_items[0].subtitle.length(), &szSub);
+        }
+
+        int badgeW = 0;
+        std::wstring badgeText = s_actionText;
+        if (badgeText.empty())
+        {
+            badgeText = s_isValidTarget ? L"+ Add Sound Stream" : L"Sound File (.sms)";
+        }
+        SIZE szBadge = { 0 };
+        GetTextExtentPoint32W(hMemDC, badgeText.c_str(), (int)badgeText.length(), &szBadge);
+        badgeW = szBadge.cx + 32;
+
+        SelectObject(hMemDC, hOldFont);
+
+        int totalW = (std::max)({ (LONG)(szTitle.cx + (szSub.cx > 0 ? szSub.cx + 12 : 0) + 60), (LONG)180, (LONG)badgeW + 10 });
+        if (totalW > 500) totalW = 500;
+
+        BITMAPINFO bmi = { 0 };
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = totalW;
+        bmi.bmiHeader.biHeight = -totalH;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        RGBQUAD* pPixels = nullptr;
+        HBITMAP hBitmap = CreateDIBSection(hScreenDC, &bmi, DIB_RGB_COLORS, (void**)&pPixels, NULL, 0);
+        HBITMAP hOldBmp = (HBITMAP)SelectObject(hMemDC, hBitmap);
+
+        memset(pPixels, 0, totalW * totalH * sizeof(RGBQUAD));
+
+        // Capsule Background (Navy / Audio Slate)
+        RECT rcCard = { 0, 0, totalW - 10, cardH };
+        HBRUSH hbrCard = CreateSolidBrush(RGB(18, 32, 50));
+        HPEN hPenCard = CreatePen(PS_SOLID, 1, RGB(38, 90, 150));
+        HGDIOBJ oldB = SelectObject(hMemDC, hbrCard);
+        HGDIOBJ oldP = SelectObject(hMemDC, hPenCard);
+        RoundRect(hMemDC, rcCard.left, rcCard.top, rcCard.right, rcCard.bottom, 6, 6);
+        SelectObject(hMemDC, oldB);
+        SelectObject(hMemDC, oldP);
+        DeleteObject(hbrCard);
+        DeleteObject(hPenCard);
+
+        // Sound Icon (\xE767 Audio glyph)
+        RECT rcIcon = { rcCard.left + 6, rcCard.top, rcCard.left + 26, rcCard.bottom };
+        SetBkMode(hMemDC, TRANSPARENT);
+        SetTextColor(hMemDC, RGB(0, 195, 255)); // Bright Electric Cyan
+        SelectObject(hMemDC, s_hFontIcon ? s_hFontIcon : s_hFontText);
+        DrawTextW(hMemDC, L"\xE767", -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        // Sound Filename Title
+        RECT rcTitle = { rcCard.left + 28, rcCard.top, rcCard.left + 28 + szTitle.cx + 6, rcCard.bottom };
+        SetTextColor(hMemDC, RGB(255, 255, 255));
+        SelectObject(hMemDC, s_hFontText);
+        DrawTextW(hMemDC, s_items[0].name.c_str(), -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+        // Folder Subtitle
+        if (!s_items[0].subtitle.empty())
+        {
+            RECT rcSub = { rcTitle.right + 4, rcCard.top, rcCard.right - 8, rcCard.bottom };
+            SetTextColor(hMemDC, RGB(140, 185, 215));
+            SelectObject(hMemDC, s_hFontBadge);
+            DrawTextW(hMemDC, s_items[0].subtitle.c_str(), -1, &rcSub, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        }
+
+        // Action badge pill
+        if (hasActionBadge)
+        {
+            RECT rcBadge = { 0, cardH + 2, totalW - 10, cardH + 24 };
+
+            COLORREF bgCol = s_isValidTarget ? RGB(255, 255, 255) : RGB(45, 20, 20);
+            COLORREF borderCol = s_isValidTarget ? RGB(0, 140, 230) : RGB(160, 50, 50);
+            COLORREF textCol = s_isValidTarget ? RGB(0, 85, 185) : RGB(255, 130, 120);
+
+            HBRUSH hbrBadge = CreateSolidBrush(bgCol);
+            HPEN hPenBadge = CreatePen(PS_SOLID, 1, borderCol);
+            HGDIOBJ bOld = SelectObject(hMemDC, hbrBadge);
+            HGDIOBJ pOld = SelectObject(hMemDC, hPenBadge);
+            RoundRect(hMemDC, rcBadge.left, rcBadge.top, rcBadge.right, rcBadge.bottom, 6, 6);
+            SelectObject(hMemDC, bOld);
+            SelectObject(hMemDC, pOld);
+            DeleteObject(hbrBadge);
+            DeleteObject(hPenBadge);
+
+            SetBkMode(hMemDC, TRANSPARENT);
+            SetTextColor(hMemDC, textCol);
+            SelectObject(hMemDC, s_hFontBadge);
+            DrawTextW(hMemDC, badgeText.c_str(), -1, &rcBadge, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+
+        // Premultiplied alpha
+        for (int y = 0; y < totalH; ++y)
+        {
+            for (int x = 0; x < totalW; ++x)
+            {
+                RGBQUAD& pixel = pPixels[y * totalW + x];
+                if (pixel.rgbRed != 0 || pixel.rgbGreen != 0 || pixel.rgbBlue != 0)
+                {
+                    pixel.rgbReserved = 225;
+                    pixel.rgbRed   = (BYTE)((pixel.rgbRed   * 225) / 255);
+                    pixel.rgbGreen = (BYTE)((pixel.rgbGreen * 225) / 255);
+                    pixel.rgbBlue  = (BYTE)((pixel.rgbBlue  * 225) / 255);
                 }
             }
         }

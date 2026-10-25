@@ -32,6 +32,13 @@ struct TitleBarState
 
     // Caption button rects & hover state (0: Min, 1: Max/Restore, 2: Close)
     BOOL bCloseOnly = FALSE;
+    BOOL bNeutralDark = FALSE;
+    COLORREF clrBgTop = RGB(28, 9, 12);
+    COLORREF clrBgRibbon = RGB(28, 9, 12);
+    COLORREF clrActiveSurface = RGB(52, 22, 27);
+    COLORREF clrOutline = RGB(78, 32, 38);
+    COLORREF clrHover = RGB(38, 14, 18);
+    COLORREF clrBorder = RGB(78, 32, 38);
     RECT rcBtnMin = { 0 };
     RECT rcBtnMax = { 0 };
     RECT rcBtnClose = { 0 };
@@ -96,6 +103,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         {
             pState->tabs.push_back({ L"\xE7C0", L"MAIN CONSISTS", { 0 } });
             pState->tabs.push_back({ L"\xE707", L"ACTIVITY CONSISTS", { 0 } });
+            pState->tabs.push_back({ L"\xE767", L"SOUND STUDIO", { 0 } });
         }
         return 0;
     }
@@ -339,7 +347,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         // ====================================================================
         int row1H = 30;
         RECT rcRow1 = { 0, 0, w, row1H };
-        COLORREF bgTop = RGB(28, 9, 12);
+        COLORREF bgTop = pState->clrBgTop;
         HBRUSH hbrRow1 = CreateSolidBrush(bgTop);
         FillRect(memDC, &rcRow1, hbrRow1);
         DeleteObject(hbrRow1);
@@ -418,7 +426,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         // TIER 2: FULL-WIDTH DARK MICA TAB RIBBON (Y = 30 to 66px)
         // ====================================================================
         RECT rcRow2 = { 0, row1H, w, h };
-        COLORREF bgRibbon = RGB(28, 9, 12);
+        COLORREF bgRibbon = pState->clrBgRibbon;
         HBRUSH hbrRibbon = CreateSolidBrush(bgRibbon);
         FillRect(memDC, &rcRow2, hbrRibbon);
         DeleteObject(hbrRibbon);
@@ -450,7 +458,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
 
             if (isActive)
             {
-                COLORREF clrActiveSurface = RGB(52, 22, 27);
+                COLORREF clrActiveSurface = pState->clrActiveSurface;
                 HBRUSH hbrSurface = CreateSolidBrush(clrActiveSurface);
                 HPEN hNullPen = CreatePen(PS_NULL, 0, 0);
                 HBRUSH hOldBr = (HBRUSH)SelectObject(memDC, hbrSurface);
@@ -476,7 +484,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
                 DeleteObject(hNullPen);
 
                 // Highlight Outline
-                COLORREF clOutline = RGB(78, 32, 38);
+                COLORREF clOutline = pState->clrOutline;
                 HPEN hOutlinePen = CreatePen(PS_SOLID, 1, clOutline);
                 HPEN hOldOutlinePen = (HPEN)SelectObject(memDC, hOutlinePen);
 
@@ -507,7 +515,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
             {
                 if (isHover)
                 {
-                    COLORREF clrHov = RGB(38, 14, 18);
+                    COLORREF clrHov = pState->clrHover;
                     HBRUSH hbrHov = CreateSolidBrush(clrHov);
                     HPEN hNullPen = CreatePen(PS_NULL, 0, 0);
                     SelectObject(memDC, hbrHov);
@@ -548,7 +556,7 @@ static LRESULT CALLBACK CustomTitleBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         // 1px App-Drawn Perimeter Border
         if (!IsZoomed(hMainWnd))
         {
-            COLORREF clrBorder = RGB(78, 32, 38);
+            COLORREF clrBorder = pState->clrBorder;
             HPEN hPenBorder = CreatePen(PS_SOLID, 1, clrBorder);
             HPEN hOldBorder = (HPEN)SelectObject(memDC, hPenBorder);
 
@@ -698,6 +706,37 @@ void CustomTitleBar_SetCloseOnly(HWND hTitleBar, BOOL bCloseOnly)
         {
             pState->bCloseOnly = bCloseOnly;
             InvalidateRect(hTitleBar, NULL, FALSE);
+        }
+    }
+}
+
+void CustomTitleBar_SetNeutralDarkTheme(HWND hTitleBar, BOOL bNeutralDark)
+{
+    if (hTitleBar && IsWindow(hTitleBar))
+    {
+        TitleBarState* pState = (TitleBarState*)GetWindowLongPtrW(hTitleBar, GWLP_USERDATA);
+        if (pState)
+        {
+            pState->bNeutralDark = bNeutralDark;
+            if (bNeutralDark)
+            {
+                pState->clrBgTop = RGB(22, 22, 24);
+                pState->clrBgRibbon = RGB(24, 24, 26);
+                pState->clrActiveSurface = RGB(38, 38, 42);
+                pState->clrOutline = RGB(60, 60, 68);
+                pState->clrHover = RGB(32, 32, 36);
+                pState->clrBorder = RGB(46, 46, 48);
+            }
+            else
+            {
+                pState->clrBgTop = RGB(28, 9, 12);
+                pState->clrBgRibbon = RGB(28, 9, 12);
+                pState->clrActiveSurface = RGB(52, 22, 27);
+                pState->clrOutline = RGB(78, 32, 38);
+                pState->clrHover = RGB(38, 14, 18);
+                pState->clrBorder = RGB(78, 32, 38);
+            }
+            InvalidateRect(hTitleBar, NULL, TRUE);
         }
     }
 }

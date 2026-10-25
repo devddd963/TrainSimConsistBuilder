@@ -152,11 +152,41 @@ namespace DatabaseManager
             "CREATE INDEX IF NOT EXISTS idx_roles_cat ON BlueprintRoles(category);";
         sqlite3_exec(g_db, sqlRoles, NULL, NULL, &err);
 
+        // 7. SmsPoolPresets table (stores favorite and reusable SMS sound presets)
+        const char* sqlSmsPools =
+            "CREATE TABLE IF NOT EXISTS SmsPoolPresets ("
+            "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "    name TEXT UNIQUE NOT NULL,"
+            "    category TEXT NOT NULL,"
+            "    target_slot TEXT NOT NULL,"
+            "    primary_sms TEXT NOT NULL,"
+            "    secondary_sms TEXT DEFAULT '',"
+            "    payload TEXT NOT NULL,"
+            "    created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ");"
+            "CREATE INDEX IF NOT EXISTS idx_sms_pool_cat ON SmsPoolPresets(category);";
+        sqlite3_exec(g_db, sqlSmsPools, NULL, NULL, &err);
+
+        // 8. SmsStreamPresets table (stores user-created stream preset cards)
+        const char* sqlStreamPresets =
+            "CREATE TABLE IF NOT EXISTS SmsStreamPresets ("
+            "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "    name TEXT NOT NULL,"
+            "    category TEXT DEFAULT 'Custom',"
+            "    payload TEXT NOT NULL,"
+            "    created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ");"
+            "CREATE INDEX IF NOT EXISTS idx_stream_preset_name ON SmsStreamPresets(name);";
+        sqlite3_exec(g_db, sqlStreamPresets, NULL, NULL, &err);
+
         g_isInitialized = true;
         LOG_INFO("DatabaseManager: Successfully opened master database '%ls'", dbPath.c_str());
 
         // Ensure default seeded roles exist
         SeedDefaultBlueprintRolesInternal();
+
+        // Ensure default seeded SMS presets exist
+        SeedDefaultSmsPoolPresetsInternal();
 
         // Remove old legacy .dat cache files
         CleanupLegacyDatFiles();
@@ -1086,6 +1116,358 @@ namespace DatabaseManager
                 sqlite3_finalize(insStmt);
             }
         }
+        return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // SMS Pool Presets Persistence
+    // -----------------------------------------------------------------------
+
+    void SeedDefaultSmsPoolPresetsInternal()
+    {
+        if (!g_db) return;
+        // User requested: do NOT create or seed default/existing presets.
+        // Clean up previously seeded default presets if present.
+        const char* cleanSql = "DELETE FROM SmsPoolPresets WHERE name IN ("
+            "'LHB AC Passenger Coach Sound',"
+            "'ICF Passenger Coach Sound',"
+            "'Freight Wagon (BOXN / BCN) Sound',"
+            "'WAP-7 / WAG-9 3-Phase Electric Loco',"
+            "'WDM-3A / WDG-3A Alco Diesel Loco',"
+            "'ORTS 3D Cab Ambience & Horn'"
+            ");";
+        sqlite3_exec(g_db, cleanSql, NULL, NULL, NULL);
+    }
+
+    bool LoadSmsPoolPresets(std::vector<SmsPoolPresetItem>& outPresets)
+    {
+        outPresets.clear();
+        if (!g_isInitialized && !Initialize()) return false;
+        std::lock_guard<std::recursive_mutex> lock(g_dbMutex);
+
+        const char* sql = "SELECT id, name, category, target_slot, primary_sms, secondary_sms, payload, created_at FROM SmsPoolPresets ORDER BY category ASC, name ASC;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+
+        while (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            SmsPoolPresetItem item;
+            item.id = sqlite3_column_int(stmt, 0);
+
+            const char* name = (const char*)sqlite3_column_text(stmt, 1);
+            if (name) item.name = Utf8ToWide(name);
+
+            const char* cat = (const char*)sqlite3_column_text(stmt, 2);
+            if (cat) item.category = Utf8ToWide(cat);
+
+            const char* slot = (const char*)sqlite3_column_text(stmt, 3);
+            if (slot) item.targetSlot = Utf8ToWide(slot);
+
+            const char* pri = (const char*)sqlite3_column_text(stmt, 4);
+            if (pri) item.primarySms = Utf8ToWide(pri);
+
+            const char* sec = (const char*)sqlite3_column_text(stmt, 5);
+            if (sec) item.secondarySms = Utf8ToWide(sec);
+
+            const char* pay = (const char*)sqlite3_column_text(stmt, 6);
+            if (pay) item.payload = Utf8ToWide(pay);
+
+            const char* cr = (const char*)sqlite3_column_text(stmt, 7);
+            if (cr) item.createdAt = Utf8ToWide(cr);
+
+            outPresets.push_back(std::move(item));
+        }
+        sqlite3_finalize(stmt);
+        return true;
+    }
+
+    bool SaveSmsPoolPreset(SmsPoolPresetItem& preset)
+    {
+        if (!g_isInitialized && !Initialize()) return false;
+        std::lock_guard<std::recursive_mutex> lock(g_dbMutex);
+
+        std::string uName = WideToUtf8(preset.name);
+        std::string uCat = WideToUtf8(preset.category);
+        std::string uSlot = WideToUtf8(preset.targetSlot);
+        std::string uPri = WideToUtf8(preset.primarySms);
+        std::string uSec = WideToUtf8(preset.secondarySms);
+        std::string uPay = WideToUtf8(preset.payload);
+
+        if (preset.id <= 0)
+        {
+            const char* insSql = "INSERT INTO SmsPoolPresets (name, category, target_slot, primary_sms, secondary_sms, payload) VALUES (?, ?, ?, ?, ?, ?);";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(g_db, insSql, -1, &stmt, NULL) == SQLITE_OK)
+            {
+                sqlite3_bind_text(stmt, 1, uName.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 2, uCat.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 3, uSlot.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 4, uPri.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 5, uSec.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 6, uPay.c_str(), -1, SQLITE_TRANSIENT);
+
+                int rc = sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+                if (rc == SQLITE_DONE)
+                {
+                    preset.id = (int)sqlite3_last_insert_rowid(g_db);
+                    return true;
+                }
+            }
+        }
+        else
+        {
+            const char* updSql = "UPDATE SmsPoolPresets SET name = ?, category = ?, target_slot = ?, primary_sms = ?, secondary_sms = ?, payload = ? WHERE id = ?;";
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(g_db, updSql, -1, &stmt, NULL) == SQLITE_OK)
+            {
+                sqlite3_bind_text(stmt, 1, uName.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 2, uCat.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 3, uSlot.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 4, uPri.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 5, uSec.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 6, uPay.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int(stmt, 7, preset.id);
+
+                int rc = sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+                return (rc == SQLITE_DONE);
+            }
+        }
+        return false;
+    }
+
+    bool DeleteSmsPoolPreset(int id)
+    {
+        if (!g_isInitialized && !Initialize()) return false;
+        std::lock_guard<std::recursive_mutex> lock(g_dbMutex);
+
+        const char* delSql = "DELETE FROM SmsPoolPresets WHERE id = ?;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(g_db, delSql, -1, &stmt, NULL) == SQLITE_OK)
+        {
+            sqlite3_bind_int(stmt, 1, id);
+            int rc = sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+            return (rc == SQLITE_DONE);
+        }
+        return false;
+    }
+
+    static std::wstring SerializeStreamPresetCard(const StreamPresetCard& card)
+    {
+        std::wstringstream ss;
+        ss << (card.isCollapsed ? 1 : 0) << L"\n";
+        ss << card.streams.size() << L"\n";
+
+        for (const auto& st : card.streams)
+        {
+            ss << (st.name.empty() ? L"-" : st.name) << L"\t"
+               << (st.category.empty() ? L"-" : st.category) << L"\t"
+               << st.priority << L"\t"
+               << st.volume << L"\t"
+               << (st.isStereo ? 1 : 0) << L"\t"
+               << (st.primaryWav.empty() ? L"-" : st.primaryWav) << L"\n";
+
+            ss << st.triggers.size() << L"\n";
+            for (const auto& tr : st.triggers)
+            {
+                ss << (tr.triggerType.empty() ? L"-" : tr.triggerType) << L"\t"
+                   << tr.triggerId << L"\t"
+                   << (tr.variableCondition.empty() ? L"-" : tr.variableCondition) << L"\t"
+                   << (tr.actionType.empty() ? L"-" : tr.actionType) << L"\t"
+                   << tr.actionParam << L"\t"
+                   << tr.declaredFiles << L"\t"
+                   << tr.files.size() << L"\n";
+
+                for (const auto& f : tr.files)
+                {
+                    ss << (f.fileName.empty() ? L"-" : f.fileName) << L"\t"
+                       << f.flag << L"\t"
+                       << (f.resolvedDiskPath.empty() ? L"-" : f.resolvedDiskPath) << L"\n";
+                }
+            }
+
+            ss << st.curves.size() << L"\n";
+            for (const auto& cv : st.curves)
+            {
+                ss << (cv.curveType.empty() ? L"-" : cv.curveType) << L"\t"
+                   << (cv.controlType.empty() ? L"-" : cv.controlType) << L"\t"
+                   << cv.granularity << L"\t"
+                   << cv.points.size() << L"\n";
+
+                for (const auto& pt : cv.points)
+                {
+                    ss << pt.x << L"\t" << pt.y << L"\n";
+                }
+            }
+        }
+        return ss.str();
+    }
+
+    static bool DeserializeStreamPresetCard(const std::wstring& wPayload, StreamPresetCard& outCard)
+    {
+        std::wstringstream ss(wPayload);
+        std::wstring line;
+
+        if (!std::getline(ss, line)) return false;
+        outCard.isCollapsed = (_wtoi(line.c_str()) != 0);
+
+        if (!std::getline(ss, line)) return false;
+        int streamCount = _wtoi(line.c_str());
+
+        outCard.streams.clear();
+        for (int s = 0; s < streamCount; ++s)
+        {
+            if (!std::getline(ss, line)) break;
+            std::wstringstream lss(line);
+            StreamPresetItem st;
+            st.id = s + 1;
+            std::getline(lss, st.name, L'\t');
+            if (st.name == L"-") st.name.clear();
+            std::getline(lss, st.category, L'\t');
+            if (st.category == L"-") st.category.clear();
+
+            std::wstring sPri, sVol, sStereo, sWav;
+            std::getline(lss, sPri, L'\t'); st.priority = _wtoi(sPri.c_str());
+            std::getline(lss, sVol, L'\t'); st.volume = (float)_wtof(sVol.c_str());
+            std::getline(lss, sStereo, L'\t'); st.isStereo = (_wtoi(sStereo.c_str()) != 0);
+            std::getline(lss, st.primaryWav, L'\t');
+            if (st.primaryWav == L"-") st.primaryWav.clear();
+
+            if (std::getline(ss, line))
+            {
+                int trCount = _wtoi(line.c_str());
+                for (int t = 0; t < trCount; ++t)
+                {
+                    if (!std::getline(ss, line)) break;
+                    std::wstringstream trss(line);
+                    SmsTrigger tr;
+                    std::getline(trss, tr.triggerType, L'\t'); if (tr.triggerType == L"-") tr.triggerType.clear();
+                    std::wstring sId, sCond, sAct, sParam, sDecl, sNumF;
+                    std::getline(trss, sId, L'\t'); tr.triggerId = _wtoi(sId.c_str());
+                    std::getline(trss, sCond, L'\t'); tr.variableCondition = (sCond == L"-") ? L"" : sCond;
+                    std::getline(trss, sAct, L'\t'); tr.actionType = (sAct == L"-") ? L"" : sAct;
+                    std::getline(trss, sParam, L'\t'); tr.actionParam = (float)_wtof(sParam.c_str());
+                    std::getline(trss, sDecl, L'\t'); tr.declaredFiles = _wtoi(sDecl.c_str());
+                    std::getline(trss, sNumF, L'\t'); int numF = _wtoi(sNumF.c_str());
+
+                    for (int f = 0; f < numF; ++f)
+                    {
+                        if (!std::getline(ss, line)) break;
+                        std::wstringstream fss(line);
+                        SmsFileRef fRef;
+                        std::getline(fss, fRef.fileName, L'\t'); if (fRef.fileName == L"-") fRef.fileName.clear();
+                        std::wstring sFlag;
+                        std::getline(fss, sFlag, L'\t'); fRef.flag = _wtoi(sFlag.c_str());
+                        std::wstring sResolved;
+                        if (std::getline(fss, sResolved, L'\t'))
+                        {
+                            if (sResolved != L"-" && !sResolved.empty())
+                            {
+                                fRef.resolvedDiskPath = sResolved;
+                                fRef.existsOnDisk = (GetFileAttributesW(sResolved.c_str()) != INVALID_FILE_ATTRIBUTES);
+                            }
+                        }
+                        tr.files.push_back(fRef);
+                    }
+                    st.triggers.push_back(tr);
+                }
+            }
+
+            if (std::getline(ss, line))
+            {
+                int cvCount = _wtoi(line.c_str());
+                for (int cv = 0; cv < cvCount; ++cv)
+                {
+                    if (!std::getline(ss, line)) break;
+                    std::wstringstream cvss(line);
+                    SmsCurve curve;
+                    std::getline(cvss, curve.curveType, L'\t'); if (curve.curveType == L"-") curve.curveType.clear();
+                    std::getline(cvss, curve.controlType, L'\t'); if (curve.controlType == L"-") curve.controlType.clear();
+                    std::wstring sGran, sNumPts;
+                    std::getline(cvss, sGran, L'\t'); curve.granularity = (float)_wtof(sGran.c_str());
+                    std::getline(cvss, sNumPts, L'\t'); int numPts = _wtoi(sNumPts.c_str());
+
+                    for (int pt = 0; pt < numPts; ++pt)
+                    {
+                        if (!std::getline(ss, line)) break;
+                        std::wstringstream ptss(line);
+                        SmsCurvePoint p;
+                        std::wstring sX, sY;
+                        std::getline(ptss, sX, L'\t'); p.x = (float)_wtof(sX.c_str());
+                        std::getline(ptss, sY, L'\t'); p.y = (float)_wtof(sY.c_str());
+                        curve.points.push_back(p);
+                    }
+                    st.curves.push_back(curve);
+                }
+            }
+
+            outCard.streams.push_back(st);
+        }
+        return true;
+    }
+
+    bool LoadStreamPresets(std::vector<StreamPresetCard>& outCards)
+    {
+        if (!g_isInitialized && !Initialize()) return false;
+        std::lock_guard<std::recursive_mutex> lock(g_dbMutex);
+
+        outCards.clear();
+        const char* sql = "SELECT id, name, category, payload FROM SmsStreamPresets ORDER BY id ASC;";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+
+        while (sqlite3_step(stmt) == SQLITE_ROW)
+        {
+            StreamPresetCard card;
+            card.id = sqlite3_column_int(stmt, 0);
+            const char* name = (const char*)sqlite3_column_text(stmt, 1);
+            const char* cat = (const char*)sqlite3_column_text(stmt, 2);
+            const char* payload = (const char*)sqlite3_column_text(stmt, 3);
+
+            if (name) card.name = Utf8ToWide(name);
+            if (cat) card.category = Utf8ToWide(cat);
+            if (payload)
+            {
+                DeserializeStreamPresetCard(Utf8ToWide(payload), card);
+            }
+            outCards.push_back(std::move(card));
+        }
+        sqlite3_finalize(stmt);
+        return true;
+    }
+
+    bool SaveStreamPresets(const std::vector<StreamPresetCard>& cards)
+    {
+        if (!g_isInitialized && !Initialize()) return false;
+        std::lock_guard<std::recursive_mutex> lock(g_dbMutex);
+
+        char* err = nullptr;
+        sqlite3_exec(g_db, "BEGIN TRANSACTION;", NULL, NULL, &err);
+        sqlite3_exec(g_db, "DELETE FROM SmsStreamPresets;", NULL, NULL, &err);
+
+        const char* insSql = "INSERT INTO SmsStreamPresets (name, category, payload) VALUES (?, ?, ?);";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(g_db, insSql, -1, &stmt, NULL) == SQLITE_OK)
+        {
+            for (const auto& card : cards)
+            {
+                std::string uName = WideToUtf8(card.name);
+                std::string uCat = WideToUtf8(card.category);
+                std::string uPayload = WideToUtf8(SerializeStreamPresetCard(card));
+
+                sqlite3_bind_text(stmt, 1, uName.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 2, uCat.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(stmt, 3, uPayload.c_str(), -1, SQLITE_TRANSIENT);
+
+                sqlite3_step(stmt);
+                sqlite3_reset(stmt);
+            }
+            sqlite3_finalize(stmt);
+        }
+
+        sqlite3_exec(g_db, "COMMIT;", NULL, NULL, &err);
         return true;
     }
 }

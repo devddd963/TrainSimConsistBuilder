@@ -64,6 +64,8 @@
 #define IDC_PANE_CAT_BTN_0     1039
 #define IDC_PANE_CAT_BTN_1     1040
 #define IDC_PANE_CAT_BTN_2     1041
+#define IDC_SOUNDLIST          1042
+#define IDC_SOUND_SEARCH       1043
 
 
 extern HINSTANCE hInst;
@@ -80,6 +82,7 @@ void                ApplyTitleBarTheme(HWND hWnd, BOOL bDarkMode);
 HFONT               GetAdaptiveSystemFont();
 const std::vector<ConsistReader::UnitInfo>& GetAppClipboardUnits();
 void SetAppClipboardUnits(const std::vector<ConsistReader::UnitInfo>& units);
+void App_ShowClipboardContents(HWND hWnd);
 std::wstring        GetAppConsistsDirectory();
 void                TriggerAppConsistsRescan(HWND hWnd = NULL);
 std::vector<PoolMutator::BrokenConsistInfo> ScanActiveTargetConsistsForBrokenUnits(

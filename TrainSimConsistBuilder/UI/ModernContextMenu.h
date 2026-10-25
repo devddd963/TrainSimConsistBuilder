@@ -53,6 +53,7 @@ struct ContextMenuItem {
 
 class ModernContextMenu {
 public:
-    // Shows the context menu modally at screen coordinates (x, y) and returns the chosen command ID (0 if dismissed)
-    static int Show(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode = TRUE, int minWidth = 0);
+    // Shows the context menu modally at screen coordinates (x, y) and returns the chosen command ID (0 if dismissed).
+    // If prcAnchor is provided, the menu flips above the anchor when overflowing screen bottom and supports toggle dismiss.
+    static int Show(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode = TRUE, int minWidth = 0, const RECT* prcAnchor = nullptr);
 };

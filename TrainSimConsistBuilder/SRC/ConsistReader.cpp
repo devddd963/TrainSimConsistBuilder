@@ -1,9 +1,19 @@
 #include "ConsistReader.h"
 #include "AppLogging.h"
+#include <windows.h>
 #include <sstream>
 #include <algorithm>
 #include <stdexcept>
 #include <cstddef>
+
+static std::wstring ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), NULL, 0);
+    if (len <= 0) return std::wstring(s.begin(), s.end());
+    std::wstring ws(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &ws[0], len);
+    return ws;
+}
 
 namespace ConsistReader {
     // Helper to trim whitespace from a std::wstring.
@@ -73,7 +83,7 @@ namespace ConsistReader {
                 ++pos; // skip opening quote
                 size_t start = pos;
                 while (pos < len && line[pos] != '"') ++pos;
-                out = std::wstring(line.begin() + start, line.begin() + pos);
+                out = ToWide(line.substr(start, pos - start));
                 if (pos < len) ++pos; // skip closing quote
             }
             else
@@ -82,7 +92,7 @@ namespace ConsistReader {
                 size_t start = pos;
                 while (pos < len && line[pos] != ' ' && line[pos] != '\t'
                                   && line[pos] != ')' && line[pos] != '"') ++pos;
-                out = std::wstring(line.begin() + start, line.begin() + pos);
+                out = ToWide(line.substr(start, pos - start));
             }
             return true;
         };
@@ -147,7 +157,7 @@ namespace ConsistReader {
                     size_t q1 = line.find('"');
                     size_t q2 = (q1 != std::string::npos) ? line.find('"', q1 + 1) : std::string::npos;
                     if (q1 != std::string::npos && q2 != std::string::npos)
-                        data.trainCfg.name = std::wstring(line.begin() + q1 + 1, line.begin() + q2);
+                        data.trainCfg.name = ToWide(line.substr(q1 + 1, q2 - (q1 + 1)));
                 }
                 // MaxVelocity ( speed_m_per_s  perf_fraction )
                 // The .con format stores speed in m/s — multiply by 3.6 to get km/h.
@@ -349,7 +359,7 @@ std::wstring ExtractConsistName(const std::string& ascii)
                 if (endName != std::string::npos)
                 {
                     std::string nameStr = ascii.substr(startName, endName - startName);
-                    return std::wstring(nameStr.begin(), nameStr.end());
+                    return ToWide(nameStr);
                 }
             }
         }

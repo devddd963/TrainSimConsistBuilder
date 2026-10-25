@@ -32,6 +32,11 @@ struct MsgBoxState {
     HFONT hFontTitle;
     HFONT hFontText;
     HFONT hFontIcon;
+    bool hasCheckbox;
+    std::wstring checkboxText;
+    bool isChecked;
+    RECT rcCheckbox;
+    bool isCheckboxHovered;
 };
 
 static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -167,7 +172,8 @@ static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
         {
             HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontText);
             SetTextColor(hMemDC, RGB(225, 225, 225));
-            RECT rcText = { 24, 58, w - 24, h - 64 };
+            int textBottom = pState->hasCheckbox ? (pState->rcCheckbox.top - 12) : (pState->buttons.empty() ? (h - 20) : (pState->buttons[0].rc.top - 14));
+            RECT rcText = { 24, 56, w - 24, textBottom };
             DrawTextW(hMemDC, pState->text.c_str(), -1, &rcText, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
             SelectObject(hMemDC, hOldF);
         }
@@ -221,6 +227,44 @@ static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             }
         }
 
+        // Draw Checkbox if requested
+        if (pState->hasCheckbox && pState->rcCheckbox.right > pState->rcCheckbox.left)
+        {
+            int chkY = pState->rcCheckbox.top + (pState->rcCheckbox.bottom - pState->rcCheckbox.top - 18) / 2;
+            RECT rcBox = { pState->rcCheckbox.left, chkY, pState->rcCheckbox.left + 18, chkY + 18 };
+
+            COLORREF chkBg = pState->isChecked ? RGB(0, 120, 215) : (pState->isCheckboxHovered ? RGB(48, 48, 54) : RGB(32, 32, 36));
+            COLORREF chkBorder = pState->isChecked ? RGB(0, 140, 240) : (pState->isCheckboxHovered ? RGB(110, 110, 120) : RGB(70, 70, 75));
+
+            HBRUSH hbrChk = CreateSolidBrush(chkBg);
+            HPEN hpChk = CreatePen(PS_SOLID, 1, chkBorder);
+            HGDIOBJ oB = SelectObject(hMemDC, hbrChk);
+            HGDIOBJ oP = SelectObject(hMemDC, hpChk);
+            RoundRect(hMemDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
+            SelectObject(hMemDC, oB);
+            SelectObject(hMemDC, oP);
+            DeleteObject(hbrChk);
+            DeleteObject(hpChk);
+
+            if (pState->isChecked)
+            {
+                HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontText);
+                SetTextColor(hMemDC, RGB(255, 255, 255));
+                DrawTextW(hMemDC, L"✓", -1, &rcBox, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                SelectObject(hMemDC, hOldF);
+            }
+
+            // Checkbox Label
+            if (pState->hFontText)
+            {
+                HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontText);
+                SetTextColor(hMemDC, pState->isCheckboxHovered ? RGB(255, 255, 255) : RGB(210, 210, 215));
+                RECT rcTxt = { rcBox.right + 8, pState->rcCheckbox.top, pState->rcCheckbox.right, pState->rcCheckbox.bottom };
+                DrawTextW(hMemDC, pState->checkboxText.c_str(), -1, &rcTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                SelectObject(hMemDC, hOldF);
+            }
+        }
+
         // 4. Subtle 1px window border
         HPEN hPenWinBorder = CreatePen(PS_SOLID, 1, borderCol);
         HBRUSH hNullBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
@@ -242,6 +286,19 @@ static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
         return 0;
     }
 
+    case WM_SETCURSOR:
+    {
+        if (pState)
+        {
+            if (pState->hoverButton != -1 || (pState->hasCheckbox && pState->isCheckboxHovered))
+            {
+                SetCursor(LoadCursor(NULL, IDC_HAND));
+                return TRUE;
+            }
+        }
+        break;
+    }
+
     case WM_MOUSEMOVE:
     {
         if (!pState) break;
@@ -258,6 +315,16 @@ static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             }
         }
 
+        if (pState->hasCheckbox)
+        {
+            bool hoverChk = PtInRect(&pState->rcCheckbox, { x, y });
+            if (hoverChk != pState->isCheckboxHovered)
+            {
+                pState->isCheckboxHovered = hoverChk;
+                InvalidateRect(hWnd, &pState->rcCheckbox, FALSE);
+            }
+        }
+
         if (newHover != pState->hoverButton)
         {
             pState->hoverButton = newHover;
@@ -271,6 +338,13 @@ static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
         if (!pState) break;
         int x = GET_X_LPARAM(lParam);
         int y = GET_Y_LPARAM(lParam);
+
+        if (pState->hasCheckbox && PtInRect(&pState->rcCheckbox, { x, y }))
+        {
+            pState->isChecked = !pState->isChecked;
+            InvalidateRect(hWnd, &pState->rcCheckbox, FALSE);
+            return 0;
+        }
 
         for (size_t i = 0; i < pState->buttons.size(); ++i)
         {
@@ -387,7 +461,7 @@ static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
     return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
-int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, const std::vector<ModernMsgBoxCustomButton>& customButtons, UINT uType)
+static int ShowModernMessageBoxImpl(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, const std::vector<ModernMsgBoxCustomButton>& customButtons, UINT uType, LPCWSTR lpCheckboxText = NULL, bool* pbChecked = NULL)
 {
     static bool s_registered = false;
     HINSTANCE hInst = GetModuleHandle(NULL);
@@ -399,6 +473,9 @@ int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, c
         wcx.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
         wcx.lpfnWndProc = ModernMsgBoxWndProc;
         wcx.hInstance = hInst;
+        wcx.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(107 /* IDI_TRAINSIMCONSISTBUILDER */));
+        wcx.hIconSm = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(107), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+        if (!wcx.hIconSm) wcx.hIconSm = LoadIconW(hInst, MAKEINTRESOURCEW(108 /* IDI_SMALL */));
         wcx.hCursor = LoadCursor(NULL, IDC_ARROW);
         wcx.hbrBackground = NULL;
         wcx.lpszClassName = L"ModernMsgBoxWindow";
@@ -441,8 +518,62 @@ int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, c
             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
     }
 
-    // Measure Text & Calculate Dimensions
-    int dlgWidth = 663;
+    // 1. Measure Buttons to calculate total button row width
+    std::vector<int> measuredBtnWidths;
+    int totalBtnsWidth = 0;
+    if (!customButtons.empty())
+    {
+        HDC hdcB = GetDC(NULL);
+        HFONT hOldB = (HFONT)SelectObject(hdcB, state.hFontText);
+        for (const auto& btn : customButtons)
+        {
+            int bw = 90;
+            SIZE szB = { 0 };
+            GetTextExtentPoint32W(hdcB, btn.text.c_str(), (int)btn.text.length(), &szB);
+            if (szB.cx + 28 > bw) bw = szB.cx + 28;
+            measuredBtnWidths.push_back(bw);
+            totalBtnsWidth += bw;
+        }
+        SelectObject(hdcB, hOldB);
+        ReleaseDC(NULL, hdcB);
+        totalBtnsWidth += (int)(customButtons.size() - 1) * 10;
+    }
+    else
+    {
+        UINT btnType = uType & MB_TYPEMASK;
+        int count = (btnType == MB_YESNOCANCEL) ? 3 : ((btnType == MB_YESNO || btnType == MB_OKCANCEL) ? 2 : 1);
+        totalBtnsWidth = count * 90 + (count - 1) * 12;
+    }
+
+    // 2. Measure Checkbox text
+    SIZE szCheckbox = { 0 };
+    if (lpCheckboxText && lpCheckboxText[0] != L'\0')
+    {
+        state.hasCheckbox = true;
+        state.checkboxText = lpCheckboxText;
+        state.isChecked = (pbChecked && *pbChecked);
+        state.isCheckboxHovered = false;
+
+        HDC hdcB = GetDC(NULL);
+        HFONT hOld = (HFONT)SelectObject(hdcB, state.hFontText);
+        GetTextExtentPoint32W(hdcB, state.checkboxText.c_str(), (int)state.checkboxText.length(), &szCheckbox);
+        SelectObject(hdcB, hOld);
+        ReleaseDC(NULL, hdcB);
+    }
+    else
+    {
+        state.hasCheckbox = false;
+        state.isChecked = false;
+        state.isCheckboxHovered = false;
+        state.rcCheckbox = { 0, 0, 0, 0 };
+    }
+
+    // 3. Determine Dialog Width dynamically (ensures spacious layout without overlap)
+    int dlgWidth = 680;
+    if (totalBtnsWidth + 56 > dlgWidth) dlgWidth = totalBtnsWidth + 56;
+    if (state.hasCheckbox && (int)szCheckbox.cx + 60 > dlgWidth) dlgWidth = (int)szCheckbox.cx + 60;
+
+    // 4. Measure Body Text Height with determined dlgWidth
     HDC hdcScreen = GetDC(NULL);
     HFONT hOldF = (HFONT)SelectObject(hdcScreen, state.hFontText);
     RECT rcCalc = { 0, 0, dlgWidth - 48, 0 };
@@ -453,11 +584,17 @@ int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, c
     int textHeight = rcCalc.bottom - rcCalc.top;
     if (textHeight < 30) textHeight = 30;
 
+    // 5. Calculate Heights & Separate Rows for Checkbox and Buttons
+    // Header (56px) + Body Text (textHeight) + Checkbox Row (if present: 38px) + Button Bar (68px)
+    int btnH = 32;
+    int chkH = 22;
+    int requiredH = 56 + textHeight + (state.hasCheckbox ? 38 : 0) + 68;
+
     RECT rcWork;
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &rcWork, 0);
-    int maxDlgH = (std::min)(540, (int)((rcWork.bottom - rcWork.top) * 0.80));
+    int maxDlgH = (std::min)(720, (int)((rcWork.bottom - rcWork.top) * 0.85));
 
-    int dlgHeight = 60 + textHeight + 68; // Title + Text + Button Bar
+    int dlgHeight = requiredH;
     state.isScrollable = false;
     if (dlgHeight > maxDlgH)
     {
@@ -466,26 +603,29 @@ int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, c
     }
     if (dlgHeight < 160) dlgHeight = 160;
 
-    // Build Buttons
-    int btnH = 32;
-    int btnY = dlgHeight - 46;
+    int btnY = dlgHeight - 48;
+    int chkY = state.hasCheckbox ? (btnY - 34) : 0;
+    if (!state.isScrollable)
+    {
+        chkY = 56 + textHeight + 14;
+        btnY = state.hasCheckbox ? (chkY + chkH + 16) : (56 + textHeight + 18);
+    }
 
+    if (state.hasCheckbox)
+    {
+        state.rcCheckbox = { 24, chkY, 24 + 18 + 8 + (int)szCheckbox.cx + 8, chkY + chkH };
+    }
+
+    // 6. Build Buttons on their own separate bottom row
     if (!customButtons.empty())
     {
         int curRight = dlgWidth - 24;
-        for (auto it = customButtons.rbegin(); it != customButtons.rend(); ++it)
+        for (int bIdx = (int)customButtons.size() - 1; bIdx >= 0; --bIdx)
         {
-            int btnW = 90;
-            HDC hdcB = GetDC(NULL);
-            SIZE szB;
-            HFONT hOld = (HFONT)SelectObject(hdcB, state.hFontText);
-            GetTextExtentPoint32W(hdcB, it->text.c_str(), (int)it->text.length(), &szB);
-            SelectObject(hdcB, hOld);
-            ReleaseDC(NULL, hdcB);
-            if (szB.cx + 28 > btnW) btnW = szB.cx + 28;
-
+            const auto& cb = customButtons[bIdx];
+            int btnW = measuredBtnWidths[bIdx];
             int x = curRight - btnW;
-            state.buttons.insert(state.buttons.begin(), { it->id, it->text, { x, btnY, x + btnW, btnY + btnH }, it->isDefault });
+            state.buttons.insert(state.buttons.begin(), { cb.id, cb.text, { x, btnY, x + btnW, btnY + btnH }, cb.isDefault });
             curRight = x - 10;
         }
     }
@@ -524,11 +664,14 @@ int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, c
         }
     }
 
-    // Position Window Centered on Parent or Screen
+    // Position Window Centered on Root Parent Window or Screen Work Area
+    HWND hRootParent = (hWndParent && IsWindow(hWndParent)) ? GetAncestor(hWndParent, GA_ROOT) : NULL;
+    if (!hRootParent && hWndParent && IsWindow(hWndParent)) hRootParent = hWndParent;
+
     RECT rcParent;
-    if (hWndParent && IsWindow(hWndParent))
+    if (hRootParent && IsWindow(hRootParent) && !IsIconic(hRootParent))
     {
-        GetWindowRect(hWndParent, &rcParent);
+        GetWindowRect(hRootParent, &rcParent);
     }
     else
     {
@@ -537,6 +680,13 @@ int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, c
 
     int posX = rcParent.left + (rcParent.right - rcParent.left - dlgWidth) / 2;
     int posY = rcParent.top + (rcParent.bottom - rcParent.top - dlgHeight) / 2;
+
+    RECT rcWorkArea;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &rcWorkArea, 0);
+    if (posX < rcWorkArea.left) posX = rcWorkArea.left;
+    if (posY < rcWorkArea.top) posY = rcWorkArea.top;
+    if (posX + dlgWidth > rcWorkArea.right) posX = rcWorkArea.right - dlgWidth;
+    if (posY + dlgHeight > rcWorkArea.bottom) posY = rcWorkArea.bottom - dlgHeight;
 
     HWND hMsgBox = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
@@ -577,11 +727,15 @@ int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, c
 
     if (state.isScrollable)
     {
-        int textAreaH = dlgHeight - 58 - 60;
+        int textCtrlTop = 56;
+        int textCtrlBottom = state.hasCheckbox ? (state.rcCheckbox.top - 12) : (state.buttons.empty() ? (dlgHeight - 60) : (state.buttons[0].rc.top - 14));
+        int textAreaH = textCtrlBottom - textCtrlTop;
+        if (textAreaH < 40) textAreaH = 40;
+
         state.hTextCtrl = CreateWindowExW(
             0, L"EDIT", state.text.c_str(),
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-            24, 58, dlgWidth - 48, textAreaH,
+            24, textCtrlTop, dlgWidth - 48, textAreaH,
             hMsgBox, NULL, hInst, NULL
         );
         if (state.hTextCtrl)
@@ -617,6 +771,8 @@ int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, c
         SetFocus(hWndParent);
     }
 
+    if (pbChecked) *pbChecked = state.isChecked;
+
     if (state.hFontTitle) DeleteObject(state.hFontTitle);
     if (state.hFontText) DeleteObject(state.hFontText);
     if (state.hFontIcon) DeleteObject(state.hFontIcon);
@@ -624,9 +780,20 @@ int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, c
     return state.result;
 }
 
+int ShowModernMessageBoxEx(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, const std::vector<ModernMsgBoxCustomButton>& customButtons, UINT uType)
+{
+    return ShowModernMessageBoxImpl(hWndParent, lpText, lpCaption, customButtons, uType, NULL, NULL);
+}
 
+int ShowModernMessageBoxWithCheckbox(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, LPCWSTR lpCheckboxText, bool* pbChecked, UINT uType)
+{
+    return ShowModernMessageBoxImpl(hWndParent, lpText, lpCaption, {}, uType, lpCheckboxText, pbChecked);
+}
 
-
+int ShowModernMessageBoxExWithCheckbox(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, const std::vector<ModernMsgBoxCustomButton>& customButtons, LPCWSTR lpCheckboxText, bool* pbChecked, UINT uType)
+{
+    return ShowModernMessageBoxImpl(hWndParent, lpText, lpCaption, customButtons, uType, lpCheckboxText, pbChecked);
+}
 
 int ShowModernMessageBox(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType)
 {

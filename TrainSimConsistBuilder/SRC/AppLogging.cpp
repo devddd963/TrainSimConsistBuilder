@@ -1,5 +1,6 @@
 #include "AppLogging.h"
 #include "DatabaseManager.h"
+#include "../../Common/Version.h"
 #include <cstdio>
 #include <cstdarg>
 #include <vector>
@@ -50,7 +51,7 @@ namespace AppLogging
     {
         switch (channel)
         {
-        case LogChannel::General: return "TRAIN SIM CONSIST BUILDER v9.3.0 SESSION LOG";
+        case LogChannel::General: return "TRAIN SIM CONSIST BUILDER v" TSCB_VERSION_STR " SESSION LOG";
         case LogChannel::Shape:   return "TRAIN SIM CONSIST BUILDER - SHAPE & 3D GEOMETRY DIAGNOSTICS";
         case LogChannel::Stock:   return "TRAIN SIM CONSIST BUILDER - STOCK (.ENG/.WAG) DIAGNOSTICS";
         case LogChannel::Texture: return "TRAIN SIM CONSIST BUILDER - TEXTURE & MATERIAL RESOLUTION TRACE";

@@ -6,7 +6,8 @@
 enum class GhostItemType
 {
     VehicleUnit,
-    PoolCard
+    PoolCard,
+    SoundFile
 };
 
 struct DragGhostItem
@@ -22,7 +23,7 @@ class FluentDragGhost
 public:
     static void Initialize(HINSTANCE hInstance);
     static void Show(HWND hParent, POINT ptScreen, const std::vector<DragGhostItem>& items);
-    static void Move(POINT ptScreen, bool isValidDropTarget, const std::wstring& actionText = L"");
+    static void Move(POINT ptScreen, bool isValidDropTarget, const std::wstring& actionText = L"__PRESERVE__");
     static void Hide();
     static bool IsActive();
 

@@ -4105,6 +4105,9 @@ void Show3DVisualStudioDialog(HWND hWndParent, const std::wstring& filePath, con
     wc.style = CS_DBLCLKS;
     wc.lpfnWndProc = Visual3DStudioProc;
     wc.hInstance = GetModuleHandleW(NULL);
+    wc.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107 /* IDI_TRAINSIMCONSISTBUILDER */));
+    wc.hIconSm = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+    if (!wc.hIconSm) wc.hIconSm = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(108 /* IDI_SMALL */));
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = NULL;
     wc.lpszClassName = L"TSCB_Visual3DStudioWnd";
@@ -4171,7 +4174,7 @@ void Show3DVisualStudioDialog(HWND hWndParent, const std::wstring& filePath, con
     if (posY < 20) posY = 20;
 
     HWND hWnd = CreateWindowExW(
-        0,
+        WS_EX_APPWINDOW,
         L"TSCB_Visual3DStudioWnd",
         L"3D Visual Studio",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
@@ -4184,6 +4187,11 @@ void Show3DVisualStudioDialog(HWND hWndParent, const std::wstring& filePath, con
 
     if (hWnd)
     {
+        HICON hIconBig = (HICON)GetClassLongPtrW(hWnd, GCLP_HICON);
+        HICON hIconSm = (HICON)GetClassLongPtrW(hWnd, GCLP_HICONSM);
+        if (hIconBig) SendMessageW(hWnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+        if (hIconSm)  SendMessageW(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSm);
+
         s_hActiveStudioWnd = hWnd;
 
         BOOL bDark = TRUE;

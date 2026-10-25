@@ -26,6 +26,13 @@ struct ModernContextMenuState {
     int activeSubMenuIndex = -1;
     ModernContextMenuState* pSubMenuState = nullptr;
     ModernContextMenuState* pParentMenuState = nullptr;
+
+    // Safety & anchor tracking
+    DWORD dwOpenTime = 0;
+    POINT ptOpenCursor = { 0, 0 };
+    bool hasSeenMouseDownInside = false;
+    RECT rcAnchor = { 0, 0, 0, 0 };
+    bool hasAnchor = false;
 };
 
 static const int ITEM_HEIGHT = 32;
@@ -34,7 +41,7 @@ static const int PADDING_V = 6;
 static const int MIN_MENU_WIDTH = 250;
 
 static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-static HWND CreateMenuWindow(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode, int minWidth, ModernContextMenuState* pParentState, ModernContextMenuState* pStateOut);
+static HWND CreateMenuWindow(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode, int minWidth, ModernContextMenuState* pParentState, ModernContextMenuState* pStateOut, const RECT* prcAnchor = nullptr);
 
 static bool IsPointInMenuChain(ModernContextMenuState* pState, POINT pt)
 {
@@ -219,27 +226,43 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         return 0;
     }
 
+    case WM_SETCURSOR:
+    {
+        SetCursor(LoadCursor(NULL, IDC_ARROW));
+        return TRUE;
+    }
+
     case WM_MOUSEMOVE:
     {
         if (!pState) break;
+        int x = GET_X_LPARAM(lParam);
         int y = GET_Y_LPARAM(lParam);
-        int curY = PADDING_V;
-        int newHover = -1;
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
 
-        for (size_t i = 0; i < pState->items.size(); ++i)
+        int newHover = -1;
+        // Strictly only allow hover interaction when the cursor is within the menu client rectangle
+        if (x >= 0 && x < rcClient.right && y >= 0 && y < rcClient.bottom)
         {
-            const auto& item = pState->items[i];
-            int itemH = item.isSeparator ? SEPARATOR_HEIGHT : ITEM_HEIGHT;
-            if (y >= curY && y < curY + itemH)
+            int curY = PADDING_V;
+            for (size_t i = 0; i < pState->items.size(); ++i)
             {
-                if (!item.isSeparator && item.isEnabled)
+                const auto& item = pState->items[i];
+                int itemH = item.isSeparator ? SEPARATOR_HEIGHT : ITEM_HEIGHT;
+                if (y >= curY && y < curY + itemH)
                 {
-                    newHover = (int)i;
+                    if (!item.isSeparator && item.isEnabled)
+                    {
+                        newHover = (int)i;
+                    }
+                    break;
                 }
-                break;
+                curY += itemH;
             }
-            curY += itemH;
         }
+
+        // Always keep the cursor as standard arrow (never pointing hand)
+        SetCursor(LoadCursor(NULL, IDC_ARROW));
 
         if (newHover != pState->hoveredIndex)
         {
@@ -297,9 +320,25 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         return 0;
     }
 
+    case WM_LBUTTONDOWN:
+    {
+        if (pState)
+        {
+            pState->hasSeenMouseDownInside = true;
+        }
+        return 0;
+    }
+
     case WM_LBUTTONUP:
     {
         if (!pState) break;
+        DWORD elapsed = GetTickCount() - pState->dwOpenTime;
+        // Suppress initial button release from opening click if it arrives immediately after opening
+        if (!pState->hasSeenMouseDownInside && elapsed < 300)
+        {
+            return 0;
+        }
+
         if (pState->hoveredIndex >= 0 && pState->hoveredIndex < (int)pState->items.size())
         {
             const auto& item = pState->items[pState->hoveredIndex];
@@ -404,7 +443,7 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
     return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
-static HWND CreateMenuWindow(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode, int minWidth, ModernContextMenuState* pParentState, ModernContextMenuState* pStateOut)
+static HWND CreateMenuWindow(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode, int minWidth, ModernContextMenuState* pParentState, ModernContextMenuState* pStateOut, const RECT* prcAnchor)
 {
     if (items.empty()) return NULL;
 
@@ -437,6 +476,18 @@ static HWND CreateMenuWindow(HWND hParent, int x, int y, const std::vector<Conte
     pState->activeSubMenuIndex = -1;
     pState->pSubMenuState = nullptr;
     pState->pParentMenuState = pParentState;
+    pState->dwOpenTime = GetTickCount();
+    GetCursorPos(&pState->ptOpenCursor);
+    pState->hasSeenMouseDownInside = false;
+    if (prcAnchor)
+    {
+        pState->rcAnchor = *prcAnchor;
+        pState->hasAnchor = true;
+    }
+    else
+    {
+        pState->hasAnchor = false;
+    }
 
     pState->hFontText = CreateFontW(
         -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -509,25 +560,78 @@ static HWND CreateMenuWindow(HWND hParent, int x, int y, const std::vector<Conte
     int calculatedW = leftIconPad + maxTextW + gap + maxShortcutW + rightPad;
     int menuW = (std::max)({ MIN_MENU_WIDTH, minWidth, calculatedW });
 
-    // Screen bounds adjustment
-    RECT rcWork;
-    SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
-    if (x + menuW > rcWork.right)
+    // Screen bounds adjustment using nearest monitor work area
+    POINT ptAnchorRef = { x, y };
+    if (prcAnchor)
     {
-        if (pParentState && pParentState->hWnd && IsWindow(pParentState->hWnd))
+        ptAnchorRef.x = prcAnchor->left;
+        ptAnchorRef.y = prcAnchor->bottom;
+    }
+    HMONITOR hMon = MonitorFromPoint(ptAnchorRef, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { sizeof(mi) };
+    RECT rcWork;
+    if (GetMonitorInfoW(hMon, &mi))
+    {
+        rcWork = mi.rcWork;
+    }
+    else
+    {
+        SystemParametersInfo(SPI_GETWORKAREA, 0, &rcWork, 0);
+    }
+
+    if (pParentState && pParentState->hWnd && IsWindow(pParentState->hWnd))
+    {
+        // Cascading submenu positioning
+        if (x + menuW > rcWork.right)
         {
             RECT rcParentWin;
             GetWindowRect(pParentState->hWnd, &rcParentWin);
             x = rcParentWin.left - menuW + 2;
         }
-        else
+        if (y + totalH > rcWork.bottom)
+        {
+            y = rcWork.bottom - totalH - 6;
+        }
+        if (x < rcWork.left) x = rcWork.left + 6;
+        if (y < rcWork.top) y = rcWork.top + 6;
+    }
+    else if (prcAnchor)
+    {
+        // Dropdown anchor positioning (flips above anchor when overflowing bottom)
+        x = prcAnchor->left;
+        y = prcAnchor->bottom + 2;
+
+        if (y + totalH > rcWork.bottom)
+        {
+            y = prcAnchor->top - totalH - 2; // Flip above anchor
+        }
+        if (y < rcWork.top) y = rcWork.top + 4;
+
+        if (x + menuW > rcWork.right)
+        {
+            x = prcAnchor->right - menuW;
+        }
+        if (x + menuW > rcWork.right)
         {
             x = rcWork.right - menuW - 6;
         }
+        if (x < rcWork.left) x = rcWork.left + 6;
     }
-    if (y + totalH > rcWork.bottom) y = rcWork.bottom - totalH - 6;
-    if (x < rcWork.left) x = rcWork.left + 6;
-    if (y < rcWork.top) y = rcWork.top + 6;
+    else
+    {
+        // Pure right-click cursor positioning (flips above/left of cursor)
+        if (y + totalH > rcWork.bottom)
+        {
+            y = y - totalH; // Flip above cursor point
+        }
+        if (y < rcWork.top) y = rcWork.top + 6;
+
+        if (x + menuW > rcWork.right)
+        {
+            x = x - menuW; // Flip left of cursor point
+        }
+        if (x < rcWork.left) x = rcWork.left + 6;
+    }
 
     HWND hMenuWnd = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
@@ -548,12 +652,12 @@ static HWND CreateMenuWindow(HWND hParent, int x, int y, const std::vector<Conte
     return hMenuWnd;
 }
 
-int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode, int minWidth)
+int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<ContextMenuItem>& items, BOOL bDarkMode, int minWidth, const RECT* prcAnchor)
 {
     if (items.empty()) return 0;
 
     ModernContextMenuState rootState;
-    HWND hRootMenuWnd = CreateMenuWindow(hParent, x, y, items, bDarkMode, minWidth, nullptr, &rootState);
+    HWND hRootMenuWnd = CreateMenuWindow(hParent, x, y, items, bDarkMode, minWidth, nullptr, &rootState, prcAnchor);
     if (!hRootMenuWnd) return 0;
 
     SetFocus(hRootMenuWnd);
@@ -579,7 +683,25 @@ int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<Contex
             else
             {
                 // Mouse event outside all menu windows
-                if (msg.message == WM_LBUTTONDOWN || msg.message == WM_RBUTTONDOWN || msg.message == WM_NCLBUTTONDOWN)
+                if (msg.message == WM_MOUSEMOVE)
+                {
+                    // Clear hover highlight on root menu and any open submenus
+                    ModernContextMenuState* pCur = &rootState;
+                    while (pCur)
+                    {
+                        if (pCur->hoveredIndex != -1)
+                        {
+                            pCur->hoveredIndex = -1;
+                            if (pCur->hWnd && IsWindow(pCur->hWnd))
+                            {
+                                InvalidateRect(pCur->hWnd, NULL, FALSE);
+                            }
+                        }
+                        pCur = pCur->pSubMenuState;
+                    }
+                    SetCursor(LoadCursor(NULL, IDC_ARROW));
+                }
+                else if (msg.message == WM_LBUTTONDOWN || msg.message == WM_RBUTTONDOWN || msg.message == WM_NCLBUTTONDOWN)
                 {
                     rootState.selectedId = 0;
                     rootState.isDone = true;
@@ -590,6 +712,19 @@ int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<Contex
                     {
                         DestroyWindow(hRootMenuWnd);
                         hRootMenuWnd = NULL;
+                    }
+
+                    // Check if click landed on the anchor button (toggle dismiss behavior)
+                    if (prcAnchor && PtInRect(prcAnchor, ptScreen))
+                    {
+                        break;
+                    }
+
+                    // Guard against rapid duplicate click at opening cursor point
+                    DWORD elapsed = GetTickCount() - rootState.dwOpenTime;
+                    if (elapsed < 200 && abs(ptScreen.x - rootState.ptOpenCursor.x) <= 6 && abs(ptScreen.y - rootState.ptOpenCursor.y) <= 6)
+                    {
+                        break;
                     }
 
                     HWND hClicked = WindowFromPoint(ptScreen);

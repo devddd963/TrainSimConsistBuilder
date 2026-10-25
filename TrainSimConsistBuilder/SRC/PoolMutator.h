@@ -183,6 +183,13 @@ namespace PoolMutator
         int& outRepairedCount
     );
 
+    bool PurgeUnitsVector(
+        std::vector<ConsistReader::UnitInfo>& units,
+        const std::vector<BrokenUnitInfo>& brokenUnits,
+        std::wstring& outError,
+        int& outPurgedCount
+    );
+
     // Persistence of user configuration
     struct MutatorSavedSettings {
         int activeTab = 0; // 0 = Mutate Consist, 1 = Insert Units

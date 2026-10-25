@@ -223,12 +223,20 @@
     <ClInclude Include="SRC\sqlite3\sqlite3.h" />
     <ClInclude Include="SRC\TrainConfig.h" />
     <ClInclude Include="UI\TrainConfigStudioDlg.h" />
+    <ClInclude Include="UI\SoundStudio.h" />
+    <ClInclude Include="UI\SmsEditorView.h" />
+    <ClInclude Include="SRC\SoundScanner.h" />
+    <ClInclude Include="SRC\SmsParser.h" />
+    <ClInclude Include="UI\SmsPoolManagerDlg.h" />
+    <ClInclude Include="UI\BatchSoundMutatorDlg.h" />
+    <ClInclude Include="UI\SmsStreamMutatorDlg.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SRC\TrainSimConsistBuilder.cpp" />
     <ClCompile Include="SRC\AppLogging.cpp" />
     <ClCompile Include="SRC\DatabaseManager.cpp" />
     <ClCompile Include="SRC\sqlite3\sqlite3.c" />
+    <ClCompile Include="SRC\SmsParser.cpp" />
     <ClCompile Include="UI\NavToolbar.cpp" />
     <ClCompile Include="UI\CommandBar.cpp" />
     <ClCompile Include="SRC\ConsistReader.cpp" />
@@ -272,6 +280,12 @@
     <ClCompile Include="SRC\CompositeStockLoader.cpp" />
     <ClCompile Include="SRC\TrainConfig.cpp" />
     <ClCompile Include="UI\TrainConfigStudioDlg.cpp" />
+    <ClCompile Include="UI\SoundStudio.cpp" />
+    <ClCompile Include="UI\SmsEditorView.cpp" />
+    <ClCompile Include="SRC\SoundScanner.cpp" />
+    <ClCompile Include="UI\SmsPoolManagerDlg.cpp" />
+    <ClCompile Include="UI\BatchSoundMutatorDlg.cpp" />
+    <ClCompile Include="UI\SmsStreamMutatorDlg.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="TrainSimConsistBuilder.rc" />

@@ -6,6 +6,7 @@
 #include "AssetsParser.h"
 #include "PoolManager.h"
 #include "PoolMutator.h"
+#include "SmsParser.h"
 
 namespace DatabaseManager
 {
@@ -53,6 +54,27 @@ namespace DatabaseManager
     bool AddBlueprintRole(const std::wstring& roleName, const std::wstring& category = L"Custom", bool isDefault = false);
     bool DeleteBlueprintRole(const std::wstring& roleName);
     bool RestoreDefaultBlueprintRoles();
+
+    // SMS Pool Presets persistence
+    struct SmsPoolPresetItem {
+        int id = 0;
+        std::wstring name;
+        std::wstring category;      // e.g. "Locomotives (Electric)", "Locomotives (Diesel)", "Passenger Coaches", "Freight Wagons", "Cab Sounds", "Custom"
+        std::wstring targetSlot;    // e.g. "Wagon", "Engine", "ORTS3DCab", "Inside", "All"
+        std::wstring primarySms;    // relative or filename e.g. "common.snd\LHB\lhb_coach.sms"
+        std::wstring secondarySms;  // optional secondary stream or cab/inside sound
+        std::wstring payload;       // notes / description
+        std::wstring createdAt;
+    };
+
+    bool LoadSmsPoolPresets(std::vector<SmsPoolPresetItem>& outPresets);
+    bool SaveSmsPoolPreset(SmsPoolPresetItem& preset);
+    bool DeleteSmsPoolPreset(int id);
+    void SeedDefaultSmsPoolPresetsInternal();
+
+    // SMS Stream Presets persistence (SMS Stream Mutator)
+    bool LoadStreamPresets(std::vector<StreamPresetCard>& outCards);
+    bool SaveStreamPresets(const std::vector<StreamPresetCard>& cards);
 
     // Cleanup legacy .dat cache files if present
     void CleanupLegacyDatFiles();

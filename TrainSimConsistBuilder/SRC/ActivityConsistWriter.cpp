@@ -41,7 +41,7 @@ namespace ActivityConsistWriter {
     bool CreateBackup(const std::wstring& actFilePath)
     {
         if (actFilePath.empty()) return false;
-        std::wstring bakPath = actFilePath + L".bak";
+        std::wstring bakPath = actFilePath + L".TSCB_BACKUP";
         return CopyFileW(actFilePath.c_str(), bakPath.c_str(), FALSE) != FALSE;
     }
 

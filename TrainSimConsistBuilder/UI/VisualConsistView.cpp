@@ -273,8 +273,8 @@ struct VisualConsistState {
     float targetFocusZ = 0.0f;
     float camYaw = -1.5707963f;  // -90 deg (Facing Left, Front on Left, Rear on Right)
     float camPitch = 0.03f;      // Slight elevation for depth
-    float camDist = 14.0f;       // Crisp scaling to fill viewport height
-    float camCenterY = 1.9f;     // Aligned with coach window/livery beltline
+    float camDist = 18.5f;       // Generous headroom distance so all stock (including double-stacks) fits without clipping
+    float camCenterY = 2.2f;     // Centered between rails and upper stock boundaries
     bool  bWireframe = false;
     bool  bOrbitMode = false;    // Disabled by default (when disabled: panning & selection active)
 
@@ -351,13 +351,16 @@ static void ResizeD3D11(VisualConsistState* pState, int width, int height)
     {
         ID3D11RenderTargetView* nullRTV = nullptr;
         pState->pD3DContext->OMSetRenderTargets(1, &nullRTV, nullptr);
+        pState->pD3DContext->ClearState();
+        pState->pD3DContext->Flush();
     }
 
     if (pState->pRenderTargetView)   { pState->pRenderTargetView->Release();   pState->pRenderTargetView = nullptr; }
     if (pState->pDepthStencilView)   { pState->pDepthStencilView->Release();   pState->pDepthStencilView = nullptr; }
     if (pState->pDepthStencilBuffer) { pState->pDepthStencilBuffer->Release(); pState->pDepthStencilBuffer = nullptr; }
 
-    pState->pSwapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+    HRESULT hr = pState->pSwapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+    if (FAILED(hr)) return;
 
     ID3D11Texture2D* pBackBuffer = nullptr;
     if (SUCCEEDED(pState->pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer)) && pBackBuffer)
@@ -902,6 +905,32 @@ static void Render3DConsist(VisualConsistState* pState)
 // -------------------------------------------------------------
 // Layout & Track Coordinates Calculation
 // -------------------------------------------------------------
+static void GetConsistFraming(VisualConsistState* pState, float& outDist, float& outCenterY)
+{
+    float maxH = 4.2f;
+    if (pState)
+    {
+        for (const auto& u : pState->units)
+        {
+            if (!u.isPhantom && u.height > maxH)
+                maxH = u.height;
+        }
+    }
+    float yMin = -0.4f; // Ground / rail ballast baseline
+    float yMax = (std::max)(4.2f, maxH);
+
+    // Vertical center target:
+    // When stock is standard height (4.2m), center at ~2.1m.
+    // When stock is tall (e.g. double-stacks up to 6.6m), center lifts adaptively to (yMin + yMax) * 0.5f (~3.1m - 3.2m)
+    outCenterY = (std::max)(2.1f, (yMin + yMax) * 0.5f);
+
+    // 30% margin padding to frame both roof and rails comfortably with ample headroom
+    float spanY = (yMax - yMin) * 1.30f;
+    float tanHalfFov = tanf(DirectX::XMConvertToRadians(12.0f));
+    float neededDist = spanY / (2.0f * tanHalfFov);
+    outDist = (std::max)(18.5f, neededDist);
+}
+
 static float CalculateLeftAlignedFocusZ(VisualConsistState* pState, int viewportW, int viewportH)
 {
     if (viewportH <= 0) viewportH = 150;
@@ -971,7 +1000,7 @@ static int HitTestUnit3D(VisualConsistState* pState, int mouseX, int mouseY, int
         if (boxMaxZ < visZMin || boxMinZ > visZMax) continue;
 
         float boxMinX = -1.65f, boxMaxX = 1.65f;
-        float boxMinY = 0.0f,  boxMaxY = 4.4f;
+        float boxMinY = 0.0f,  boxMaxY = (std::max)(4.4f, u.height);
 
         float tmin = -1e9f, tmax = 1e9f;
 
@@ -1661,60 +1690,72 @@ static void PaintHeader(HWND hWnd, HDC hdc, VisualConsistState* pState)
             else if (u.isMissingShape) missingShapeCount++;
         }
 
+        COLORREF dotColor = RGB(50, 220, 110);
         if (pState->units.empty())
         {
-            wcscpy_s(szStatus, L"● Standby");
+            wcscpy_s(szStatus, L"Standby");
             bgPill = RGB(26, 28, 34);
             borderPill = RGB(45, 48, 58);
             textPill = RGB(140, 145, 160);
+            dotColor = RGB(140, 145, 160);
         }
         else if (pState->isLoading && pState->loadedUnitCount < (int)pState->units.size())
         {
             int pct = (int)pState->units.size() > 0 ? (pState->loadedUnitCount * 100 / (int)pState->units.size()) : 0;
-            swprintf_s(szStatus, 128, L"● Loading %d / %d (%d%%)", pState->loadedUnitCount, (int)pState->units.size(), pct);
+            swprintf_s(szStatus, 128, L"Loading %d / %d (%d%%)", pState->loadedUnitCount, (int)pState->units.size(), pct);
             bgPill = RGB(45, 35, 18);
             borderPill = RGB(120, 90, 30);
             textPill = RGB(255, 205, 110);
+            dotColor = RGB(255, 205, 80);
         }
         else if (missingStockCount > 0 || missingShapeCount > 0)
         {
             if (missingStockCount > 0 && missingShapeCount > 0)
             {
-                swprintf_s(szStatus, 128, L"● Ready • %d Units (%.1f m) • %d Missing Stock • %d Missing Shape \x26A0", 
+                swprintf_s(szStatus, 128, L"Ready • %d Units (%.1f m) • %d Missing Stock • %d Missing Shape \x26A0", 
                     (int)pState->units.size(), pState->trainTotalLength, missingStockCount, missingShapeCount);
                 bgPill = RGB(55, 24, 26);
                 borderPill = RGB(150, 42, 48);
                 textPill = RGB(255, 140, 140);
+                dotColor = RGB(255, 80, 80);
             }
             else if (missingStockCount > 0)
             {
-                swprintf_s(szStatus, 128, L"● Ready • %d Units (%.1f m) • %d Missing Stock \x26A0", 
+                swprintf_s(szStatus, 128, L"Ready • %d Units (%.1f m) • %d Missing Stock \x26A0", 
                     (int)pState->units.size(), pState->trainTotalLength, missingStockCount);
                 bgPill = RGB(55, 24, 26);
                 borderPill = RGB(150, 42, 48);
                 textPill = RGB(255, 140, 140);
+                dotColor = RGB(255, 80, 80);
             }
             else
             {
-                swprintf_s(szStatus, 128, L"● Ready • %d Units (%.1f m) • %d Missing Shape \x26A0", 
+                swprintf_s(szStatus, 128, L"Ready • %d Units (%.1f m) • %d Missing Shape \x26A0", 
                     (int)pState->units.size(), pState->trainTotalLength, missingShapeCount);
                 bgPill = RGB(55, 36, 15);
                 borderPill = RGB(155, 95, 25);
                 textPill = RGB(255, 195, 110);
+                dotColor = RGB(255, 175, 50);
             }
         }
         else
         {
-            swprintf_s(szStatus, 128, L"● Ready • %d Units (%.1f m)", (int)pState->units.size(), pState->trainTotalLength);
+            swprintf_s(szStatus, 128, L"Ready • %d Units (%.1f m)", (int)pState->units.size(), pState->trainTotalLength);
             bgPill = RGB(18, 42, 28);
             borderPill = RGB(35, 95, 55);
             textPill = RGB(120, 235, 160);
+            dotColor = RGB(50, 220, 110);
         }
 
         SIZE szSt = {};
         if (pState->hFontMetrics) SelectObject(memDC, pState->hFontMetrics);
         GetTextExtentPoint32W(memDC, szStatus, (int)wcslen(szStatus), &szSt);
-        int pillW = szSt.cx + 18;
+
+        int dotDiameter = 6;
+        int padLeft = 10;
+        int gap = 6;
+        int padRight = 10;
+        int pillW = padLeft + dotDiameter + gap + szSt.cx + padRight;
         if (curX + pillW > maxBadgeRight) pillW = maxBadgeRight - curX;
 
         if (pillW > 30)
@@ -1730,9 +1771,23 @@ static void PaintHeader(HWND hWnd, HDC hdc, VisualConsistState* pState)
             DeleteObject(hbrP);
             DeleteObject(hpP);
 
-            RECT rcText = { rcPill.left + 8, rcPill.top, rcPill.right - 8, rcPill.bottom };
+            // Draw vertically and horizontally centered indicator dot
+            int dotCenterY = (rcPill.top + rcPill.bottom) / 2;
+            int dotLeft = rcPill.left + padLeft;
+            int dotTop = dotCenterY - (dotDiameter / 2);
+            HBRUSH hbrDot = CreateSolidBrush(dotColor);
+            HPEN hpDot = CreatePen(PS_SOLID, 1, dotColor);
+            hOldB = (HBRUSH)SelectObject(memDC, hbrDot);
+            hOldP = (HPEN)SelectObject(memDC, hpDot);
+            Ellipse(memDC, dotLeft, dotTop, dotLeft + dotDiameter, dotTop + dotDiameter);
+            SelectObject(memDC, hOldB);
+            SelectObject(memDC, hOldP);
+            DeleteObject(hbrDot);
+            DeleteObject(hpDot);
+
+            RECT rcText = { rcPill.left + padLeft + dotDiameter + gap, rcPill.top, rcPill.right - padRight, rcPill.bottom };
             SetTextColor(memDC, textPill);
-            DrawTextW(memDC, szStatus, -1, &rcText, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            DrawTextW(memDC, szStatus, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
     }
 
@@ -1816,12 +1871,19 @@ static LRESULT CALLBACK ViewportWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 
     case WM_SIZE:
     {
-        if (pState)
+        if (pState && wParam != SIZE_MINIMIZED)
         {
             int w = LOWORD(lParam);
             int h = HIWORD(lParam);
-            ResizeD3D11(pState, w, h);
-            Render3DConsist(pState);
+            if (w > 0 && h > 0)
+            {
+                ResizeD3D11(pState, w, h);
+                if (!pState->bOrbitMode && !pState->isDragging3D)
+                {
+                    GetConsistFraming(pState, pState->camDist, pState->camCenterY);
+                }
+                Render3DConsist(pState);
+            }
         }
         return 0;
     }
@@ -1998,13 +2060,12 @@ static LRESULT CALLBACK ViewportWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
     case WM_LBUTTONDBLCLK:
     {
         if (!pState) break;
-        // Snap back to side-profile view (Facing Left, Left-aligned, Close Scaling)
+        // Snap back to side-profile view (Facing Left, Left-aligned, Adaptive Height Framing)
         RECT rc;
         GetClientRect(hWnd, &rc);
         pState->camYaw = -1.5707963f; // -90 deg
         pState->camPitch = 0.03f;
-        pState->camDist = 14.0f;
-        pState->camCenterY = 1.9f;
+        GetConsistFraming(pState, pState->camDist, pState->camCenterY);
         pState->camFocusZ = CalculateLeftAlignedFocusZ(pState, rc.right - rc.left, rc.bottom - rc.top);
         pState->bOrbitMode = false;
         pState->scrollBar.SetPos(0);
@@ -2020,7 +2081,7 @@ static LRESULT CALLBACK ViewportWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
         short zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
         float delta = (float)zDelta / 120.0f;
 
-        if (wParam & MK_CONTROL)
+        if ((wParam & MK_CONTROL) || pState->bOrbitMode)
         {
             // Zoom Camera Distance
             pState->camDist = (std::max)(3.0f, (std::min)(120.0f, pState->camDist - delta * 1.5f));
@@ -2122,12 +2183,15 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
 
     case WM_SIZE:
     {
-        if (pState)
+        if (pState && wParam != SIZE_MINIMIZED)
         {
             int w = LOWORD(lParam);
             int h = HIWORD(lParam);
-            RecalcVisualConsistLayout(pState, w, h);
-            InvalidateRect(hWnd, NULL, FALSE);
+            if (w > 0 && h > 0)
+            {
+                RecalcVisualConsistLayout(pState, w, h);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
         }
         return 0;
     }
@@ -2224,6 +2288,37 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
                         unit.isPhantom = false;
                         unit.length = (effStep > 0.1f) ? effStep : ((stockLen > 0.1f) ? stockLen : ((shapeLen > 0.1f) ? shapeLen : (unit.isEngine ? 21.0f : 24.0f)));
                     }
+
+                    // Compute accurate unit height from subshapes bounds & stock spec (handles double-stacks)
+                    float maxShapeY = 0.0f;
+                    for (const auto& sub : unit.compositeStock.subShapes)
+                    {
+                        if (sub && sub->shape.isValid)
+                        {
+                            DirectX::XMFLOAT3 sMin = sub->shape.boundsMin;
+                            DirectX::XMFLOAT3 sMax = sub->shape.boundsMax;
+                            DirectX::XMFLOAT3 corners[8] = {
+                                { sMin.x, sMin.y, sMin.z },
+                                { sMax.x, sMin.y, sMin.z },
+                                { sMin.x, sMax.y, sMin.z },
+                                { sMax.x, sMax.y, sMin.z },
+                                { sMin.x, sMin.y, sMax.z },
+                                { sMax.x, sMin.y, sMax.z },
+                                { sMin.x, sMax.y, sMax.z },
+                                { sMax.x, sMax.y, sMax.z }
+                            };
+                            for (int c = 0; c < 8; ++c)
+                            {
+                                DirectX::XMVECTOR v = DirectX::XMLoadFloat3(&corners[c]);
+                                DirectX::XMVECTOR vt = DirectX::XMVector3Transform(v, sub->localMatrix);
+                                DirectX::XMFLOAT3 pt;
+                                DirectX::XMStoreFloat3(&pt, vt);
+                                maxShapeY = (std::max)(maxShapeY, pt.y);
+                            }
+                        }
+                    }
+                    float stockH = (float)unit.compositeStock.spec.size.heightM;
+                    unit.height = (std::max)({ 4.0f, stockH, maxShapeY, unit.compositeStock.boundsMax.y });
                 }
             }
             else
@@ -2257,6 +2352,11 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
             GetClientRect(pState->hViewportWnd ? pState->hViewportWnd : hWnd, &rcVp);
             int vpW = rcVp.right - rcVp.left;
             int vpH = rcVp.bottom - rcVp.top;
+
+            if (!pState->bOrbitMode && !pState->isDragging3D)
+            {
+                GetConsistFraming(pState, pState->camDist, pState->camCenterY);
+            }
 
             if (pState->scrollBar.GetPos() == 0 && !pState->isDragging3D)
             {
@@ -2396,13 +2496,12 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
 
         if (PtInRect(&pState->rcBtnSideView, pt))
         {
-            // Reset to Side View (TSRE5 Mode, Facing Left, Left-aligned, Close Scaling)
+            // Reset to Side View (TSRE5 Mode, Facing Left, Left-aligned, Adaptive Height Framing)
             RECT rcVp;
             GetClientRect(pState->hViewportWnd, &rcVp);
             pState->camYaw = -1.5707963f;
             pState->camPitch = 0.03f;
-            pState->camDist = 14.0f;
-            pState->camCenterY = 1.9f;
+            GetConsistFraming(pState, pState->camDist, pState->camCenterY);
             pState->camFocusZ = CalculateLeftAlignedFocusZ(pState, rcVp.right - rcVp.left, rcVp.bottom - rcVp.top);
             pState->bOrbitMode = false;
             pState->scrollBar.SetPos(0);
@@ -2444,14 +2543,14 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
         if (PtInRect(&pState->rcBtnSettings, pt))
         {
             bool curCollapsed = ReadCollapseOnStartupRegistry();
-            POINT ptMenu = { pState->rcBtnSettings.left, pState->rcBtnSettings.bottom };
-            ClientToScreen(hWnd, &ptMenu);
+            RECT rcAnchorScreen = pState->rcBtnSettings;
+            MapWindowPoints(hWnd, NULL, (LPPOINT)&rcAnchorScreen, 2);
 
             std::vector<ContextMenuItem> items = {
                 ContextMenuItem::Action(101, curCollapsed ? L"\xE73E" : L"\xE739", L"Collapse Visual Preview on startup", L"", true)
             };
 
-            int cmd = ModernContextMenu::Show(hWnd, ptMenu.x, ptMenu.y, items, pState->bDarkMode);
+            int cmd = ModernContextMenu::Show(hWnd, rcAnchorScreen.left, rcAnchorScreen.bottom + 2, items, pState->bDarkMode, 0, &rcAnchorScreen);
             if (cmd == 101)
             {
                 WriteCollapseOnStartupRegistry(!curCollapsed);
@@ -2678,8 +2777,7 @@ void VisualConsistView_SetUnits(HWND hWnd, const std::vector<ConsistReader::Unit
 
     pState->camYaw = -1.5707963f; // -90 deg (facing left)
     pState->camPitch = 0.03f;
-    pState->camDist = 14.0f;
-    pState->camCenterY = 1.9f;
+    GetConsistFraming(pState, pState->camDist, pState->camCenterY);
     pState->camFocusZ = CalculateLeftAlignedFocusZ(pState, vpW, vpH);
     pState->scrollBar.SetPos(0);
     pState->selectedIndex = 0;
