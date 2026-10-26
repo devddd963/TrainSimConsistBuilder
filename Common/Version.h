@@ -10,9 +10,9 @@
 #define TSCB_VERSION_PATCH          6
 #define TSCB_VERSION_REVISION       0
 
-#define TSCB_BUILD_NUMBER           96300
-#define TSCB_BUILD_NUMBER_STR       "96300"
-#define TSCB_BUILD_NUMBER_WSTR     L"96300"
+#define TSCB_BUILD_NUMBER           96600
+#define TSCB_BUILD_NUMBER_STR       "96600"
+#define TSCB_BUILD_NUMBER_WSTR     L"96600"
 
 #define TSCB_FILEVERSION_NUM        9,3,6,0
 #define TSCB_PRODUCTVERSION_NUM     9,3,6,0

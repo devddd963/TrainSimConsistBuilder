@@ -18,6 +18,7 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <vector>
 #include <unordered_set>
@@ -610,6 +611,10 @@ struct ClickControl
         BTN_CAT_UP,
         BTN_CAT_DOWN,
         BTN_CAT_DELETE,
+        BTN_CAT_ADD_SUB,
+        TREE_ROW_CLICK,
+        TREE_CHEVRON_CLICK,
+        BTN_TREE_TOGGLE_ALL,
         CATEGORY_HEADER_CLICK,
         CONFIG_ITEM_CLICK,
         BTN_ADD_POOL_TO_RAKE,
@@ -637,6 +642,11 @@ struct ClickControl
         BTN_TOTAL_MAX_DEC,
         BTN_TOTAL_MAX_INC,
         BTN_TOTAL_MAX_EDIT,
+        BTN_TOTAL_MODE_FIXED,
+        BTN_TOTAL_MODE_VARIABLE,
+        BTN_TOTAL_FIXED_DEC,
+        BTN_TOTAL_FIXED_INC,
+        BTN_TOTAL_FIXED_EDIT,
         BTN_EDIT_NAME,
         BTN_EDIT_ID,
         BTN_EDIT_TYPE,
@@ -676,6 +686,7 @@ struct StudioDlgState
     std::wstring selectedCategory = L"";
     std::vector<std::wstring> categoryOrder;
     std::unordered_set<std::wstring> collapsedCategories;
+    bool isFixedUnits = true;
 
     // Category Card Drag & Hits
     struct CategoryCardHit {
@@ -778,12 +789,51 @@ struct StudioDlgState
     int repeatPoolIdx = -1;
     int repeatHoldCount = 0;
 
-    // Splitter state for resizable left sidebar
-    int sidebarWidth = 380;
+    // Splitter state for resizable left sidebar (compact default 280px)
+    int sidebarWidth = 280;
     bool isDraggingSplitter = false;
     int dragSplitterStartX = 0;
-    int dragSidebarStartW = 380;
+    int dragSidebarStartW = 280;
     RECT rcSplitter = { 0 };
+
+    // Sandboxed File/Consist Tree Explorer State
+    struct TreeExplorerItem
+    {
+        enum ItemType { ITEM_FOLDER, ITEM_TRAIN };
+        ItemType type = ITEM_FOLDER;
+
+        std::wstring name;
+        std::wstring category;
+        std::wstring relPath;
+        std::wstring fullPath;
+        int depth = 0;
+        int configIndex = -1;
+        int trainCount = 0;
+
+        bool isExpanded = true;
+        bool isSelected = false;
+        bool isCut = false;
+
+        RECT rcRow = { 0 };
+        RECT rcChevron = { 0 };
+    };
+    std::vector<TreeExplorerItem> treeItems;
+    int hoveredTreeItemIdx = -1;
+
+    // Clipboard State
+    enum ClipboardOp { CLIP_NONE = 0, CLIP_CUT, CLIP_COPY };
+    ClipboardOp clipboardOp = CLIP_NONE;
+    bool clipIsTrain = false;
+    std::wstring clipSourcePath;
+    std::wstring clipName;
+
+    // Tree Item Drag & Drop State
+    bool isPotentialTreeDrag = false;
+    bool isTreeDragging = false;
+    POINT ptTreeDragStart = { 0, 0 };
+    int draggedTreeItemIdx = -1;
+    int dropTargetTreeFolderIdx = -1;
+    RECT rcTreeDropIndicator = { 0 };
 
     // Drag-Drop state into Tab 1
     int dragHoverPoolIdx = -1;
@@ -859,6 +909,20 @@ struct StudioDlgState
 
     void PopulateFieldsFromActiveConfig()
     {
+        if (activeConfig.minLength == activeConfig.maxLength && activeConfig.minLength > 0)
+        {
+            isFixedUnits = true;
+        }
+        else if (activeConfig.minLength > 0 || activeConfig.maxLength > 0)
+        {
+            isFixedUnits = false;
+        }
+        else
+        {
+            isFixedUnits = true;
+            activeConfig.minLength = 12;
+            activeConfig.maxLength = 12;
+        }
         TrainConfigManager::LoadTrainBinding(activeConfig, activeBinding);
         if (activeBinding.pools.size() < activeConfig.pools.size())
         {
@@ -901,6 +965,18 @@ static void ExecuteStudioStepAction(StudioDlgState* pState, ClickControl::Type t
     else if (type == ClickControl::BTN_TOTAL_MAX_INC)
     {
         pState->activeConfig.maxLength += step;
+        pState->isDirtyBlueprint = true;
+    }
+    else if (type == ClickControl::BTN_TOTAL_FIXED_DEC)
+    {
+        pState->activeConfig.minLength = (std::max)(1, pState->activeConfig.minLength - step);
+        pState->activeConfig.maxLength = pState->activeConfig.minLength;
+        pState->isDirtyBlueprint = true;
+    }
+    else if (type == ClickControl::BTN_TOTAL_FIXED_INC || type == ClickControl::BTN_TOTAL_FIXED_EDIT)
+    {
+        pState->activeConfig.minLength += step;
+        pState->activeConfig.maxLength = pState->activeConfig.minLength;
         pState->isDirtyBlueprint = true;
     }
     else if (poolIdx >= 0 && poolIdx < (int)pState->activeConfig.pools.size())
@@ -960,6 +1036,43 @@ static void DrawSolidYellowDropIndicator(HDC hdc, const RECT& rc)
     SelectObject(hdc, holdPen);
     DeleteObject(hbrYellow);
     DeleteObject(hpenYellow);
+}
+
+static void DrawCustomRadioButton(HDC hdc, const RECT& rcCircle, bool isSelected, bool isHovered)
+{
+    int cx = rcCircle.left + (rcCircle.right - rcCircle.left) / 2;
+    int cy = rcCircle.top + (rcCircle.bottom - rcCircle.top) / 2;
+    int R = 6; // Outer ring radius
+
+    COLORREF bg = isHovered ? RGB(45, 45, 50) : RGB(28, 28, 32);
+    COLORREF border = isSelected ? StudioTheme::AccentBlue : (isHovered ? RGB(110, 110, 115) : RGB(75, 75, 80));
+
+    HBRUSH hbr = CreateSolidBrush(bg);
+    HPEN hpen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ holdBr = SelectObject(hdc, hbr);
+    HGDIOBJ holdPen = SelectObject(hdc, hpen);
+
+    Ellipse(hdc, cx - R, cy - R, cx + R + 1, cy + R + 1);
+
+    if (isSelected)
+    {
+        int r = 3; // Inner dot radius
+        COLORREF dotCol = StudioTheme::AccentBlue;
+        HBRUSH hbrDot = CreateSolidBrush(dotCol);
+        HPEN hpenDot = CreatePen(PS_SOLID, 1, dotCol);
+        SelectObject(hdc, hbrDot);
+        SelectObject(hdc, hpenDot);
+        Ellipse(hdc, cx - r, cy - r, cx + r + 1, cy + r + 1);
+        SelectObject(hdc, holdBr);
+        SelectObject(hdc, holdPen);
+        DeleteObject(hbrDot);
+        DeleteObject(hpenDot);
+    }
+
+    SelectObject(hdc, holdBr);
+    SelectObject(hdc, holdPen);
+    DeleteObject(hbr);
+    DeleteObject(hpen);
 }
 
 static void DrawModernBtn(HDC hdc, const RECT& rc, const wchar_t* text, bool isHover, bool isPressed, bool isAccent, HFONT hFont, HFONT hIconFont = NULL, const wchar_t* iconGlyph = NULL)
@@ -1269,6 +1382,470 @@ static int GetBindingUnitDropTarget(const StudioDlgState* pState, int hitPool, P
 }
 
 // ------------------------------------------------------------------------------------------------
+// Sandboxed Tree Explorer Helpers
+// ------------------------------------------------------------------------------------------------
+
+static void BuildTreeExplorer(StudioDlgState* pState)
+{
+    pState->treeItems.clear();
+    std::wstring root = TrainConfigManager::GetTrainConfigsRootDir();
+    pState->categoryOrder = TrainConfigManager::GetCategories();
+
+    std::set<std::wstring> allCategories(pState->categoryOrder.begin(), pState->categoryOrder.end());
+    for (const auto& cfg : TrainConfigManager::g_LoadedConfigsCache)
+    {
+        if (!cfg.category.empty())
+        {
+            allCategories.insert(cfg.category);
+            size_t slashPos = 0;
+            while ((slashPos = cfg.category.find(L'\\', slashPos)) != std::wstring::npos)
+            {
+                allCategories.insert(cfg.category.substr(0, slashPos));
+                slashPos++;
+            }
+        }
+    }
+    std::vector<std::wstring> sortedCats(allCategories.begin(), allCategories.end());
+
+    // Root-level trains (empty category)
+    for (size_t c = 0; c < TrainConfigManager::g_LoadedConfigsCache.size(); ++c)
+    {
+        const auto& cfg = TrainConfigManager::g_LoadedConfigsCache[c];
+        if (cfg.category.empty())
+        {
+            StudioDlgState::TreeExplorerItem it;
+            it.type = StudioDlgState::TreeExplorerItem::ITEM_TRAIN;
+            it.name = cfg.name;
+            it.category = L"";
+            it.relPath = cfg.relativePath;
+            try { it.fullPath = fs::path(cfg.filePath).parent_path().wstring(); } catch (...) { it.fullPath = cfg.filePath; }
+            it.depth = 0;
+            it.configIndex = (int)c;
+            it.isSelected = ((int)c == pState->selectedConfigIdx);
+            it.isCut = (pState->clipboardOp == StudioDlgState::CLIP_CUT && pState->clipSourcePath == it.fullPath);
+            pState->treeItems.push_back(it);
+        }
+    }
+
+    // Folders and direct trains
+    for (const auto& cat : sortedCats)
+    {
+        bool isAncestorCollapsed = false;
+        size_t slashPos = 0;
+        while ((slashPos = cat.find(L'\\', slashPos)) != std::wstring::npos)
+        {
+            std::wstring parentPrefix = cat.substr(0, slashPos);
+            if (pState->collapsedCategories.count(parentPrefix) > 0)
+            {
+                isAncestorCollapsed = true;
+                break;
+            }
+            slashPos++;
+        }
+        if (isAncestorCollapsed) continue;
+
+        int depth = 0;
+        for (wchar_t ch : cat) { if (ch == L'\\') depth++; }
+
+        bool isExpanded = (pState->collapsedCategories.count(cat) == 0);
+        bool isFolderSelected = (pState->selectedCategory == cat && pState->selectedConfigIdx < 0);
+
+        std::wstring leafName = cat;
+        size_t lastSlash = cat.rfind(L'\\');
+        if (lastSlash != std::wstring::npos) leafName = cat.substr(lastSlash + 1);
+
+        int catCount = 0;
+        std::vector<size_t> directTrains;
+        for (size_t c = 0; c < TrainConfigManager::g_LoadedConfigsCache.size(); ++c)
+        {
+            if (TrainConfigManager::g_LoadedConfigsCache[c].category == cat)
+            {
+                catCount++;
+                directTrains.push_back(c);
+            }
+        }
+
+        StudioDlgState::TreeExplorerItem fItem;
+        fItem.type = StudioDlgState::TreeExplorerItem::ITEM_FOLDER;
+        fItem.name = leafName;
+        fItem.category = cat;
+        fItem.relPath = cat;
+        fItem.fullPath = root + L"\\" + cat;
+        fItem.depth = depth;
+        fItem.trainCount = catCount;
+        fItem.isExpanded = isExpanded;
+        fItem.isSelected = isFolderSelected;
+        fItem.isCut = (pState->clipboardOp == StudioDlgState::CLIP_CUT && pState->clipSourcePath == fItem.fullPath);
+        pState->treeItems.push_back(fItem);
+
+        if (isExpanded)
+        {
+            for (size_t cIdx : directTrains)
+            {
+                const auto& cfg = TrainConfigManager::g_LoadedConfigsCache[cIdx];
+                StudioDlgState::TreeExplorerItem tItem;
+                tItem.type = StudioDlgState::TreeExplorerItem::ITEM_TRAIN;
+                tItem.name = cfg.name;
+                tItem.category = cat;
+                tItem.relPath = cfg.relativePath;
+                try { tItem.fullPath = fs::path(cfg.filePath).parent_path().wstring(); } catch (...) { tItem.fullPath = cfg.filePath; }
+                tItem.depth = depth + 1;
+                tItem.configIndex = (int)cIdx;
+                tItem.isSelected = ((int)cIdx == pState->selectedConfigIdx);
+                tItem.isCut = (pState->clipboardOp == StudioDlgState::CLIP_CUT && pState->clipSourcePath == tItem.fullPath);
+                pState->treeItems.push_back(tItem);
+            }
+        }
+    }
+}
+
+static void ExecuteTreePaste(HWND hWnd, StudioDlgState* pState, const std::wstring& targetCategory)
+{
+    if (pState->clipboardOp == StudioDlgState::CLIP_NONE || pState->clipSourcePath.empty())
+        return;
+
+    std::wstring root = TrainConfigManager::GetTrainConfigsRootDir();
+    std::wstring targetDir = targetCategory.empty() ? root : (root + L"\\" + targetCategory);
+    try
+    {
+        fs::create_directories(targetDir);
+        fs::path srcP(pState->clipSourcePath);
+        if (!fs::exists(srcP)) return;
+
+        std::wstring leaf = srcP.filename().wstring();
+        fs::path destP = fs::path(targetDir) / leaf;
+
+        if (pState->clipboardOp == StudioDlgState::CLIP_COPY)
+        {
+            if (fs::exists(destP))
+            {
+                int copyIdx = 1;
+                while (fs::exists(destP))
+                {
+                    std::wstring newLeaf = leaf + (copyIdx == 1 ? L" - Copy" : (L" - Copy (" + std::to_wstring(copyIdx) + L")"));
+                    destP = fs::path(targetDir) / newLeaf;
+                    copyIdx++;
+                }
+            }
+            fs::copy(srcP, destP, fs::copy_options::recursive);
+        }
+        else if (pState->clipboardOp == StudioDlgState::CLIP_CUT)
+        {
+            if (fs::exists(destP) && fs::canonical(srcP) != fs::canonical(destP))
+            {
+                int copyIdx = 1;
+                while (fs::exists(destP))
+                {
+                    std::wstring newLeaf = leaf + (copyIdx == 1 ? L" - Moved" : (L" - Moved (" + std::to_wstring(copyIdx) + L")"));
+                    destP = fs::path(targetDir) / newLeaf;
+                    copyIdx++;
+                }
+            }
+            if (fs::canonical(srcP) != fs::canonical(destP))
+            {
+                fs::rename(srcP, destP);
+            }
+            pState->clipboardOp = StudioDlgState::CLIP_NONE;
+            pState->clipSourcePath.clear();
+        }
+
+        TrainConfigManager::ScanTrainConfigs();
+        pState->RefreshCategoryOrder();
+        pState->selectedCategory = targetCategory;
+        InvalidateRect(hWnd, NULL, FALSE);
+    }
+    catch (...) {}
+}
+
+static void HandleTreeContextMenuCmd(HWND hWnd, StudioDlgState* pState, int cmd, int itemIdx)
+{
+    std::wstring root = TrainConfigManager::GetTrainConfigsRootDir();
+    if (cmd == 101) // Duplicate / Clone Train
+    {
+        if (pState->selectedConfigIdx >= 0 && pState->selectedConfigIdx < (int)TrainConfigManager::g_LoadedConfigsCache.size())
+        {
+            const auto& cur = TrainConfigManager::g_LoadedConfigsCache[pState->selectedConfigIdx];
+            std::wstring newID;
+            if (ShowStudioPrompt(hWnd, L"Clone Train Blueprint", L"Enter new unique Train ID for cloned blueprint (no spaces):", cur.id + L"_COPY", newID))
+            {
+                if (!newID.empty())
+                {
+                    TrainConfigManager::TrainConfig cfg = cur;
+                    cfg.id = newID;
+                    cfg.name = cur.name + L" (Copy)";
+                    std::wstring trainFolder = TrainConfigManager::SanitizeFileName(cfg.name);
+                    std::wstring trainDir = root + (cfg.category.empty() ? L"" : (L"\\" + cfg.category)) + L"\\" + trainFolder;
+                    try { fs::create_directories(trainDir); } catch (...) {}
+                    std::wstring trainFile = trainDir + L"\\" + cfg.id + L".train";
+                    TrainConfigManager::SaveTrainConfig(trainFile, cfg);
+
+                    std::wstring oldDir = fs::path(cur.filePath).parent_path().wstring();
+                    std::wstring oldBinding = oldDir + L"\\" + cur.id + L".binding";
+                    std::wstring newBinding = trainDir + L"\\" + cfg.id + L".binding";
+                    if (fs::exists(oldBinding))
+                    {
+                        try { fs::copy_file(oldBinding, newBinding, fs::copy_options::overwrite_existing); } catch (...) {}
+                    }
+
+                    TrainConfigManager::ScanTrainConfigs();
+                    pState->RefreshCategoryOrder();
+                    pState->selectedCategory = cfg.category;
+                    for (size_t c = 0; c < TrainConfigManager::g_LoadedConfigsCache.size(); ++c)
+                    {
+                        if (TrainConfigManager::g_LoadedConfigsCache[c].id == cfg.id)
+                        {
+                            pState->selectedConfigIdx = (int)c;
+                            pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[c];
+                            pState->PopulateFieldsFromActiveConfig();
+                            break;
+                        }
+                    }
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+        }
+    }
+    else if (cmd == 102) // Cut Train
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            pState->clipboardOp = StudioDlgState::CLIP_CUT;
+            pState->clipIsTrain = true;
+            pState->clipSourcePath = pState->treeItems[itemIdx].fullPath;
+            pState->clipName = pState->treeItems[itemIdx].name;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+    else if (cmd == 103) // Copy Train
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            pState->clipboardOp = StudioDlgState::CLIP_COPY;
+            pState->clipIsTrain = true;
+            pState->clipSourcePath = pState->treeItems[itemIdx].fullPath;
+            pState->clipName = pState->treeItems[itemIdx].name;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+    else if (cmd == 104) // Rename Train (F2)
+    {
+        if (pState->selectedConfigIdx >= 0 && pState->selectedConfigIdx < (int)TrainConfigManager::g_LoadedConfigsCache.size())
+        {
+            auto& cfg = TrainConfigManager::g_LoadedConfigsCache[pState->selectedConfigIdx];
+            std::wstring newName;
+            if (ShowStudioPrompt(hWnd, L"Rename Train Blueprint", L"Enter new train name:", cfg.name, newName))
+            {
+                if (!newName.empty() && newName != cfg.name)
+                {
+                    cfg.name = newName;
+                    TrainConfigManager::SaveTrainConfig(cfg.filePath, cfg);
+                    pState->activeConfig.name = newName;
+                    TrainConfigManager::ScanTrainConfigs();
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+        }
+    }
+    else if (cmd == 105) // Delete Train (Del)
+    {
+        if (pState->selectedConfigIdx >= 0 && pState->selectedConfigIdx < (int)TrainConfigManager::g_LoadedConfigsCache.size())
+        {
+            const auto& cur = TrainConfigManager::g_LoadedConfigsCache[pState->selectedConfigIdx];
+            int res = ShowModernMessageBox(hWnd, (L"Are you sure you want to permanently delete train blueprint '" + cur.name + L"'?").c_str(), L"Delete Blueprint", MB_YESNO | MB_ICONWARNING);
+            if (res == IDYES)
+            {
+                try
+                {
+                    fs::path p(cur.filePath);
+                    if (p.has_parent_path() && p.parent_path() != fs::path(root))
+                    {
+                        fs::remove_all(p.parent_path());
+                    }
+                    else
+                    {
+                        fs::remove(p);
+                    }
+                }
+                catch (...) {}
+                TrainConfigManager::ScanTrainConfigs();
+                pState->selectedConfigIdx = -1;
+                if (!TrainConfigManager::g_LoadedConfigsCache.empty())
+                {
+                    pState->selectedConfigIdx = 0;
+                    pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[0];
+                    pState->selectedCategory = pState->activeConfig.category;
+                    pState->PopulateFieldsFromActiveConfig();
+                }
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+        }
+    }
+    else if (cmd == 106) // Reveal Train on Disk
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            ShellExecuteW(NULL, L"open", pState->treeItems[itemIdx].fullPath.c_str(), NULL, NULL, SW_SHOWNORMAL);
+        }
+    }
+    else if (cmd == 201 || cmd == 301) // New Train Blueprint
+    {
+        std::wstring cat = pState->selectedCategory;
+        std::wstring newID;
+        if (ShowStudioPrompt(hWnd, L"New Train Blueprint", L"Enter unique Train ID (no spaces):", L"", newID))
+        {
+            if (!newID.empty())
+            {
+                std::replace(newID.begin(), newID.end(), L' ', L'_');
+                TrainConfigManager::TrainConfig cfg;
+                cfg.id = newID;
+                cfg.name = newID;
+                cfg.category = cat;
+                cfg.minLength = 12;
+                cfg.maxLength = 12;
+                std::wstring trainDir = root + (cat.empty() ? L"" : (L"\\" + cat)) + L"\\" + newID;
+                try { fs::create_directories(trainDir); } catch (...) {}
+                std::wstring trainFile = trainDir + L"\\" + newID + L".train";
+                TrainConfigManager::SaveTrainConfig(trainFile, cfg);
+                TrainConfigManager::ScanTrainConfigs();
+                pState->RefreshCategoryOrder();
+                pState->selectedCategory = cat;
+                for (size_t c = 0; c < TrainConfigManager::g_LoadedConfigsCache.size(); ++c)
+                {
+                    if (TrainConfigManager::g_LoadedConfigsCache[c].id == newID)
+                    {
+                        pState->selectedConfigIdx = (int)c;
+                        pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[c];
+                        pState->PopulateFieldsFromActiveConfig();
+                        break;
+                    }
+                }
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+        }
+    }
+    else if (cmd == 202 || cmd == 302) // New Subfolder / New Folder
+    {
+        std::wstring parentCat = (cmd == 202 && itemIdx >= 0 && itemIdx < (int)pState->treeItems.size()) ? pState->treeItems[itemIdx].category : pState->selectedCategory;
+        std::wstring newName;
+        std::wstring promptMsg = parentCat.empty() ? L"Enter new top-level folder name:" : (L"Enter new subfolder name under '" + parentCat + L"':");
+        if (ShowStudioPrompt(hWnd, L"New Folder", promptMsg.c_str(), L"", newName))
+        {
+            if (!newName.empty())
+            {
+                std::replace(newName.begin(), newName.end(), L'/', L'\\');
+                std::wstring fullRel = parentCat.empty() ? newName : (parentCat + L"\\" + newName);
+                std::wstring folderDir = root + L"\\" + fullRel;
+                try { fs::create_directories(folderDir); } catch (...) {}
+                TrainConfigManager::ScanTrainConfigs();
+                pState->RefreshCategoryOrder();
+                pState->selectedCategory = fullRel;
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+        }
+    }
+    else if (cmd == 203) // Cut Folder
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            pState->clipboardOp = StudioDlgState::CLIP_CUT;
+            pState->clipIsTrain = false;
+            pState->clipSourcePath = pState->treeItems[itemIdx].fullPath;
+            pState->clipName = pState->treeItems[itemIdx].name;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+    else if (cmd == 204) // Copy Folder
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            pState->clipboardOp = StudioDlgState::CLIP_COPY;
+            pState->clipIsTrain = false;
+            pState->clipSourcePath = pState->treeItems[itemIdx].fullPath;
+            pState->clipName = pState->treeItems[itemIdx].name;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+    else if (cmd == 205 || cmd == 303) // Paste
+    {
+        std::wstring targetCat = (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size()) ? pState->treeItems[itemIdx].category : pState->selectedCategory;
+        ExecuteTreePaste(hWnd, pState, targetCat);
+    }
+    else if (cmd == 206) // Rename Folder
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            const auto& item = pState->treeItems[itemIdx];
+            std::wstring oldLeaf = item.name;
+            std::wstring newLeaf;
+            if (ShowStudioPrompt(hWnd, L"Rename Folder", L"Enter new folder name:", oldLeaf, newLeaf))
+            {
+                if (!newLeaf.empty() && newLeaf != oldLeaf)
+                {
+                    std::replace(newLeaf.begin(), newLeaf.end(), L'/', L'\\');
+                    size_t lastSlash = item.category.rfind(L'\\');
+                    std::wstring newCat = (lastSlash != std::wstring::npos) ? (item.category.substr(0, lastSlash + 1) + newLeaf) : newLeaf;
+                    std::wstring oldDir = root + L"\\" + item.category;
+                    std::wstring newDir = root + L"\\" + newCat;
+                    try { fs::rename(oldDir, newDir); } catch (...) {}
+                    TrainConfigManager::ScanTrainConfigs();
+                    pState->RefreshCategoryOrder();
+                    pState->selectedCategory = newCat;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+        }
+    }
+    else if (cmd == 207) // Delete Folder
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            const auto& item = pState->treeItems[itemIdx];
+            int res = ShowModernMessageBox(hWnd, (L"Are you sure you want to permanently delete folder '" + item.category + L"' and all blueprints/subfolders within it?").c_str(), L"Delete Folder", MB_YESNO | MB_ICONWARNING);
+            if (res == IDYES)
+            {
+                try { fs::remove_all(item.fullPath); } catch (...) {}
+                TrainConfigManager::ScanTrainConfigs();
+                pState->RefreshCategoryOrder();
+                pState->selectedCategory.clear();
+                pState->selectedConfigIdx = -1;
+                if (!TrainConfigManager::g_LoadedConfigsCache.empty())
+                {
+                    pState->selectedConfigIdx = 0;
+                    pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[0];
+                    pState->selectedCategory = pState->activeConfig.category;
+                    pState->PopulateFieldsFromActiveConfig();
+                }
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+        }
+    }
+    else if (cmd == 208 || cmd == 307) // Open in Windows Explorer
+    {
+        std::wstring target = (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size()) ? pState->treeItems[itemIdx].fullPath : root;
+        ShellExecuteW(NULL, L"open", target.c_str(), NULL, NULL, SW_SHOWNORMAL);
+    }
+    else if (cmd == 304) // Expand All
+    {
+        pState->collapsedCategories.clear();
+        InvalidateRect(hWnd, NULL, FALSE);
+    }
+    else if (cmd == 305) // Collapse All
+    {
+        for (const auto& c : pState->categoryOrder)
+        {
+            pState->collapsedCategories.insert(c);
+        }
+        InvalidateRect(hWnd, NULL, FALSE);
+    }
+    else if (cmd == 306) // Rescan from Disk
+    {
+        TrainConfigManager::ScanTrainConfigs();
+        pState->RefreshCategoryOrder();
+        InvalidateRect(hWnd, NULL, FALSE);
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
 // Studio Window Proc
 // ------------------------------------------------------------------------------------------------
 
@@ -1541,260 +2118,203 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             SelectObject(hdcMem, hOldP3);
             DeleteObject(hPenSplitter);
 
-            // 1. Sidebar Toolbar ([+ New Folder] (Instant creation, no popup), [Open Explorer], [Sync])
-            int tbY = topY + 12;
+            // 1. Sidebar Toolbar ([+ Train], [+ Folder], [Expand/Collapse], [Sync], [Explorer])
+            int tbY = topY + 10;
             int btnH = 28;
-            int leftMargin = 14;
-            int curX = leftMargin;
+            int curX = 8;
 
-            // [+ New Folder]
-            RECT rcNewFolder = { curX, tbY, curX + 130, tbY + btnH };
+            // [+ Train]
+            RECT rcNewTrain = { curX, tbY, curX + 76, tbY + btnH };
+            ClickControl ccNewTrain = { ClickControl::BTN_NEW_BLUEPRINT, rcNewTrain };
+            int idxNewTrain = (int)pState->clickControls.size();
+            pState->clickControls.push_back(ccNewTrain);
+            DrawModernBtn(hdcMem, rcNewTrain, L"Train", pState->hoveredControlIdx == idxNewTrain, pState->pressedControlIdx == idxNewTrain, true, pState->hFontBold, pState->hFontIconSmall, L"\xE710");
+            curX += 80;
+
+            // [+ Folder]
+            RECT rcNewFolder = { curX, tbY, curX + 80, tbY + btnH };
             ClickControl ccNewFolder = { ClickControl::BTN_NEW_CATEGORY, rcNewFolder };
             int idxNewFolder = (int)pState->clickControls.size();
             pState->clickControls.push_back(ccNewFolder);
-            DrawModernBtn(hdcMem, rcNewFolder, L"New Folder", pState->hoveredControlIdx == idxNewFolder, pState->pressedControlIdx == idxNewFolder, true, pState->hFontBold, pState->hFontIconSmall, L"\xE8F4");
-            curX += 136;
+            DrawModernBtn(hdcMem, rcNewFolder, L"Folder", pState->hoveredControlIdx == idxNewFolder, pState->pressedControlIdx == idxNewFolder, false, pState->hFontBold, pState->hFontIconSmall, L"\xE8F4");
+            curX += 84;
 
-            // [Open Explorer]
-            RECT rcFolder = { curX, tbY, curX + 44, tbY + btnH };
-            ClickControl ccFolder = { ClickControl::BTN_OPEN_FOLDER, rcFolder };
-            int idxFolder = (int)pState->clickControls.size();
-            pState->clickControls.push_back(ccFolder);
-            DrawModernBtn(hdcMem, rcFolder, L"", pState->hoveredControlIdx == idxFolder, pState->pressedControlIdx == idxFolder, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE838");
-            curX += 48;
+            // [Expand / Collapse All]
+            RECT rcToggleAll = { curX, tbY, curX + 30, tbY + btnH };
+            ClickControl ccToggleAll = { ClickControl::BTN_TREE_TOGGLE_ALL, rcToggleAll };
+            int idxToggleAll = (int)pState->clickControls.size();
+            pState->clickControls.push_back(ccToggleAll);
+            DrawModernBtn(hdcMem, rcToggleAll, L"", pState->hoveredControlIdx == idxToggleAll, pState->pressedControlIdx == idxToggleAll, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE8D5");
+            curX += 34;
 
-            // [Sync]
-            RECT rcRescan = { curX, tbY, curX + 44, tbY + btnH };
+            // [Sync / Rescan]
+            RECT rcRescan = { curX, tbY, curX + 30, tbY + btnH };
             ClickControl ccRescan = { ClickControl::BTN_RESCAN, rcRescan };
             int idxRescan = (int)pState->clickControls.size();
             pState->clickControls.push_back(ccRescan);
             DrawModernBtn(hdcMem, rcRescan, L"", pState->hoveredControlIdx == idxRescan, pState->pressedControlIdx == idxRescan, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE72C");
+            curX += 34;
 
-            // 2. Scrollable Category Cards Area
-            pState->RefreshCategoryOrder();
-            pState->categoryCardHits.clear();
+            // [Open Explorer]
+            RECT rcExplorer = { curX, tbY, curX + 30, tbY + btnH };
+            ClickControl ccExplorer = { ClickControl::BTN_OPEN_FOLDER, rcExplorer };
+            int idxExplorer = (int)pState->clickControls.size();
+            pState->clickControls.push_back(ccExplorer);
+            DrawModernBtn(hdcMem, rcExplorer, L"", pState->hoveredControlIdx == idxExplorer, pState->pressedControlIdx == idxExplorer, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE838");
 
-            int contentY = tbY + btnH + 12;
+            // 2. Sandboxed Tree Explorer
+            BuildTreeExplorer(pState);
+
+            int contentY = tbY + btnH + 10;
             int contentH = h - contentY;
             RECT rcSidebarClip = { 0, contentY, sidebarW, h };
 
-            int totalCatH = 10;
-            for (size_t p = 0; p < pState->categoryOrder.size(); ++p)
-            {
-                const auto& cat = pState->categoryOrder[p];
-                bool isCollapsed = (pState->collapsedCategories.find(cat) != pState->collapsedCategories.end());
-                int catCount = 0;
-                for (const auto& cfg : TrainConfigManager::g_LoadedConfigsCache)
-                {
-                    if (cfg.category == cat) catCount++;
-                }
-                int bodyH = (catCount == 0) ? 46 : (catCount * 46 + 10);
-                int cardH = isCollapsed ? 34 : (34 + bodyH + 8);
-                totalCatH += cardH + 12;
-            }
-            totalCatH += 20;
-            pState->totalSidebarH = totalCatH;
+            int rowH = 28;
+            int totalTreeH = (int)pState->treeItems.size() * rowH + 20;
+            pState->totalSidebarH = totalTreeH;
 
             RECT rcSidebarScroll = { sidebarW - 10, contentY + 2, sidebarW - 2, h - 2 };
             pState->m_sidebarScroll.SetBounds(rcSidebarScroll);
-            pState->m_sidebarScroll.SetRange(0, (std::max)(0, totalCatH - 1), contentH);
+            pState->m_sidebarScroll.SetRange(0, (std::max)(0, totalTreeH - 1), contentH);
             pState->sidebarScrollY = pState->m_sidebarScroll.GetPos();
 
             HRGN hRgnSidebarClip = CreateRectRgn(rcSidebarClip.left, rcSidebarClip.top, rcSidebarClip.right, rcSidebarClip.bottom);
             SelectClipRgn(hdcMem, hRgnSidebarClip);
 
-            int cardY = contentY - pState->sidebarScrollY + 6;
-            int cardMargin = 12;
-            int cardW = sidebarW - (cardMargin * 2);
-
-            if (pState->categoryOrder.empty())
+            if (pState->treeItems.empty())
             {
                 SelectObject(hdcMem, pState->hFontSmall);
                 SetTextColor(hdcMem, StudioTheme::TextMuted);
-                RECT rcEmpty = { 20, cardY + 30, sidebarW - 20, cardY + 160 };
-                DrawTextW(hdcMem, L"No category folders found.\n\nClick [+ New Folder] above to quickly create a folder for organizing your train blueprints.", -1, &rcEmpty, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+                RECT rcEmpty = { 20, contentY + 30, sidebarW - 20, contentY + 160 };
+                DrawTextW(hdcMem, L"No train blueprints found.\n\nClick [+ Train] or [+ Folder] above to start organizing.", -1, &rcEmpty, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
             }
             else
             {
-                for (size_t p = 0; p < pState->categoryOrder.size(); ++p)
+                int itemY = contentY - pState->sidebarScrollY + 4;
+                for (size_t i = 0; i < pState->treeItems.size(); ++i)
                 {
-                    const auto& cat = pState->categoryOrder[p];
-                    bool isCollapsed = (pState->collapsedCategories.find(cat) != pState->collapsedCategories.end());
-                    bool isCatSelected = (pState->selectedCategory == cat);
+                    auto& item = pState->treeItems[i];
+                    item.rcRow = { 6, itemY, sidebarW - 12, itemY + rowH - 2 };
 
-                    int catCount = 0;
-                    std::vector<size_t> catCfgIndices;
-                    for (size_t c = 0; c < TrainConfigManager::g_LoadedConfigsCache.size(); ++c)
+                    if (item.rcRow.bottom >= contentY && item.rcRow.top <= h)
                     {
-                        if (TrainConfigManager::g_LoadedConfigsCache[c].category == cat)
+                        bool isDropTarget = (pState->isTreeDragging && pState->dropTargetTreeFolderIdx == (int)i);
+                        COLORREF bgRow = item.isSelected ? StudioTheme::AccentBlue : (isDropTarget ? RGB(50, 75, 110) : (pState->hoveredTreeItemIdx == (int)i ? RGB(36, 38, 44) : RGB(22, 22, 25)));
+                        COLORREF bdrRow = item.isSelected ? StudioTheme::AccentBlue : (isDropTarget ? StudioTheme::AccentHover : (item.isCut ? RGB(140, 140, 60) : StudioTheme::CardBorder));
+
+                        HBRUSH hbrRow = CreateSolidBrush(bgRow);
+                        HPEN hpenRow = CreatePen(item.isCut ? PS_DOT : PS_SOLID, 1, bdrRow);
+                        HGDIOBJ holdB = SelectObject(hdcMem, hbrRow);
+                        HGDIOBJ holdP = SelectObject(hdcMem, hpenRow);
+                        RoundRect(hdcMem, item.rcRow.left, item.rcRow.top, item.rcRow.right, item.rcRow.bottom, 4, 4);
+                        SelectObject(hdcMem, holdB);
+                        SelectObject(hdcMem, holdP);
+                        DeleteObject(hbrRow);
+                        DeleteObject(hpenRow);
+
+                        int indentX = item.rcRow.left + item.depth * 14 + 4;
+
+                        if (item.type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER)
                         {
-                            catCount++;
-                            catCfgIndices.push_back(c);
+                            RECT rcChev = { indentX, item.rcRow.top, indentX + 16, item.rcRow.bottom };
+                            item.rcChevron = rcChev;
+                            ClickControl ccChev = { ClickControl::TREE_CHEVRON_CLICK, rcChev, (int)i, -1, item.category };
+                            int idxChev = (int)pState->clickControls.size();
+                            pState->clickControls.push_back(ccChev);
+
+                            // Approach A: Seamless Tree Chevron drawn directly on row background
+                            bool isChevHover = (pState->hoveredControlIdx == idxChev);
+                            COLORREF triCol = item.isSelected ? RGB(255, 255, 255) : (isChevHover ? RGB(255, 255, 255) : RGB(175, 180, 190));
+
+                            if (isChevHover)
+                            {
+                                COLORREF chevBg = item.isSelected ? RGB(20, 120, 205) : RGB(52, 54, 62);
+                                HBRUSH hbrChev = CreateSolidBrush(chevBg);
+                                HGDIOBJ holdBC = SelectObject(hdcMem, hbrChev);
+                                HPEN hpenNone = (HPEN)GetStockObject(NULL_PEN);
+                                HGDIOBJ holdPC = SelectObject(hdcMem, hpenNone);
+                                RoundRect(hdcMem, rcChev.left + 1, rcChev.top + 5, rcChev.right - 1, rcChev.bottom - 5, 4, 4);
+                                SelectObject(hdcMem, holdBC);
+                                SelectObject(hdcMem, holdPC);
+                                DeleteObject(hbrChev);
+                            }
+
+                            int midX = (rcChev.left + rcChev.right) / 2;
+                            int midY = (rcChev.top + rcChev.bottom) / 2;
+                            HBRUSH hbrTri = CreateSolidBrush(triCol);
+                            HPEN hpenTri = CreatePen(PS_SOLID, 1, triCol);
+                            HGDIOBJ holdBT = SelectObject(hdcMem, hbrTri);
+                            HGDIOBJ holdPT = SelectObject(hdcMem, hpenTri);
+
+                            if (item.isExpanded)
+                            {
+                                // Down arrow (▼)
+                                POINT pts[3] = { { midX - 4, midY - 2 }, { midX + 4, midY - 2 }, { midX, midY + 3 } };
+                                Polygon(hdcMem, pts, 3);
+                            }
+                            else
+                            {
+                                // Right arrow (▶)
+                                POINT pts[3] = { { midX - 2, midY - 4 }, { midX - 2, midY + 4 }, { midX + 3, midY } };
+                                Polygon(hdcMem, pts, 3);
+                            }
+
+                            SelectObject(hdcMem, holdBT);
+                            SelectObject(hdcMem, holdPT);
+                            DeleteObject(hbrTri);
+                            DeleteObject(hpenTri);
+
+                            SelectObject(hdcMem, pState->hFontIconSmall);
+                            SetTextColor(hdcMem, item.isSelected ? RGB(255, 255, 255) : RGB(225, 185, 75));
+                            RECT rcIcon = { indentX + 18, item.rcRow.top, indentX + 36, item.rcRow.bottom };
+                            DrawTextW(hdcMem, L"\xE8B7", -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                            SelectObject(hdcMem, pState->hFontBold);
+                            SetTextColor(hdcMem, item.isSelected ? RGB(255, 255, 255) : (item.isCut ? RGB(160, 160, 160) : StudioTheme::TextPrimary));
+                            RECT rcName = { indentX + 38, item.rcRow.top, item.rcRow.right - 34, item.rcRow.bottom };
+                            DrawTextW(hdcMem, item.name.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                            if (item.trainCount > 0)
+                            {
+                                SelectObject(hdcMem, pState->hFontSmall);
+                                SetTextColor(hdcMem, item.isSelected ? RGB(220, 235, 255) : StudioTheme::TextMuted);
+                                RECT rcCnt = { item.rcRow.right - 32, item.rcRow.top, item.rcRow.right - 4, item.rcRow.bottom };
+                                DrawTextW(hdcMem, std::to_wstring(item.trainCount).c_str(), -1, &rcCnt, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                            }
+
+                            RECT rcRowHit = { indentX + 16, item.rcRow.top, item.rcRow.right, item.rcRow.bottom };
+                            ClickControl ccRow = { ClickControl::TREE_ROW_CLICK, rcRowHit, (int)i, -1, item.category };
+                            pState->clickControls.push_back(ccRow);
                         }
-                    }
-
-                    int bodyH = (catCount == 0) ? 46 : (catCount * 46 + 10);
-                    int cardH = isCollapsed ? 34 : (34 + bodyH + 8);
-                    RECT rcCard = { cardMargin, cardY, cardMargin + cardW, cardY + cardH };
-
-                    bool isHoverCat = (pState->draggingCatIdx == (int)p);
-                    COLORREF cBg = isCatSelected ? RGB(32, 40, 52) : PoolTheme::CardBackground;
-                    COLORREF cBorder = isCatSelected ? StudioTheme::AccentBlue : (isHoverCat ? StudioTheme::AccentHover : PoolTheme::CardBorder);
-
-                    HBRUSH hbrCard = CreateSolidBrush(cBg);
-                    HPEN hpenCard = CreatePen(PS_SOLID, 1, cBorder);
-                    HBRUSH holdBr1 = (HBRUSH)SelectObject(hdcMem, hbrCard);
-                    HPEN holdPen1 = (HPEN)SelectObject(hdcMem, hpenCard);
-                    RoundRect(hdcMem, rcCard.left, rcCard.top, rcCard.right, rcCard.bottom, 10, 10);
-                    SelectObject(hdcMem, holdBr1);
-                    SelectObject(hdcMem, holdPen1);
-                    DeleteObject(hbrCard);
-                    DeleteObject(hpenCard);
-
-                    RECT rcCardHeader = { rcCard.left, rcCard.top, rcCard.right, rcCard.top + 34 };
-                    StudioDlgState::CategoryCardHit cch;
-                    cch.catIdx = (int)p;
-                    cch.category = cat;
-                    cch.rcCard = rcCard;
-                    cch.rcHeader = rcCardHeader;
-                    pState->categoryCardHits.push_back(cch);
-
-                    // 1. Collapse Chevron Button
-                    RECT rcChevronBtn = { rcCard.left + 8, rcCard.top + 5, rcCard.left + 30, rcCard.top + 29 };
-                    ClickControl ccColToggle = { ClickControl::BTN_CAT_COLLAPSE_TOGGLE, rcChevronBtn, (int)p, -1, cat };
-                    int idxCol = (int)pState->clickControls.size();
-                    pState->clickControls.push_back(ccColToggle);
-                    DrawModernBtn(hdcMem, rcChevronBtn, L"", pState->hoveredControlIdx == idxCol, pState->pressedControlIdx == idxCol, false, pState->hFontSmall, pState->hFontIconSmall, isCollapsed ? L"__TRI_DOWN__" : L"__TRI_UP__");
-
-                    // 2. Category Title & Badge (Clickable to select category)
-                    RECT rcCatTitle = { rcCard.left + 34, rcCard.top, rcCard.right - 238, rcCard.top + 34 };
-                    ClickControl ccCatHeader = { ClickControl::BTN_CAT_HEADER, rcCatTitle, (int)p, -1, cat };
-                    int idxCatHdr = (int)pState->clickControls.size();
-                    pState->clickControls.push_back(ccCatHeader);
-
-                    std::wstring titleText = L"#" + std::to_wstring(p + 1) + L"  " + cat + L" (" + std::to_wstring(catCount) + L")";
-                    SelectObject(hdcMem, pState->hFontBold);
-                    SetTextColor(hdcMem, isCatSelected ? RGB(255, 255, 255) : StudioTheme::TextPrimary);
-                    DrawTextW(hdcMem, titleText.c_str(), -1, &rcCatTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                    // 3. Header Action Buttons: [Rename], [Clone], [▲ Up], [▼ Down], [🗑️ Delete]
-                    int hBtnR = rcCard.right - 8;
-                    int hBtnY = rcCard.top + 5;
-                    int hBtnH = 24;
-
-                    // [Delete]
-                    hBtnR -= 30;
-                    RECT rcBtnPDel = { hBtnR, hBtnY, hBtnR + 26, hBtnY + hBtnH };
-                    ClickControl ccPDel = { ClickControl::BTN_CAT_DELETE, rcBtnPDel, (int)p, -1, cat };
-                    int idxPDel = (int)pState->clickControls.size();
-                    pState->clickControls.push_back(ccPDel);
-                    DrawModernBtn(hdcMem, rcBtnPDel, L"", pState->hoveredControlIdx == idxPDel, pState->pressedControlIdx == idxPDel, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE74D");
-
-                    // [▼ Down]
-                    hBtnR -= 26;
-                    RECT rcBtnPDn = { hBtnR, hBtnY, hBtnR + 22, hBtnY + hBtnH };
-                    ClickControl ccPDn = { ClickControl::BTN_CAT_DOWN, rcBtnPDn, (int)p, -1, cat };
-                    int idxPDn = (int)pState->clickControls.size();
-                    pState->clickControls.push_back(ccPDn);
-                    DrawModernBtn(hdcMem, rcBtnPDn, L"", pState->hoveredControlIdx == idxPDn, pState->pressedControlIdx == idxPDn, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
-
-                    // [▲ Up]
-                    hBtnR -= 26;
-                    RECT rcBtnPUp = { hBtnR, hBtnY, hBtnR + 22, hBtnY + hBtnH };
-                    ClickControl ccPUp = { ClickControl::BTN_CAT_UP, rcBtnPUp, (int)p, -1, cat };
-                    int idxPUp = (int)pState->clickControls.size();
-                    pState->clickControls.push_back(ccPUp);
-                    DrawModernBtn(hdcMem, rcBtnPUp, L"", pState->hoveredControlIdx == idxPUp, pState->pressedControlIdx == idxPUp, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
-
-                    // [Clone]
-                    hBtnR -= 70;
-                    RECT rcBtnPClone = { hBtnR, hBtnY, hBtnR + 66, hBtnY + hBtnH };
-                    ClickControl ccPClone = { ClickControl::BTN_CAT_CLONE, rcBtnPClone, (int)p, -1, cat };
-                    int idxPClone = (int)pState->clickControls.size();
-                    pState->clickControls.push_back(ccPClone);
-                    DrawModernBtn(hdcMem, rcBtnPClone, L"Clone", pState->hoveredControlIdx == idxPClone, pState->pressedControlIdx == idxPClone, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE8C8");
-
-                    // [Rename]
-                    hBtnR -= 78;
-                    RECT rcBtnPRename = { hBtnR, hBtnY, hBtnR + 74, hBtnY + hBtnH };
-                    ClickControl ccPRename = { ClickControl::BTN_CAT_RENAME, rcBtnPRename, (int)p, -1, cat };
-                    int idxPRename = (int)pState->clickControls.size();
-                    pState->clickControls.push_back(ccPRename);
-                    DrawModernBtn(hdcMem, rcBtnPRename, L"Rename", pState->hoveredControlIdx == idxPRename, pState->pressedControlIdx == idxPRename, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE70F");
-
-                    if (!isCollapsed)
-                    {
-                        int itY = rcCard.top + 38;
-                        if (catCount == 0)
+                        else if (item.type == StudioDlgState::TreeExplorerItem::ITEM_TRAIN)
                         {
-                            RECT rcEmptyBox = { rcCard.left + 10, itY, rcCard.right - 10, itY + 44 };
-                            HBRUSH hbrEmp = CreateSolidBrush(StudioTheme::TagBg);
-                            HPEN hpenEmp = CreatePen(PS_SOLID, 1, StudioTheme::TagBorder);
-                            SelectObject(hdcMem, hbrEmp);
-                            SelectObject(hdcMem, hpenEmp);
-                            RoundRect(hdcMem, rcEmptyBox.left, rcEmptyBox.top, rcEmptyBox.right, rcEmptyBox.bottom, 6, 6);
-                            DeleteObject(hbrEmp);
-                            DeleteObject(hpenEmp);
+                            SelectObject(hdcMem, pState->hFontIconSmall);
+                            SetTextColor(hdcMem, item.isSelected ? RGB(255, 255, 255) : RGB(80, 175, 250));
+                            RECT rcIcon = { indentX + 10, item.rcRow.top, indentX + 28, item.rcRow.bottom };
+                            DrawTextW(hdcMem, L"\xE7C0", -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
                             SelectObject(hdcMem, pState->hFontSmall);
-                            SetTextColor(hdcMem, StudioTheme::TextMuted);
-                            DrawTextW(hdcMem, L"No train blueprints inside this folder yet.", -1, &rcEmptyBox, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                        }
-                        else
-                        {
-                            for (size_t cIdx : catCfgIndices)
+                            SetTextColor(hdcMem, item.isSelected ? RGB(255, 255, 255) : (item.isCut ? RGB(160, 160, 160) : StudioTheme::TextPrimary));
+                            RECT rcName = { indentX + 30, item.rcRow.top, item.rcRow.right - 54, item.rcRow.bottom };
+                            DrawTextW(hdcMem, item.name.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                            if (item.configIndex >= 0 && item.configIndex < (int)TrainConfigManager::g_LoadedConfigsCache.size())
                             {
-                                const auto& cfg = TrainConfigManager::g_LoadedConfigsCache[cIdx];
-                                bool isSelected = ((int)cIdx == pState->selectedConfigIdx);
-                                RECT rcItem = { rcCard.left + 10, itY, rcCard.right - 10, itY + 42 };
-                                ClickControl ccItem = { ClickControl::CONFIG_ITEM_CLICK, rcItem, (int)cIdx };
-                                int idxItem = (int)pState->clickControls.size();
-                                pState->clickControls.push_back(ccItem);
-
-                                bool isHover = (pState->hoveredControlIdx == idxItem);
-                                COLORREF itemBg = isSelected ? RGB(0, 90, 160) : (isHover ? RGB(38, 38, 38) : RGB(24, 24, 24));
-                                COLORREF itemBdr = isSelected ? StudioTheme::AccentBlue : (isHover ? RGB(65, 65, 65) : StudioTheme::CardBorder);
-
-                                HBRUSH hbrIt = CreateSolidBrush(itemBg);
-                                HPEN hPenIt = CreatePen(PS_SOLID, 1, itemBdr);
-                                SelectObject(hdcMem, hbrIt);
-                                SelectObject(hdcMem, hPenIt);
-                                RoundRect(hdcMem, rcItem.left, rcItem.top, rcItem.right, rcItem.bottom, 6, 6);
-                                DeleteObject(hbrIt);
-                                DeleteObject(hPenIt);
-
-                                // Train Icon - Vertically centered across the entire card height (42px)
-                                SelectObject(hdcMem, pState->hFontIcon);
-                                SetTextColor(hdcMem, isSelected ? RGB(220, 240, 255) : RGB(140, 140, 140));
-                                RECT rcFileIcon = { rcItem.left + 12, rcItem.top, rcItem.left + 34, rcItem.bottom };
-                                DrawTextW(hdcMem, L"\xE7C0", -1, &rcFileIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-                                // Title
-                                SelectObject(hdcMem, pState->hFontBold);
-                                SetTextColor(hdcMem, RGB(255, 255, 255));
-                                RECT rcName = { rcItem.left + 46, rcItem.top + 4, rcItem.right - 8, rcItem.top + 22 };
-                                DrawTextW(hdcMem, cfg.name.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                                // Subtitle
+                                const auto& cfg = TrainConfigManager::g_LoadedConfigsCache[item.configIndex];
+                                std::wstring badge = (cfg.minLength == cfg.maxLength) ? (std::to_wstring(cfg.minLength) + L"u") : (std::to_wstring(cfg.minLength) + L"-" + std::to_wstring(cfg.maxLength));
                                 SelectObject(hdcMem, pState->hFontSmall);
-                                SetTextColor(hdcMem, isSelected ? RGB(210, 230, 255) : StudioTheme::TextSecondary);
-                                std::wstring sub = std::to_wstring(cfg.pools.size()) + L" pools";
-                                if (cfg.maxSpeedKmph > 0) sub += L" • " + std::to_wstring((int)cfg.maxSpeedKmph) + L" km/h";
-                                RECT rcSub = { rcItem.left + 46, rcItem.top + 22, rcItem.right - 8, rcItem.bottom - 4 };
-                                DrawTextW(hdcMem, sub.c_str(), -1, &rcSub, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                                itY += 46;
+                                SetTextColor(hdcMem, item.isSelected ? RGB(210, 230, 255) : StudioTheme::TextSecondary);
+                                RECT rcBadge = { item.rcRow.right - 52, item.rcRow.top, item.rcRow.right - 4, item.rcRow.bottom };
+                                DrawTextW(hdcMem, badge.c_str(), -1, &rcBadge, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
                             }
+
+                            ClickControl ccRow = { ClickControl::TREE_ROW_CLICK, item.rcRow, (int)i, item.configIndex, item.category };
+                            pState->clickControls.push_back(ccRow);
                         }
                     }
 
-                    cardY += cardH + 12;
+                    itemY += rowH;
                 }
-            }
-
-            if (pState->isCatDragging)
-            {
-                DrawSolidYellowDropIndicator(hdcMem, pState->rcCatDropIndicator);
             }
 
             SelectClipRgn(hdcMem, NULL);
@@ -2123,59 +2643,160 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                 int totX = rcTotalBar.left + 230;
                 int totSetY = rcTotalBar.top + 9;
 
-                // Min: [-] [val] [+]
-                RECT rcTotMinLbl = { totX, totSetY, totX + 34, totSetY + 26 };
-                SelectObject(hdcMem, pState->hFontSmall);
-                SetTextColor(hdcMem, StudioTheme::TextSecondary);
-                DrawTextW(hdcMem, L"Min:", -1, &rcTotMinLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                totX += 34;
+                // Radio Button 1: [🔘 Fixed]
+                RECT rcFixedRadio = { totX, totSetY, totX + 78, totSetY + 26 };
+                ClickControl ccFixed = { ClickControl::BTN_TOTAL_MODE_FIXED, rcFixedRadio };
+                int idxFixed = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccFixed);
+                bool isFixedHover = (pState->hoveredControlIdx == idxFixed);
 
-                RECT rcTotMinDec = { totX, totSetY, totX + 24, totSetY + 26 };
-                ClickControl ccTotMinDec = { ClickControl::BTN_TOTAL_MIN_DEC, rcTotMinDec };
-                int idxTotMinDec = (int)pState->clickControls.size();
-                pState->clickControls.push_back(ccTotMinDec);
-                DrawModernBtn(hdcMem, rcTotMinDec, L"-", pState->hoveredControlIdx == idxTotMinDec, pState->pressedControlIdx == idxTotMinDec, false, pState->hFontSmall);
-                totX += 26;
+                // Draw radio pill container
+                COLORREF rFixedBg = pState->isFixedUnits ? RGB(26, 42, 62) : (isFixedHover ? RGB(40, 40, 44) : RGB(30, 30, 34));
+                COLORREF rFixedBdr = pState->isFixedUnits ? StudioTheme::AccentBlue : (isFixedHover ? RGB(85, 85, 90) : RGB(52, 52, 58));
+                HBRUSH hbrFixedPill = CreateSolidBrush(rFixedBg);
+                HPEN hpenFixedPill = CreatePen(PS_SOLID, 1, rFixedBdr);
+                HGDIOBJ holdBrFP = SelectObject(hdcMem, hbrFixedPill);
+                HGDIOBJ holdPenFP = SelectObject(hdcMem, hpenFixedPill);
+                RoundRect(hdcMem, rcFixedRadio.left, rcFixedRadio.top, rcFixedRadio.right, rcFixedRadio.bottom, 6, 6);
+                SelectObject(hdcMem, holdBrFP);
+                SelectObject(hdcMem, holdPenFP);
+                DeleteObject(hbrFixedPill);
+                DeleteObject(hpenFixedPill);
 
-                RECT rcTotMinVal = { totX, totSetY, totX + 40, totSetY + 26 };
-                ClickControl ccTotMinVal = { ClickControl::BTN_TOTAL_MIN_EDIT, rcTotMinVal };
-                int idxTotMinVal = (int)pState->clickControls.size();
-                pState->clickControls.push_back(ccTotMinVal);
-                DrawModernBtn(hdcMem, rcTotMinVal, std::to_wstring(pState->activeConfig.minLength).c_str(), pState->hoveredControlIdx == idxTotMinVal, pState->pressedControlIdx == idxTotMinVal, false, pState->hFontBold);
-                totX += 42;
+                RECT rcCircFixed = { rcFixedRadio.left + 8, rcFixedRadio.top + 6, rcFixedRadio.left + 22, rcFixedRadio.top + 20 };
+                DrawCustomRadioButton(hdcMem, rcCircFixed, pState->isFixedUnits, isFixedHover);
 
-                RECT rcTotMinInc = { totX, totSetY, totX + 24, totSetY + 26 };
-                ClickControl ccTotMinInc = { ClickControl::BTN_TOTAL_MIN_INC, rcTotMinInc };
-                int idxTotMinInc = (int)pState->clickControls.size();
-                pState->clickControls.push_back(ccTotMinInc);
-                DrawModernBtn(hdcMem, rcTotMinInc, L"+", pState->hoveredControlIdx == idxTotMinInc, pState->pressedControlIdx == idxTotMinInc, false, pState->hFontSmall);
-                totX += 36;
+                RECT rcLblFixed = { rcFixedRadio.left + 26, rcFixedRadio.top, rcFixedRadio.right - 4, rcFixedRadio.bottom };
+                SelectObject(hdcMem, pState->isFixedUnits ? pState->hFontBold : pState->hFontSmall);
+                SetTextColor(hdcMem, pState->isFixedUnits ? RGB(255, 255, 255) : StudioTheme::TextSecondary);
+                DrawTextW(hdcMem, L"Fixed", -1, &rcLblFixed, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                totX += 84;
 
-                // Max: [-] [val] [+]
-                RECT rcTotMaxLbl = { totX, totSetY, totX + 34, totSetY + 26 };
-                DrawTextW(hdcMem, L"Max:", -1, &rcTotMaxLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                totX += 34;
+                // Radio Button 2: [⚪ Range]
+                RECT rcRangeRadio = { totX, totSetY, totX + 82, totSetY + 26 };
+                ClickControl ccVar = { ClickControl::BTN_TOTAL_MODE_VARIABLE, rcRangeRadio };
+                int idxVar = (int)pState->clickControls.size();
+                pState->clickControls.push_back(ccVar);
+                bool isRangeHover = (pState->hoveredControlIdx == idxVar);
 
-                RECT rcTotMaxDec = { totX, totSetY, totX + 24, totSetY + 26 };
-                ClickControl ccTotMaxDec = { ClickControl::BTN_TOTAL_MAX_DEC, rcTotMaxDec };
-                int idxTotMaxDec = (int)pState->clickControls.size();
-                pState->clickControls.push_back(ccTotMaxDec);
-                DrawModernBtn(hdcMem, rcTotMaxDec, L"-", pState->hoveredControlIdx == idxTotMaxDec, pState->pressedControlIdx == idxTotMaxDec, false, pState->hFontSmall);
-                totX += 26;
+                COLORREF rRangeBg = !pState->isFixedUnits ? RGB(26, 42, 62) : (isRangeHover ? RGB(40, 40, 44) : RGB(30, 30, 34));
+                COLORREF rRangeBdr = !pState->isFixedUnits ? StudioTheme::AccentBlue : (isRangeHover ? RGB(85, 85, 90) : RGB(52, 52, 58));
+                HBRUSH hbrRangePill = CreateSolidBrush(rRangeBg);
+                HPEN hpenRangePill = CreatePen(PS_SOLID, 1, rRangeBdr);
+                HGDIOBJ holdBrRP = SelectObject(hdcMem, hbrRangePill);
+                HGDIOBJ holdPenRP = SelectObject(hdcMem, hpenRangePill);
+                RoundRect(hdcMem, rcRangeRadio.left, rcRangeRadio.top, rcRangeRadio.right, rcRangeRadio.bottom, 6, 6);
+                SelectObject(hdcMem, holdBrRP);
+                SelectObject(hdcMem, holdPenRP);
+                DeleteObject(hbrRangePill);
+                DeleteObject(hpenRangePill);
 
-                RECT rcTotMaxVal = { totX, totSetY, totX + 40, totSetY + 26 };
-                ClickControl ccTotMaxVal = { ClickControl::BTN_TOTAL_MAX_EDIT, rcTotMaxVal };
-                int idxTotMaxVal = (int)pState->clickControls.size();
-                pState->clickControls.push_back(ccTotMaxVal);
-                DrawModernBtn(hdcMem, rcTotMaxVal, std::to_wstring(pState->activeConfig.maxLength).c_str(), pState->hoveredControlIdx == idxTotMaxVal, pState->pressedControlIdx == idxTotMaxVal, false, pState->hFontBold);
-                totX += 42;
+                RECT rcCircRange = { rcRangeRadio.left + 8, rcRangeRadio.top + 6, rcRangeRadio.left + 22, rcRangeRadio.top + 20 };
+                DrawCustomRadioButton(hdcMem, rcCircRange, !pState->isFixedUnits, isRangeHover);
 
-                RECT rcTotMaxInc = { totX, totSetY, totX + 24, totSetY + 26 };
-                ClickControl ccTotMaxInc = { ClickControl::BTN_TOTAL_MAX_INC, rcTotMaxInc };
-                int idxTotMaxInc = (int)pState->clickControls.size();
-                pState->clickControls.push_back(ccTotMaxInc);
-                DrawModernBtn(hdcMem, rcTotMaxInc, L"+", pState->hoveredControlIdx == idxTotMaxInc, pState->pressedControlIdx == idxTotMaxInc, false, pState->hFontSmall);
-                totX += 36;
+                RECT rcLblRange = { rcRangeRadio.left + 26, rcRangeRadio.top, rcRangeRadio.right - 4, rcRangeRadio.bottom };
+                SelectObject(hdcMem, !pState->isFixedUnits ? pState->hFontBold : pState->hFontSmall);
+                SetTextColor(hdcMem, !pState->isFixedUnits ? RGB(255, 255, 255) : StudioTheme::TextSecondary);
+                DrawTextW(hdcMem, L"Range", -1, &rcLblRange, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                totX += 94;
+
+                if (pState->isFixedUnits)
+                {
+                    // Fixed Mode: Length: [-] [val] [+] Cars  •  (Exact fixed rake formation)
+                    RECT rcTotFixLbl = { totX, totSetY, totX + 50, totSetY + 26 };
+                    SelectObject(hdcMem, pState->hFontSmall);
+                    SetTextColor(hdcMem, StudioTheme::TextSecondary);
+                    DrawTextW(hdcMem, L"Length:", -1, &rcTotFixLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    totX += 50;
+
+                    RECT rcTotFixDec = { totX, totSetY, totX + 24, totSetY + 26 };
+                    ClickControl ccTotFixDec = { ClickControl::BTN_TOTAL_FIXED_DEC, rcTotFixDec };
+                    int idxTotFixDec = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccTotFixDec);
+                    DrawModernBtn(hdcMem, rcTotFixDec, L"-", pState->hoveredControlIdx == idxTotFixDec, pState->pressedControlIdx == idxTotFixDec, false, pState->hFontSmall);
+                    totX += 26;
+
+                    RECT rcTotFixVal = { totX, totSetY, totX + 44, totSetY + 26 };
+                    ClickControl ccTotFixVal = { ClickControl::BTN_TOTAL_FIXED_EDIT, rcTotFixVal };
+                    int idxTotFixVal = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccTotFixVal);
+                    DrawModernBtn(hdcMem, rcTotFixVal, std::to_wstring(pState->activeConfig.minLength).c_str(), pState->hoveredControlIdx == idxTotFixVal, pState->pressedControlIdx == idxTotFixVal, false, pState->hFontBold);
+                    totX += 46;
+
+                    RECT rcTotFixInc = { totX, totSetY, totX + 24, totSetY + 26 };
+                    ClickControl ccTotFixInc = { ClickControl::BTN_TOTAL_FIXED_INC, rcTotFixInc };
+                    int idxTotFixInc = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccTotFixInc);
+                    DrawModernBtn(hdcMem, rcTotFixInc, L"+", pState->hoveredControlIdx == idxTotFixInc, pState->pressedControlIdx == idxTotFixInc, false, pState->hFontSmall);
+                    totX += 32;
+
+                    RECT rcTotFixHint = { totX, totSetY, editorX + editorW - 14, totSetY + 26 };
+                    SelectObject(hdcMem, pState->hFontSmall);
+                    SetTextColor(hdcMem, StudioTheme::TextMuted);
+                    std::wstring hint = L"Cars  •  Exact fixed " + std::to_wstring(pState->activeConfig.minLength) + L"-car rake formation";
+                    DrawTextW(hdcMem, hint.c_str(), -1, &rcTotFixHint, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+                else
+                {
+                    // Range Mode: Min: [-] [val] [+]   Max: [-] [val] [+] Cars  •  (Variable formation)
+                    RECT rcTotMinLbl = { totX, totSetY, totX + 34, totSetY + 26 };
+                    SelectObject(hdcMem, pState->hFontSmall);
+                    SetTextColor(hdcMem, StudioTheme::TextSecondary);
+                    DrawTextW(hdcMem, L"Min:", -1, &rcTotMinLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    totX += 34;
+
+                    RECT rcTotMinDec = { totX, totSetY, totX + 24, totSetY + 26 };
+                    ClickControl ccTotMinDec = { ClickControl::BTN_TOTAL_MIN_DEC, rcTotMinDec };
+                    int idxTotMinDec = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccTotMinDec);
+                    DrawModernBtn(hdcMem, rcTotMinDec, L"-", pState->hoveredControlIdx == idxTotMinDec, pState->pressedControlIdx == idxTotMinDec, false, pState->hFontSmall);
+                    totX += 26;
+
+                    RECT rcTotMinVal = { totX, totSetY, totX + 40, totSetY + 26 };
+                    ClickControl ccTotMinVal = { ClickControl::BTN_TOTAL_MIN_EDIT, rcTotMinVal };
+                    int idxTotMinVal = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccTotMinVal);
+                    DrawModernBtn(hdcMem, rcTotMinVal, std::to_wstring(pState->activeConfig.minLength).c_str(), pState->hoveredControlIdx == idxTotMinVal, pState->pressedControlIdx == idxTotMinVal, false, pState->hFontBold);
+                    totX += 42;
+
+                    RECT rcTotMinInc = { totX, totSetY, totX + 24, totSetY + 26 };
+                    ClickControl ccTotMinInc = { ClickControl::BTN_TOTAL_MIN_INC, rcTotMinInc };
+                    int idxTotMinInc = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccTotMinInc);
+                    DrawModernBtn(hdcMem, rcTotMinInc, L"+", pState->hoveredControlIdx == idxTotMinInc, pState->pressedControlIdx == idxTotMinInc, false, pState->hFontSmall);
+                    totX += 36;
+
+                    // Max: [-] [val] [+]
+                    RECT rcTotMaxLbl = { totX, totSetY, totX + 34, totSetY + 26 };
+                    DrawTextW(hdcMem, L"Max:", -1, &rcTotMaxLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    totX += 34;
+
+                    RECT rcTotMaxDec = { totX, totSetY, totX + 24, totSetY + 26 };
+                    ClickControl ccTotMaxDec = { ClickControl::BTN_TOTAL_MAX_DEC, rcTotMaxDec };
+                    int idxTotMaxDec = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccTotMaxDec);
+                    DrawModernBtn(hdcMem, rcTotMaxDec, L"-", pState->hoveredControlIdx == idxTotMaxDec, pState->pressedControlIdx == idxTotMaxDec, false, pState->hFontSmall);
+                    totX += 26;
+
+                    RECT rcTotMaxVal = { totX, totSetY, totX + 40, totSetY + 26 };
+                    ClickControl ccTotMaxVal = { ClickControl::BTN_TOTAL_MAX_EDIT, rcTotMaxVal };
+                    int idxTotMaxVal = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccTotMaxVal);
+                    DrawModernBtn(hdcMem, rcTotMaxVal, std::to_wstring(pState->activeConfig.maxLength).c_str(), pState->hoveredControlIdx == idxTotMaxVal, pState->pressedControlIdx == idxTotMaxVal, false, pState->hFontBold);
+                    totX += 42;
+
+                    RECT rcTotMaxInc = { totX, totSetY, totX + 24, totSetY + 26 };
+                    ClickControl ccTotMaxInc = { ClickControl::BTN_TOTAL_MAX_INC, rcTotMaxInc };
+                    int idxTotMaxInc = (int)pState->clickControls.size();
+                    pState->clickControls.push_back(ccTotMaxInc);
+                    DrawModernBtn(hdcMem, rcTotMaxInc, L"+", pState->hoveredControlIdx == idxTotMaxInc, pState->pressedControlIdx == idxTotMaxInc, false, pState->hFontSmall);
+                    totX += 36;
+
+                    RECT rcTotVarHint = { totX, totSetY, editorX + editorW - 14, totSetY + 26 };
+                    SelectObject(hdcMem, pState->hFontSmall);
+                    SetTextColor(hdcMem, StudioTheme::TextMuted);
+                    DrawTextW(hdcMem, L"Cars  •  Variable rake length", -1, &rcTotVarHint, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
 
                 edY += 56;
 
@@ -2233,7 +2854,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
 
                     // 3. Interactive Role Badge Button (e.g. "• LeadLoco ▾")
                     int roleBadgeX = rcPoolTitle.right + 10;
-                    std::wstring roleBadgeText = (pool.role.empty() ? L"Role: (None)" : (L"•  " + pool.role)) + L"  ▾";
+                    std::wstring roleBadgeText = (pool.role.empty() ? L"Role: (None)" : pool.role) + L"  ▾";
                     SIZE szRole = { 0 };
                     SelectObject(hdcMem, pState->hFontSmall);
                     GetTextExtentPoint32W(hdcMem, roleBadgeText.c_str(), (int)roleBadgeText.length(), &szRole);
@@ -2861,26 +3482,42 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             }
         }
 
-        // 1. Check if potential category drag crossed the 4px threshold
-        if (pState->isPotentialCatDrag && !pState->isCatDragging)
+                // Tree Item Hover detection
+        int oldHoverTree = pState->hoveredTreeItemIdx;
+        pState->hoveredTreeItemIdx = -1;
+        if (pt.x < pState->sidebarWidth)
         {
-            if (abs(pt.x - pState->ptCatDragStart.x) > 4 || abs(pt.y - pState->ptCatDragStart.y) > 4)
+            for (size_t i = 0; i < pState->treeItems.size(); ++i)
             {
-                pState->isCatDragging = true;
-                pState->draggingCatIdx = pState->potentialCatDragIdx;
+                if (PtInRect(&pState->treeItems[i].rcRow, pt))
+                {
+                    pState->hoveredTreeItemIdx = (int)i;
+                    break;
+                }
+            }
+        }
+        if (oldHoverTree != pState->hoveredTreeItemIdx)
+        {
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+
+        // 1. Check if potential tree item drag crossed the 4px threshold
+        if (pState->isPotentialTreeDrag && !pState->isTreeDragging)
+        {
+            if (abs(pt.x - pState->ptTreeDragStart.x) > 4 || abs(pt.y - pState->ptTreeDragStart.y) > 4)
+            {
+                pState->isTreeDragging = true;
                 SetCursor(LoadCursor(NULL, IDC_SIZEALL));
 
                 std::vector<DragGhostItem> ghostItems;
-                if (pState->draggingCatIdx >= 0 && pState->draggingCatIdx < (int)pState->categoryOrder.size())
+                if (pState->draggedTreeItemIdx >= 0 && pState->draggedTreeItemIdx < (int)pState->treeItems.size())
                 {
-                    const auto& cat = pState->categoryOrder[pState->draggingCatIdx];
-                    int catCount = 0;
-                    for (const auto& cfg : TrainConfigManager::g_LoadedConfigsCache) { if (cfg.category == cat) catCount++; }
+                    const auto& tItem = pState->treeItems[pState->draggedTreeItemIdx];
                     DragGhostItem item;
                     item.type = GhostItemType::PoolCard;
-                    item.name = L"#" + std::to_wstring(pState->draggingCatIdx + 1) + L"  " + cat;
-                    item.subtitle = std::to_wstring(catCount) + L" train blueprints";
-                    item.isEngine = true;
+                    item.name = (tItem.type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER ? L"📁 " : L"🚆 ") + tItem.name;
+                    item.subtitle = (tItem.type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER ? tItem.category : (tItem.category.empty() ? L"(Root)" : tItem.category));
+                    item.isEngine = (tItem.type == StudioDlgState::TreeExplorerItem::ITEM_TRAIN);
                     ghostItems.push_back(item);
                 }
 
@@ -2890,45 +3527,26 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             }
         }
 
-        // 2. Active category dragging motion & drop targeting
-        if (pState->activeTab == 0 && pState->isCatDragging)
+        // 2. Active tree item dragging motion & drop targeting
+        if (pState->isTreeDragging)
         {
             SetCursor(LoadCursor(NULL, IDC_SIZEALL));
             POINT ptScreen = pt;
             ClientToScreen(hWnd, &ptScreen);
 
-            int targetSlot = -1;
-            RECT rcInd = { 0, 0, 0, 0 };
-
-            if (!pState->categoryCardHits.empty())
+            int targetFolder = -1;
+            for (size_t i = 0; i < pState->treeItems.size(); ++i)
             {
-                int cardCount = (int)pState->categoryCardHits.size();
-                for (int i = 0; i < cardCount; ++i)
+                if (pState->treeItems[i].type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER &&
+                    PtInRect(&pState->treeItems[i].rcRow, pt))
                 {
-                    const auto& ch = pState->categoryCardHits[i];
-                    int midY = (ch.rcCard.top + ch.rcCard.bottom) / 2;
-                    if (pt.y < midY)
-                    {
-                        targetSlot = i;
-                        int indY = ch.rcCard.top - 6;
-                        rcInd = { ch.rcCard.left, indY, ch.rcCard.right, indY + 4 };
-                        break;
-                    }
-                }
-
-                if (targetSlot == -1)
-                {
-                    targetSlot = cardCount;
-                    const auto& lastCh = pState->categoryCardHits.back();
-                    int indY = lastCh.rcCard.bottom + 4;
-                    rcInd = { lastCh.rcCard.left, indY, lastCh.rcCard.right, indY + 4 };
+                    targetFolder = (int)i;
+                    break;
                 }
             }
+            pState->dropTargetTreeFolderIdx = targetFolder;
 
-            pState->catDropTargetIdx = targetSlot;
-            pState->rcCatDropIndicator = rcInd;
-
-            FluentDragGhost::Move(ptScreen, true, L"Reorder Category Folder");
+            FluentDragGhost::Move(ptScreen, true, L"Move into Folder");
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
@@ -3256,16 +3874,16 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             }
         }
 
-        // Check potential drag on category card header
+        // Check potential drag on tree item
         if (pt.x < pState->sidebarWidth)
         {
             bool hitChildBtn = false;
             if (pState->pressedControlIdx >= 0)
             {
                 auto t = pState->clickControls[pState->pressedControlIdx].type;
-                if (t == ClickControl::BTN_CAT_RENAME || t == ClickControl::BTN_CAT_CLONE ||
-                    t == ClickControl::BTN_CAT_UP || t == ClickControl::BTN_CAT_DOWN ||
-                    t == ClickControl::BTN_CAT_DELETE || t == ClickControl::BTN_CAT_COLLAPSE_TOGGLE)
+                if (t == ClickControl::BTN_NEW_BLUEPRINT || t == ClickControl::BTN_NEW_CATEGORY ||
+                    t == ClickControl::BTN_OPEN_FOLDER || t == ClickControl::BTN_RESCAN ||
+                    t == ClickControl::BTN_TREE_TOGGLE_ALL || t == ClickControl::TREE_CHEVRON_CLICK)
                 {
                     hitChildBtn = true;
                 }
@@ -3273,13 +3891,13 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
 
             if (!hitChildBtn)
             {
-                for (const auto& cch : pState->categoryCardHits)
+                for (size_t i = 0; i < pState->treeItems.size(); ++i)
                 {
-                    if (PtInRect(&cch.rcHeader, pt))
+                    if (PtInRect(&pState->treeItems[i].rcRow, pt))
                     {
-                        pState->isPotentialCatDrag = true;
-                        pState->potentialCatDragIdx = cch.catIdx;
-                        pState->ptCatDragStart = pt;
+                        pState->isPotentialTreeDrag = true;
+                        pState->draggedTreeItemIdx = (int)i;
+                        pState->ptTreeDragStart = pt;
                         break;
                     }
                 }
@@ -3396,35 +4014,91 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             return 0;
         }
 
-        if (pState->activeTab == 0 && pState->isCatDragging)
+        if (pState->isTreeDragging)
         {
-            pState->isCatDragging = false;
-            pState->isPotentialCatDrag = false;
+            pState->isTreeDragging = false;
+            pState->isPotentialTreeDrag = false;
             FluentDragGhost::Hide();
             SetCursor(LoadCursor(NULL, IDC_ARROW));
+            if (GetCapture() == hWnd) ReleaseCapture();
 
-            int src = pState->draggingCatIdx;
-            int dst = pState->catDropTargetIdx;
+            int srcIdx = pState->draggedTreeItemIdx;
+            int dstFolderIdx = pState->dropTargetTreeFolderIdx;
 
-            if (src >= 0 && src < (int)pState->categoryOrder.size() && dst >= 0 && dst <= (int)pState->categoryOrder.size())
+            if (srcIdx >= 0 && srcIdx < (int)pState->treeItems.size() &&
+                dstFolderIdx >= 0 && dstFolderIdx < (int)pState->treeItems.size())
             {
-                if (dst > src) dst--;
-                if (src != dst)
+                const auto& srcItem = pState->treeItems[srcIdx];
+                const auto& dstItem = pState->treeItems[dstFolderIdx];
+
+                if (dstItem.type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER)
                 {
-                    std::wstring item = pState->categoryOrder[src];
-                    pState->categoryOrder.erase(pState->categoryOrder.begin() + src);
-                    pState->categoryOrder.insert(pState->categoryOrder.begin() + dst, item);
+                    std::wstring root = TrainConfigManager::GetTrainConfigsRootDir();
+                    std::wstring targetCat = dstItem.category;
+                    std::wstring targetDir = root + (targetCat.empty() ? L"" : (L"\\" + targetCat));
+
+                    try
+                    {
+                        fs::path srcP(srcItem.fullPath);
+                        if (fs::exists(srcP))
+                        {
+                            std::wstring leaf = srcP.filename().wstring();
+                            fs::path destP = fs::path(targetDir) / leaf;
+
+                            if (srcItem.type == StudioDlgState::TreeExplorerItem::ITEM_TRAIN)
+                            {
+                                if (srcP.parent_path() != fs::path(targetDir))
+                                {
+                                    if (fs::exists(destP))
+                                    {
+                                        int copyIdx = 1;
+                                        while (fs::exists(destP))
+                                        {
+                                            std::wstring newLeaf = leaf + L"_" + std::to_wstring(copyIdx);
+                                            destP = fs::path(targetDir) / newLeaf;
+                                            copyIdx++;
+                                        }
+                                    }
+                                    fs::rename(srcP, destP);
+                                    TrainConfigManager::ScanTrainConfigs();
+                                    pState->RefreshCategoryOrder();
+                                    pState->selectedCategory = targetCat;
+                                    InvalidateRect(hWnd, NULL, FALSE);
+                                }
+                            }
+                            else if (srcItem.type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER)
+                            {
+                                if (targetCat.find(srcItem.category) != 0 && srcP != fs::path(targetDir))
+                                {
+                                    if (fs::exists(destP))
+                                    {
+                                        int copyIdx = 1;
+                                        while (fs::exists(destP))
+                                        {
+                                            std::wstring newLeaf = leaf + L"_" + std::to_wstring(copyIdx);
+                                            destP = fs::path(targetDir) / newLeaf;
+                                            copyIdx++;
+                                        }
+                                    }
+                                    fs::rename(srcP, destP);
+                                    TrainConfigManager::ScanTrainConfigs();
+                                    pState->RefreshCategoryOrder();
+                                    pState->selectedCategory = targetCat + L"\\" + leaf;
+                                    InvalidateRect(hWnd, NULL, FALSE);
+                                }
+                            }
+                        }
+                    }
+                    catch (...) {}
                 }
             }
 
-            pState->draggingCatIdx = -1;
-            pState->catDropTargetIdx = -1;
-            pState->rcCatDropIndicator = { 0, 0, 0, 0 };
-            pState->pressedControlIdx = -1;
+            pState->draggedTreeItemIdx = -1;
+            pState->dropTargetTreeFolderIdx = -1;
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }
-        pState->isPotentialCatDrag = false;
+        pState->isPotentialTreeDrag = false;
 
         if (pState->activeTab == 0 && pState->isBpPoolDragging)
         {
@@ -3545,33 +4219,68 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                     InvalidateRect(hWnd, NULL, FALSE);
                     break;
                 }
-                case ClickControl::BTN_CAT_HEADER:
-                case ClickControl::CATEGORY_HEADER_CLICK:
+                case ClickControl::TREE_ROW_CLICK:
                 {
-                    pState->selectedCategory = ctrl.tag;
-                    bool hasCurrent = false;
-                    for (size_t i = 0; i < TrainConfigManager::g_LoadedConfigsCache.size(); ++i)
+                    int itemIdx = ctrl.index;
+                    if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
                     {
-                        if ((int)i == pState->selectedConfigIdx && TrainConfigManager::g_LoadedConfigsCache[i].category == pState->selectedCategory)
+                        const auto& item = pState->treeItems[itemIdx];
+                        if (item.type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER)
                         {
-                            hasCurrent = true;
-                            break;
+                            pState->selectedCategory = item.category;
+                            pState->selectedConfigIdx = -1;
+                            InvalidateRect(hWnd, NULL, FALSE);
                         }
-                    }
-                    if (!hasCurrent)
-                    {
-                        pState->selectedConfigIdx = -1;
-                        for (size_t i = 0; i < TrainConfigManager::g_LoadedConfigsCache.size(); ++i)
+                        else if (item.type == StudioDlgState::TreeExplorerItem::ITEM_TRAIN)
                         {
-                            if (TrainConfigManager::g_LoadedConfigsCache[i].category == pState->selectedCategory)
+                            pState->SyncActiveConfigFromFields();
+                            int cIdx = item.configIndex;
+                            if (cIdx >= 0 && cIdx < (int)TrainConfigManager::g_LoadedConfigsCache.size())
                             {
-                                pState->selectedConfigIdx = (int)i;
-                                pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[i];
+                                pState->selectedConfigIdx = cIdx;
+                                pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[cIdx];
+                                pState->selectedCategory = pState->activeConfig.category;
                                 TrainConfigManager::LoadTrainBinding(pState->activeConfig, pState->activeBinding);
                                 pState->PopulateFieldsFromActiveConfig();
-                                break;
+                                InvalidateRect(hWnd, NULL, FALSE);
                             }
                         }
+                    }
+                    break;
+                }
+                case ClickControl::TREE_CHEVRON_CLICK:
+                {
+                    int itemIdx = ctrl.index;
+                    if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+                    {
+                        const auto& item = pState->treeItems[itemIdx];
+                        if (item.type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER)
+                        {
+                            if (pState->collapsedCategories.count(item.category) > 0)
+                            {
+                                pState->collapsedCategories.erase(item.category);
+                            }
+                            else
+                            {
+                                pState->collapsedCategories.insert(item.category);
+                            }
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
+                    }
+                    break;
+                }
+                case ClickControl::BTN_TREE_TOGGLE_ALL:
+                {
+                    if (pState->collapsedCategories.empty())
+                    {
+                        for (const auto& c : pState->categoryOrder)
+                        {
+                            pState->collapsedCategories.insert(c);
+                        }
+                    }
+                    else
+                    {
+                        pState->collapsedCategories.clear();
                     }
                     InvalidateRect(hWnd, NULL, FALSE);
                     break;
@@ -3593,37 +4302,69 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                 }
                 case ClickControl::BTN_NEW_CATEGORY:
                 {
-                    // Instant category folder creation without popup
-                    std::wstring root = TrainConfigManager::GetTrainConfigsRootDir();
-                    std::wstring baseName = L"Category ";
-                    int num = 1;
-                    std::wstring candidate;
-                    while (true)
+                    std::wstring newName;
+                    std::wstring promptMsg = L"Enter new folder name:\n(To create a subfolder, use Path\\Subpath or click '+ Sub' on any folder card)";
+                    if (ShowStudioPrompt(hWnd, L"New Category Folder", promptMsg.c_str(), L"", newName))
                     {
-                        candidate = baseName + std::to_wstring(num);
-                        std::wstring p = root + L"\\" + candidate;
-                        if (!fs::exists(p)) break;
-                        num++;
+                        if (!newName.empty())
+                        {
+                            std::replace(newName.begin(), newName.end(), L'/', L'\\');
+                            std::wstring root = TrainConfigManager::GetTrainConfigsRootDir();
+                            try { fs::create_directories(root + L"\\" + newName); } catch (...) {}
+                            TrainConfigManager::ScanTrainConfigs();
+                            pState->RefreshCategoryOrder();
+                            pState->selectedCategory = newName;
+                            pState->selectedConfigIdx = -1;
+                            pState->activeConfig = TrainConfigManager::TrainConfig();
+                            pState->activeConfig.category = newName;
+                            pState->activeBinding = TrainConfigManager::TrainBinding();
+                            pState->PopulateFieldsFromActiveConfig();
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
                     }
-                    try { fs::create_directories(root + L"\\" + candidate); } catch (...) {}
-                    TrainConfigManager::ScanTrainConfigs();
-                    pState->RefreshCategoryOrder();
-                    pState->selectedCategory = candidate;
-                    pState->selectedConfigIdx = -1;
-                    pState->activeConfig = TrainConfigManager::TrainConfig();
-                    pState->activeBinding = TrainConfigManager::TrainBinding();
-                    pState->PopulateFieldsFromActiveConfig();
-                    InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+                case ClickControl::BTN_CAT_ADD_SUB:
+                {
+                    std::wstring parentCat = ctrl.tag;
+                    std::wstring newSub;
+                    if (ShowStudioPrompt(hWnd, L"New Subfolder", (L"Enter subfolder name inside '" + parentCat + L"':").c_str(), L"", newSub))
+                    {
+                        if (!newSub.empty())
+                        {
+                            std::replace(newSub.begin(), newSub.end(), L'/', L'\\');
+                            std::wstring fullCat = parentCat + L"\\" + newSub;
+                            std::wstring root = TrainConfigManager::GetTrainConfigsRootDir();
+                            try { fs::create_directories(root + L"\\" + fullCat); } catch (...) {}
+
+                            TrainConfigManager::ScanTrainConfigs();
+                            pState->collapsedCategories.erase(parentCat); // Ensure parent is expanded
+                            pState->RefreshCategoryOrder();
+                            pState->selectedCategory = fullCat;
+                            pState->selectedConfigIdx = -1;
+                            pState->activeConfig = TrainConfigManager::TrainConfig();
+                            pState->activeConfig.category = fullCat;
+                            pState->activeBinding = TrainConfigManager::TrainBinding();
+                            pState->PopulateFieldsFromActiveConfig();
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
+                    }
                     break;
                 }
                 case ClickControl::BTN_CAT_RENAME:
                 {
                     std::wstring oldCat = ctrl.tag;
-                    std::wstring newCat;
-                    if (ShowStudioPrompt(hWnd, L"Rename Folder", L"Enter new folder name:", oldCat, newCat))
+                    std::wstring oldLeaf = oldCat;
+                    size_t lastSlash = oldCat.rfind(L'\\');
+                    if (lastSlash != std::wstring::npos) oldLeaf = oldCat.substr(lastSlash + 1);
+
+                    std::wstring newLeaf;
+                    if (ShowStudioPrompt(hWnd, L"Rename Folder", L"Enter new name for folder:", oldLeaf, newLeaf))
                     {
-                        if (!newCat.empty() && newCat != oldCat)
+                        if (!newLeaf.empty() && newLeaf != oldLeaf)
                         {
+                            std::replace(newLeaf.begin(), newLeaf.end(), L'/', L'\\');
+                            std::wstring newCat = (lastSlash != std::wstring::npos) ? (oldCat.substr(0, lastSlash + 1) + newLeaf) : newLeaf;
                             std::wstring root = TrainConfigManager::GetTrainConfigsRootDir();
                             std::wstring oldPath = root + L"\\" + oldCat;
                             std::wstring newPath = root + L"\\" + newCat;
@@ -3727,7 +4468,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                     if (!delCat.empty())
                     {
                         std::wstring catDir = TrainConfigManager::GetTrainConfigsRootDir() + L"\\" + delCat;
-                        int res = ShowModernMessageBox(hWnd, (L"Are you sure you want to delete the category folder '" + delCat + L"' and all blueprints within it?\n\n" + catDir).c_str(), L"Delete Category Folder", MB_YESNO | MB_ICONWARNING);
+                        int res = ShowModernMessageBox(hWnd, (L"Are you sure you want to delete the folder '" + delCat + L"' and all blueprints/subfolders within it?\n\n" + catDir).c_str(), L"Delete Folder", MB_YESNO | MB_ICONWARNING);
                         if (res == IDYES)
                         {
                             try { fs::remove_all(catDir); } catch (...) {}
@@ -4097,6 +4838,11 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                         RECT rcAnchorScreen = ctrl.rc;
                         MapWindowPoints(hWnd, NULL, (LPPOINT)&rcAnchorScreen, 2);
                         int choice = ModernContextMenu::Show(hWnd, rcAnchorScreen.left, rcAnchorScreen.bottom + 2, menuItems, TRUE, 220, &rcAnchorScreen);
+                        if (IsWindow(hWnd))
+                        {
+                            SetActiveWindow(hWnd);
+                            SetForegroundWindow(hWnd);
+                        }
 
                         if (choice >= 1000 && choice < roleCmdBase)
                         {
@@ -4377,6 +5123,66 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                                 pState->activeConfig.maxLength = val;
                                 if (pState->activeConfig.minLength > pState->activeConfig.maxLength)
                                     pState->activeConfig.minLength = pState->activeConfig.maxLength;
+                                pState->isDirtyBlueprint = true;
+                                InvalidateRect(hWnd, NULL, FALSE);
+                            }
+                        }
+                        catch (...) {}
+                    }
+                    break;
+                }
+                case ClickControl::BTN_TOTAL_MODE_FIXED:
+                {
+                    pState->isFixedUnits = true;
+                    if (pState->activeConfig.minLength <= 0) pState->activeConfig.minLength = 12;
+                    pState->activeConfig.maxLength = pState->activeConfig.minLength;
+                    pState->isDirtyBlueprint = true;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+                case ClickControl::BTN_TOTAL_MODE_VARIABLE:
+                {
+                    pState->isFixedUnits = false;
+                    if (pState->activeConfig.minLength <= 0) pState->activeConfig.minLength = 12;
+                    if (pState->activeConfig.maxLength <= pState->activeConfig.minLength)
+                    {
+                        pState->activeConfig.maxLength = pState->activeConfig.minLength + 2;
+                    }
+                    pState->isDirtyBlueprint = true;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+                case ClickControl::BTN_TOTAL_FIXED_DEC:
+                {
+                    if (pState->activeConfig.minLength > 1)
+                    {
+                        pState->activeConfig.minLength--;
+                        pState->activeConfig.maxLength = pState->activeConfig.minLength;
+                        pState->isDirtyBlueprint = true;
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                    break;
+                }
+                case ClickControl::BTN_TOTAL_FIXED_INC:
+                {
+                    pState->activeConfig.minLength++;
+                    pState->activeConfig.maxLength = pState->activeConfig.minLength;
+                    pState->isDirtyBlueprint = true;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    break;
+                }
+                case ClickControl::BTN_TOTAL_FIXED_EDIT:
+                {
+                    std::wstring res;
+                    if (ShowStudioPrompt(hWnd, L"Edit Fixed Total Units", L"Enter exact total train units (e.g. 16, 20, 22, 24):", std::to_wstring(pState->activeConfig.minLength), res, true, false))
+                    {
+                        try
+                        {
+                            int val = std::stoi(res);
+                            if (val >= 1)
+                            {
+                                pState->activeConfig.minLength = val;
+                                pState->activeConfig.maxLength = val;
                                 pState->isDirtyBlueprint = true;
                                 InvalidateRect(hWnd, NULL, FALSE);
                             }
@@ -4834,6 +5640,220 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         pState->pressedControlIdx = -1;
         InvalidateRect(hWnd, NULL, FALSE);
         return 0;
+    }
+
+    case WM_LBUTTONDBLCLK:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (pt.x < pState->sidebarWidth)
+        {
+            for (const auto& item : pState->treeItems)
+            {
+                if (item.type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER && PtInRect(&item.rcRow, pt))
+                {
+                    if (pState->collapsedCategories.count(item.category) > 0)
+                        pState->collapsedCategories.erase(item.category);
+                    else
+                        pState->collapsedCategories.insert(item.category);
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
+                }
+            }
+        }
+        break;
+    }
+
+    case WM_RBUTTONUP:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        int topY = 66 + 46;
+        if (pt.x < pState->sidebarWidth && pt.y > topY)
+        {
+            int hitIdx = -1;
+            for (size_t i = 0; i < pState->treeItems.size(); ++i)
+            {
+                if (PtInRect(&pState->treeItems[i].rcRow, pt))
+                {
+                    hitIdx = (int)i;
+                    break;
+                }
+            }
+
+            POINT ptScreen = pt;
+            ClientToScreen(hWnd, &ptScreen);
+
+            if (hitIdx >= 0)
+            {
+                const auto& item = pState->treeItems[hitIdx];
+                if (item.type == StudioDlgState::TreeExplorerItem::ITEM_TRAIN)
+                {
+                    pState->SyncActiveConfigFromFields();
+                    pState->selectedConfigIdx = item.configIndex;
+                    pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[item.configIndex];
+                    pState->selectedCategory = pState->activeConfig.category;
+                    TrainConfigManager::LoadTrainBinding(pState->activeConfig, pState->activeBinding);
+                    pState->PopulateFieldsFromActiveConfig();
+                    InvalidateRect(hWnd, NULL, FALSE);
+
+                    std::vector<ContextMenuItem> mItems;
+                    mItems.push_back(ContextMenuItem::Action(101, L"\xE8C8", L"Duplicate / Clone"));
+                    mItems.push_back(ContextMenuItem::Separator());
+                    mItems.push_back(ContextMenuItem::Action(102, L"\xE8C6", L"Cut", L"Ctrl+X"));
+                    mItems.push_back(ContextMenuItem::Action(103, L"\xE8C8", L"Copy", L"Ctrl+C"));
+                    mItems.push_back(ContextMenuItem::Action(104, L"\xE70F", L"Rename...", L"F2"));
+                    mItems.push_back(ContextMenuItem::Separator());
+                    mItems.push_back(ContextMenuItem::Action(105, L"\xE74D", L"Delete...", L"Del"));
+                    mItems.push_back(ContextMenuItem::Separator());
+                    mItems.push_back(ContextMenuItem::Action(106, L"\xE838", L"Reveal on Disk"));
+
+                    int cmd = ModernContextMenu::Show(hWnd, ptScreen.x, ptScreen.y, mItems, TRUE, 220);
+                    if (IsWindow(hWnd)) { SetActiveWindow(hWnd); SetForegroundWindow(hWnd); }
+                    HandleTreeContextMenuCmd(hWnd, pState, cmd, hitIdx);
+                    return 0;
+                }
+                else if (item.type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER)
+                {
+                    pState->selectedCategory = item.category;
+                    pState->selectedConfigIdx = -1;
+                    InvalidateRect(hWnd, NULL, FALSE);
+
+                    std::vector<ContextMenuItem> mItems;
+                    mItems.push_back(ContextMenuItem::Action(201, L"\xE710", L"New Train Here..."));
+                    mItems.push_back(ContextMenuItem::Action(202, L"\xE8F4", L"New Subfolder..."));
+                    mItems.push_back(ContextMenuItem::Separator());
+                    mItems.push_back(ContextMenuItem::Action(203, L"\xE8C6", L"Cut Folder", L"Ctrl+X"));
+                    mItems.push_back(ContextMenuItem::Action(204, L"\xE8C8", L"Copy Folder", L"Ctrl+C"));
+                    bool canPaste = (pState->clipboardOp != StudioDlgState::CLIP_NONE && !pState->clipSourcePath.empty());
+                    mItems.push_back(ContextMenuItem::Action(205, L"\xE77F", L"Paste", L"Ctrl+V", canPaste));
+                    mItems.push_back(ContextMenuItem::Separator());
+                    mItems.push_back(ContextMenuItem::Action(206, L"\xE70F", L"Rename Folder...", L"F2"));
+                    mItems.push_back(ContextMenuItem::Action(207, L"\xE74D", L"Delete Folder...", L"Del"));
+                    mItems.push_back(ContextMenuItem::Separator());
+                    mItems.push_back(ContextMenuItem::Action(208, L"\xE838", L"Open in Windows Explorer"));
+
+                    int cmd = ModernContextMenu::Show(hWnd, ptScreen.x, ptScreen.y, mItems, TRUE, 220);
+                    if (IsWindow(hWnd)) { SetActiveWindow(hWnd); SetForegroundWindow(hWnd); }
+                    HandleTreeContextMenuCmd(hWnd, pState, cmd, hitIdx);
+                    return 0;
+                }
+            }
+            else
+            {
+                std::vector<ContextMenuItem> mItems;
+                mItems.push_back(ContextMenuItem::Action(301, L"\xE710", L"New Train Blueprint..."));
+                mItems.push_back(ContextMenuItem::Action(302, L"\xE8F4", L"New Folder..."));
+                bool canPaste = (pState->clipboardOp != StudioDlgState::CLIP_NONE && !pState->clipSourcePath.empty());
+                mItems.push_back(ContextMenuItem::Action(303, L"\xE77F", L"Paste", L"Ctrl+V", canPaste));
+                mItems.push_back(ContextMenuItem::Separator());
+                mItems.push_back(ContextMenuItem::Action(304, L"\xE8D5", L"Expand All"));
+                mItems.push_back(ContextMenuItem::Action(305, L"\xE8D5", L"Collapse All"));
+                mItems.push_back(ContextMenuItem::Action(306, L"\xE72C", L"Rescan from Disk"));
+                mItems.push_back(ContextMenuItem::Action(307, L"\xE838", L"Open TrainConfigs Folder"));
+
+                int cmd = ModernContextMenu::Show(hWnd, ptScreen.x, ptScreen.y, mItems, TRUE, 220);
+                if (IsWindow(hWnd)) { SetActiveWindow(hWnd); SetForegroundWindow(hWnd); }
+                HandleTreeContextMenuCmd(hWnd, pState, cmd, -1);
+                return 0;
+            }
+        }
+        break;
+    }
+
+    case WM_KEYDOWN:
+    {
+        bool isCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (wParam == VK_F2)
+        {
+            if (pState->selectedConfigIdx >= 0)
+                HandleTreeContextMenuCmd(hWnd, pState, 104, -1);
+            else if (!pState->selectedCategory.empty())
+            {
+                for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                {
+                    if (pState->treeItems[i].type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER && pState->treeItems[i].category == pState->selectedCategory)
+                    {
+                        HandleTreeContextMenuCmd(hWnd, pState, 206, (int)i);
+                        break;
+                    }
+                }
+            }
+            return 0;
+        }
+        else if (wParam == VK_DELETE)
+        {
+            if (pState->selectedConfigIdx >= 0)
+                HandleTreeContextMenuCmd(hWnd, pState, 105, -1);
+            else if (!pState->selectedCategory.empty())
+            {
+                for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                {
+                    if (pState->treeItems[i].type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER && pState->treeItems[i].category == pState->selectedCategory)
+                    {
+                        HandleTreeContextMenuCmd(hWnd, pState, 207, (int)i);
+                        break;
+                    }
+                }
+            }
+            return 0;
+        }
+        else if (isCtrl && (wParam == 'C' || wParam == 'c'))
+        {
+            if (pState->selectedConfigIdx >= 0)
+            {
+                for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                {
+                    if (pState->treeItems[i].type == StudioDlgState::TreeExplorerItem::ITEM_TRAIN && pState->treeItems[i].configIndex == pState->selectedConfigIdx)
+                    {
+                        HandleTreeContextMenuCmd(hWnd, pState, 103, (int)i);
+                        break;
+                    }
+                }
+            }
+            else if (!pState->selectedCategory.empty())
+            {
+                for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                {
+                    if (pState->treeItems[i].type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER && pState->treeItems[i].category == pState->selectedCategory)
+                    {
+                        HandleTreeContextMenuCmd(hWnd, pState, 204, (int)i);
+                        break;
+                    }
+                }
+            }
+            return 0;
+        }
+        else if (isCtrl && (wParam == 'X' || wParam == 'x'))
+        {
+            if (pState->selectedConfigIdx >= 0)
+            {
+                for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                {
+                    if (pState->treeItems[i].type == StudioDlgState::TreeExplorerItem::ITEM_TRAIN && pState->treeItems[i].configIndex == pState->selectedConfigIdx)
+                    {
+                        HandleTreeContextMenuCmd(hWnd, pState, 102, (int)i);
+                        break;
+                    }
+                }
+            }
+            else if (!pState->selectedCategory.empty())
+            {
+                for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                {
+                    if (pState->treeItems[i].type == StudioDlgState::TreeExplorerItem::ITEM_FOLDER && pState->treeItems[i].category == pState->selectedCategory)
+                    {
+                        HandleTreeContextMenuCmd(hWnd, pState, 203, (int)i);
+                        break;
+                    }
+                }
+            }
+            return 0;
+        }
+        else if (isCtrl && (wParam == 'V' || wParam == 'v'))
+        {
+            ExecuteTreePaste(hWnd, pState, pState->selectedCategory);
+            return 0;
+        }
+        break;
     }
 
     case WM_TITLEBAR_TABCHANGED:

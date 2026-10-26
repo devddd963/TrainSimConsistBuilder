@@ -175,8 +175,17 @@ namespace TrainConfigManager
 
                                     if (parts.size() >= 3)
                                     {
-                                        // Category / TrainFolder / File.train
-                                        cfg.category = parts[0];
+                                        // Multi-level Folder Hierarchy:
+                                        // parts[0 ... parts.size() - 3] = Category / Subfolder Path
+                                        // parts[parts.size() - 2] = Dedicated TrainFolder
+                                        // parts[parts.size() - 1] = File.train
+                                        std::wstring cat = L"";
+                                        for (size_t i = 0; i <= parts.size() - 3; ++i)
+                                        {
+                                            if (!cat.empty()) cat += L"\\";
+                                            cat += parts[i];
+                                        }
+                                        cfg.category = cat;
                                     }
                                     else if (parts.size() == 2)
                                     {
@@ -222,14 +231,34 @@ namespace TrainConfigManager
         {
             if (fs::exists(root))
             {
-                for (const auto& entry : fs::directory_iterator(root))
+                for (const auto& entry : fs::recursive_directory_iterator(root))
                 {
                     if (entry.is_directory())
                     {
-                        std::wstring dirName = entry.path().filename().wstring();
-                        if (!dirName.empty() && std::find(cats.begin(), cats.end(), dirName) == cats.end())
+                        // Check if this directory is a leaf TrainFolder (contains any .train/.config file directly)
+                        bool hasTrainFile = false;
+                        for (const auto& sub : fs::directory_iterator(entry.path()))
                         {
-                            cats.push_back(dirName);
+                            if (sub.is_regular_file())
+                            {
+                                std::wstring ext = sub.path().extension().wstring();
+                                std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+                                if (ext == L".train" || ext == L".config")
+                                {
+                                    hasTrainFile = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // If not a leaf TrainFolder, it is a Category / Subfolder container!
+                        if (!hasTrainFile)
+                        {
+                            std::wstring rel = fs::relative(entry.path(), root).wstring();
+                            if (!rel.empty() && std::find(cats.begin(), cats.end(), rel) == cats.end())
+                            {
+                                cats.push_back(rel);
+                            }
                         }
                     }
                 }
@@ -237,11 +266,27 @@ namespace TrainConfigManager
         }
         catch (...) {}
 
+        // Ensure all categories from loaded configs and their intermediate parent prefixes are included
         for (const auto& cfg : g_LoadedConfigsCache)
         {
-            if (!cfg.category.empty() && std::find(cats.begin(), cats.end(), cfg.category) == cats.end())
+            if (!cfg.category.empty())
             {
-                cats.push_back(cfg.category);
+                if (std::find(cats.begin(), cats.end(), cfg.category) == cats.end())
+                {
+                    cats.push_back(cfg.category);
+                }
+
+                // Intermediate parent prefixes (e.g. for "A\B\C", add "A" and "A\B")
+                size_t pos = 0;
+                while ((pos = cfg.category.find(L'\\', pos)) != std::wstring::npos)
+                {
+                    std::wstring parentPrefix = cfg.category.substr(0, pos);
+                    if (!parentPrefix.empty() && std::find(cats.begin(), cats.end(), parentPrefix) == cats.end())
+                    {
+                        cats.push_back(parentPrefix);
+                    }
+                    pos++;
+                }
             }
         }
 

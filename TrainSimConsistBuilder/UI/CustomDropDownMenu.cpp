@@ -68,11 +68,30 @@ namespace
         {
             const auto& it = state.items[i];
             
-            // If parentGroup is collapsed, hide this item
-            if (!it.parentGroup.empty() && state.collapsedGroups.count(it.parentGroup) > 0)
+            // If parentGroup or any ancestor group is collapsed, hide this item
+            bool isAncestorCollapsed = false;
+            if (!it.parentGroup.empty())
             {
-                continue;
+                if (state.collapsedGroups.count(it.parentGroup) > 0)
+                {
+                    isAncestorCollapsed = true;
+                }
+                else
+                {
+                    size_t slashPos = 0;
+                    while ((slashPos = it.parentGroup.find(L'\\', slashPos)) != std::wstring::npos)
+                    {
+                        std::wstring ancestor = it.parentGroup.substr(0, slashPos);
+                        if (state.collapsedGroups.count(ancestor) > 0)
+                        {
+                            isAncestorCollapsed = true;
+                            break;
+                        }
+                        slashPos++;
+                    }
+                }
             }
+            if (isAncestorCollapsed) continue;
 
             // If this item is a group header, it is visible (since its parentGroup is expanded)
             if (it.isGroupHeader)
@@ -103,8 +122,10 @@ namespace
             {
                 if (child.isGroupHeader || child.isHeader || child.isSeparator || !child.isEnabled) continue;
 
-                // Match either direct group or matching parentGroup (for category headers)
-                bool isMatch = (child.group == hdr.group) || (child.parentGroup == hdr.group);
+                // Match either direct group, matching parentGroup, or descendant of this folder
+                bool isMatch = (child.group == hdr.group) || (child.parentGroup == hdr.group) ||
+                               (child.group.rfind(hdr.group + L"\\", 0) == 0) ||
+                               (child.parentGroup.rfind(hdr.group + L"\\", 0) == 0);
                 if (isMatch)
                 {
                     totalChild++;
@@ -686,7 +707,9 @@ namespace
                             {
                                 if (!item.isGroupHeader && !item.isHeader && !item.isSeparator && item.isEnabled)
                                 {
-                                    if (item.group == it.group || item.parentGroup == it.group)
+                                    if (item.group == it.group || item.parentGroup == it.group ||
+                                        item.group.rfind(it.group + L"\\", 0) == 0 ||
+                                        item.parentGroup.rfind(it.group + L"\\", 0) == 0)
                                     {
                                         item.isChecked = nextAll;
                                         item.isIndeterminate = false;

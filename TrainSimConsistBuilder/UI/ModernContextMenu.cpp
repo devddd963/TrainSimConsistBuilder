@@ -633,8 +633,14 @@ static HWND CreateMenuWindow(HWND hParent, int x, int y, const std::vector<Conte
         if (x < rcWork.left) x = rcWork.left + 6;
     }
 
+    DWORD dwExStyle = WS_EX_TOOLWINDOW;
+    if (!hParent || (GetWindowLongPtrW(hParent, GWL_EXSTYLE) & WS_EX_TOPMOST))
+    {
+        dwExStyle |= WS_EX_TOPMOST;
+    }
+
     HWND hMenuWnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        dwExStyle,
         L"ModernContextMenuClass", L"",
         WS_POPUP | WS_VISIBLE,
         x, y, menuW, totalH,
@@ -714,6 +720,12 @@ int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<Contex
                         hRootMenuWnd = NULL;
                     }
 
+                    if (hParent && IsWindow(hParent))
+                    {
+                        SetActiveWindow(hParent);
+                        SetForegroundWindow(hParent);
+                    }
+
                     // Check if click landed on the anchor button (toggle dismiss behavior)
                     if (prcAnchor && PtInRect(prcAnchor, ptScreen))
                     {
@@ -730,28 +742,33 @@ int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<Contex
                     HWND hClicked = WindowFromPoint(ptScreen);
                     if (hClicked && IsWindow(hClicked))
                     {
-                        LRESULT ht = SendMessageW(hClicked, WM_NCHITTEST, 0, MAKELPARAM(ptScreen.x, ptScreen.y));
-                        if (ht == HTTRANSPARENT)
+                        DWORD clickPid = 0;
+                        GetWindowThreadProcessId(hClicked, &clickPid);
+                        if (clickPid == GetCurrentProcessId())
                         {
-                            HWND hParentWin = GetParent(hClicked);
-                            if (hParentWin && IsWindow(hParentWin))
+                            LRESULT ht = SendMessageW(hClicked, WM_NCHITTEST, 0, MAKELPARAM(ptScreen.x, ptScreen.y));
+                            if (ht == HTTRANSPARENT)
                             {
-                                hClicked = hParentWin;
-                                ht = SendMessageW(hClicked, WM_NCHITTEST, 0, MAKELPARAM(ptScreen.x, ptScreen.y));
+                                HWND hParentWin = GetParent(hClicked);
+                                if (hParentWin && IsWindow(hParentWin))
+                                {
+                                    hClicked = hParentWin;
+                                    ht = SendMessageW(hClicked, WM_NCHITTEST, 0, MAKELPARAM(ptScreen.x, ptScreen.y));
+                                }
                             }
-                        }
 
-                        if (ht == HTCLIENT)
-                        {
-                            POINT ptLocal = ptScreen;
-                            ScreenToClient(hClicked, &ptLocal);
-                            UINT postMsg = (msg.message == WM_RBUTTONDOWN || msg.message == WM_NCRBUTTONDOWN) ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
-                            PostMessageW(hClicked, postMsg, msg.wParam, MAKELPARAM(ptLocal.x, ptLocal.y));
-                        }
-                        else if (ht != HTNOWHERE && ht != HTERROR)
-                        {
-                            UINT postNcMsg = (msg.message == WM_RBUTTONDOWN || msg.message == WM_NCRBUTTONDOWN) ? WM_NCRBUTTONDOWN : WM_NCLBUTTONDOWN;
-                            PostMessageW(hClicked, postNcMsg, (WPARAM)ht, MAKELPARAM(ptScreen.x, ptScreen.y));
+                            if (ht == HTCLIENT)
+                            {
+                                POINT ptLocal = ptScreen;
+                                ScreenToClient(hClicked, &ptLocal);
+                                UINT postMsg = (msg.message == WM_RBUTTONDOWN || msg.message == WM_NCRBUTTONDOWN) ? WM_RBUTTONDOWN : WM_LBUTTONDOWN;
+                                PostMessageW(hClicked, postMsg, msg.wParam, MAKELPARAM(ptLocal.x, ptLocal.y));
+                            }
+                            else if (ht != HTNOWHERE && ht != HTERROR)
+                            {
+                                UINT postNcMsg = (msg.message == WM_RBUTTONDOWN || msg.message == WM_NCRBUTTONDOWN) ? WM_NCRBUTTONDOWN : WM_NCLBUTTONDOWN;
+                                PostMessageW(hClicked, postNcMsg, (WPARAM)ht, MAKELPARAM(ptScreen.x, ptScreen.y));
+                            }
                         }
                     }
                     break;
@@ -773,6 +790,13 @@ int ModernContextMenu::Show(HWND hParent, int x, int y, const std::vector<Contex
     if (IsWindow(hRootMenuWnd))
     {
         DestroyWindow(hRootMenuWnd);
+        hRootMenuWnd = NULL;
+    }
+
+    if (hParent && IsWindow(hParent))
+    {
+        SetActiveWindow(hParent);
+        SetForegroundWindow(hParent);
     }
 
     return rootState.selectedId;
