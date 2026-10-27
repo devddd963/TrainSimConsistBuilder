@@ -37,6 +37,13 @@ HWND g_hCategoryTree = NULL;
 HWND g_hAssetList = NULL;
 HWND g_hEditorPane = NULL;
 HWND g_hWorkspaceHeader = NULL;
+HWND g_hMainWnd = NULL;
+
+HWND GetAppMainWindow()
+{
+    return g_hMainWnd;
+}
+
 HFONT hUIFont = NULL;
 static HFONT g_hSectionFont = NULL;
 
@@ -240,6 +247,18 @@ std::wstring g_szStockSearchQuery = L"";
 std::wstring g_szBasePath = L"";
 std::vector<ConsistReader::UnitInfo> g_LoadedConsistUnits;
 std::wstring g_szCurrentConsistFile;
+
+void App_NotifySoundLibraryChanged(const std::wstring& newSmsPath)
+{
+    if (!newSmsPath.empty())
+    {
+        SoundScanner_RegisterOrUpdateFile(newSmsPath, g_szBasePath);
+    }
+    if (g_hMainWnd && IsWindow(g_hMainWnd))
+    {
+        PostMessageW(g_hMainWnd, WM_SOUND_SCAN_COMPLETE, 0, 0);
+    }
+}
 
 enum class UnitHealthStatus
 {
@@ -1064,6 +1083,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
     {
         return FALSE;
     }
+    g_hMainWnd = hWnd;
 
     HICON hIconBig = (HICON)GetClassLongPtrW(hWnd, GCLP_HICON);
     HICON hIconSm = (HICON)GetClassLongPtrW(hWnd, GCLP_HICONSM);
@@ -8307,8 +8327,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
         if (wmId == IDC_SOUNDLIST && wmEvent >= 1000 && wmEvent < 2000)
         {
-            int colIndex = wmEvent - 1000;
-            g_SoundList.SortByColumn(colIndex, true);
             RefreshSoundList();
             return 0;
         }

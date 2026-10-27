@@ -230,6 +230,7 @@
     <ClInclude Include="UI\SmsPoolManagerDlg.h" />
     <ClInclude Include="UI\BatchSoundMutatorDlg.h" />
     <ClInclude Include="UI\SmsStreamMutatorDlg.h" />
+    <ClInclude Include="UI\SmsAssetConsolidatorDlg.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SRC\TrainSimConsistBuilder.cpp" />
@@ -286,6 +287,7 @@
     <ClCompile Include="UI\SmsPoolManagerDlg.cpp" />
     <ClCompile Include="UI\BatchSoundMutatorDlg.cpp" />
     <ClCompile Include="UI\SmsStreamMutatorDlg.cpp" />
+    <ClCompile Include="UI\SmsAssetConsolidatorDlg.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="TrainSimConsistBuilder.rc" />

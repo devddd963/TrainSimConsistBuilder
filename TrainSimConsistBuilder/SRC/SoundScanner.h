@@ -19,5 +19,6 @@ extern volatile BOOL g_bCancelSoundScan;
 
 HANDLE StartSoundScan(HWND hWndParent, const std::wstring& basePath, bool bForceRescan = false);
 void CancelSoundScan(HANDLE& hThread);
+void SoundScanner_RegisterOrUpdateFile(const std::wstring& fullSmsPath, const std::wstring& basePath);
 void InitSoundScanner();
 void CleanupSoundScanner();

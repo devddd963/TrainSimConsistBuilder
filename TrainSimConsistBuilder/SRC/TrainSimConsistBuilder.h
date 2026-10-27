@@ -85,6 +85,8 @@ void SetAppClipboardUnits(const std::vector<ConsistReader::UnitInfo>& units);
 void App_ShowClipboardContents(HWND hWnd);
 std::wstring        GetAppConsistsDirectory();
 void                TriggerAppConsistsRescan(HWND hWnd = NULL);
+HWND                GetAppMainWindow();
+void                App_NotifySoundLibraryChanged(const std::wstring& newSmsPath = L"");
 std::vector<PoolMutator::BrokenConsistInfo> ScanActiveTargetConsistsForBrokenUnits(
     const std::vector<std::wstring>& targetConsistPaths,
     const std::vector<int>& targetUnitIndices,
@@ -107,4 +109,4 @@ bool                ApplyPoolMutationToSessions(
 #endif
 
 TSCBCORE_API int TSCB_Run(HINSTANCE hInstance, LPWSTR lpCmdLine, int nCmdShow);
-
+

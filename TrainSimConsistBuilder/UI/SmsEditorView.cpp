@@ -5,6 +5,7 @@
 #include "ModernContextMenu.h"
 #include "FluentDragGhost.h"
 #include "SmsStreamMutatorDlg.h"
+#include "SmsAssetConsolidatorDlg.h"
 #include "../SRC/TrainSimConsistBuilder.h"
 #include <windowsx.h>
 #include <mmsystem.h>
@@ -1346,6 +1347,7 @@ struct ClickableRegion {
         FixCountBtn,
         NewSmsBtn,
         SaveBtn,
+        ConsolidateWavsBtn,
         OpenFileBtn,
         OpenFolderBtn,
         CollapseAllBtn,
@@ -1903,7 +1905,8 @@ enum StreamMenuCmd {
     CmdDeselectAll,
     CmdInvertSelection,
     CmdToggleExpandCollapse,
-    CmdPlayPreview
+    CmdPlayPreview,
+    CmdConsolidateWavs
 };
 
 static void ShowStreamContextMenu(SmsEditorViewState* pState, int screenX, int screenY, int clickedStreamIdx)
@@ -1971,6 +1974,9 @@ static void ShowStreamContextMenu(SmsEditorViewState* pState, int screenX, int s
         bool isPl = grp.streams[clickedStreamIdx].isPlayingPreview;
         menuItems.push_back(ContextMenuItem::Action(CmdPlayPreview, isPl ? L"\xE71A" : L"\xE768", isPl ? L"Stop Loop" : L"Play Stream Loop", L"Space", true));
     }
+
+    menuItems.push_back(ContextMenuItem::Separator());
+    menuItems.push_back(ContextMenuItem::Action(CmdConsolidateWavs, L"\xE8B7", L"Consolidate WAV Sound Assets...", L""));
 
     int cmd = ModernContextMenu::Show(pState->hWnd, screenX, screenY, menuItems, pState->bDarkMode, 210);
 
@@ -2055,6 +2061,25 @@ static void ShowStreamContextMenu(SmsEditorViewState* pState, int screenX, int s
             InvalidateRect(pState->hWnd, NULL, FALSE);
         }
         break;
+    case CmdConsolidateWavs:
+    {
+        if (pState->doc.filePath.empty())
+        {
+            ShowModernMessageBox(pState->hWnd, L"Please open or save an SMS file first before consolidating sound assets.", L"No Active SMS", MB_OK | MB_ICONINFORMATION);
+            break;
+        }
+        SmsConsolidateResult cRes;
+        if (ShowSmsAssetConsolidatorDialog(pState->hWnd, pState->doc, pState->basePath, cRes))
+        {
+            if (cRes.docModified)
+            {
+                Sms_PushUndo(pState, L"Consolidate WAV Sound Assets");
+                pState->doc.isModified = true;
+            }
+            InvalidateRect(pState->hWnd, NULL, FALSE);
+        }
+        break;
+    }
     default:
         break;
     }
@@ -2170,6 +2195,7 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                     bool isFixedTopControl = (r.type >= ClickableRegion::SgPropsCardToggle && r.type <= ClickableRegion::SgDeactTrackTypeBtn) ||
                         r.type == ClickableRegion::SgTab ||
                         r.type == ClickableRegion::SaveBtn ||
+                        r.type == ClickableRegion::ConsolidateWavsBtn ||
                         r.type == ClickableRegion::NewSmsBtn ||
                         r.type == ClickableRegion::OpenFileBtn ||
                         r.type == ClickableRegion::OpenFolderBtn ||
@@ -2426,6 +2452,7 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                         bool isFixedTopControl = (region.type >= ClickableRegion::SgPropsCardToggle && region.type <= ClickableRegion::SgDeactTrackTypeBtn) ||
                             region.type == ClickableRegion::SgTab ||
                             region.type == ClickableRegion::SaveBtn ||
+                            region.type == ClickableRegion::ConsolidateWavsBtn ||
                             region.type == ClickableRegion::NewSmsBtn ||
                             region.type == ClickableRegion::OpenFileBtn ||
                             region.type == ClickableRegion::OpenFolderBtn ||
@@ -2879,11 +2906,32 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                         SmsEditorView_SaveCurrentFile(hWnd);
                         return 0;
 
+                    case ClickableRegion::ConsolidateWavsBtn:
+                    {
+                        if (pState->doc.filePath.empty())
+                        {
+                            ShowModernMessageBox(hWnd, L"Please open or save an SMS file first before consolidating sound assets.", L"No Active SMS", MB_OK | MB_ICONINFORMATION);
+                            return 0;
+                        }
+                        SmsConsolidateResult cRes;
+                        if (ShowSmsAssetConsolidatorDialog(hWnd, pState->doc, pState->basePath, cRes))
+                        {
+                            if (cRes.docModified)
+                            {
+                                Sms_PushUndo(pState, L"Consolidate WAV Sound Assets");
+                                pState->doc.isModified = true;
+                            }
+                            InvalidateRect(hWnd, NULL, FALSE);
+                        }
+                        return 0;
+                    }
+
                     case ClickableRegion::NewSmsBtn:
                     {
                         std::wstring createdPath;
                         if (PromptSmsNewFileModal(hWnd, pState->basePath, createdPath))
                         {
+                            App_NotifySoundLibraryChanged(createdPath);
                             SmsEditorView_OpenSmsFile(hWnd, createdPath, pState->basePath);
                         }
                         return 0;
@@ -4959,6 +5007,8 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             pState->doc.isModified ? RGB(52, 38, 18) : RGB(38, 40, 50),
             pState->doc.isModified ? RGB(220, 150, 30) : RGB(56, 60, 75),
             pState->doc.isModified ? RGB(255, 210, 120) : RGB(220, 225, 235));
+        drawBtn(L"📦 Consolidate WAVs...", ClickableRegion::ConsolidateWavsBtn, 160,
+            RGB(35, 30, 55), RGB(130, 80, 220), RGB(215, 185, 255));
 
         // Top bar line 1: File name & Action buttons
         size_t slashIdx = pState->doc.filePath.find_last_of(L"\\/");
@@ -6927,6 +6977,7 @@ bool SmsEditorView_SaveCurrentFile(HWND hWnd)
         pState->savedGroups = pState->doc.groups;
         pState->doc.isModified = false;
         pState->doc.autoRepairLog.clear();
+        App_NotifySoundLibraryChanged(pState->doc.filePath);
         ShowModernMessageBox(hWnd, L"Sound Management System (.sms) file saved successfully!", L"SMS Saved", MB_OK | MB_ICONINFORMATION);
         InvalidateRect(hWnd, NULL, FALSE);
         return true;

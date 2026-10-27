@@ -179,3 +179,60 @@ void CancelSoundScan(HANDLE& hThread)
         hThread = NULL;
     }
 }
+
+void SoundScanner_RegisterOrUpdateFile(const std::wstring& fullSmsPath, const std::wstring& basePath)
+{
+    if (fullSmsPath.empty()) return;
+    InitSoundScanner();
+
+    ScannedSoundItem item;
+    item.szFullPath = fullSmsPath;
+    for (auto& c : item.szFullPath) if (c == L'/') c = L'\\';
+
+    size_t lastSlash = item.szFullPath.find_last_of(L"\\/");
+    item.szFileName = (lastSlash != std::wstring::npos) ? item.szFullPath.substr(lastSlash + 1) : item.szFullPath;
+
+    std::wstring b = basePath;
+    for (auto& c : b) if (c == L'/') c = L'\\';
+    if (!b.empty() && b.back() != L'\\') b += L'\\';
+
+    std::wstring trainsetDir = b + L"TRAINS\\TRAINSET\\";
+    std::wstring soundStudioDir = L"SoundStudio\\CustomSMS\\";
+
+    if (!trainsetDir.empty() && _wcsnicmp(item.szFullPath.c_str(), trainsetDir.c_str(), trainsetDir.length()) == 0)
+    {
+        item.szRelativePath = item.szFullPath.substr(trainsetDir.length());
+    }
+    else
+    {
+        size_t ssPos = item.szFullPath.find(soundStudioDir);
+        if (ssPos != std::wstring::npos)
+        {
+            item.szRelativePath = item.szFullPath.substr(ssPos);
+        }
+        else
+        {
+            item.szRelativePath = item.szFileName;
+        }
+    }
+
+    size_t relSlash = item.szRelativePath.find_last_of(L"\\/");
+    item.szFolder = (relSlash != std::wstring::npos) ? item.szRelativePath.substr(0, relSlash) : L"";
+
+    EnterCriticalSection(&g_SoundCacheCS);
+    bool found = false;
+    for (auto& existing : g_SoundCache)
+    {
+        if (_wcsicmp(existing.szFullPath.c_str(), item.szFullPath.c_str()) == 0)
+        {
+            existing = item;
+            found = true;
+            break;
+        }
+    }
+    if (!found)
+    {
+        g_SoundCache.push_back(item);
+    }
+    LeaveCriticalSection(&g_SoundCacheCS);
+}

@@ -126,6 +126,9 @@
     <ClInclude Include="UI\SmsStreamMutatorDlg.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\SmsAssetConsolidatorDlg.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SRC\TrainSimConsistBuilder.cpp">
@@ -261,6 +264,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UI\SmsStreamMutatorDlg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\SmsAssetConsolidatorDlg.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
