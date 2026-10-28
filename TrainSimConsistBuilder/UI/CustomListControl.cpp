@@ -623,6 +623,24 @@ std::wstring CustomListControl::GetCellText(int itemIndex, int subItemIndex) con
     return L"";
 }
 
+bool CustomListControl::GetCellRect(int itemIndex, int subItemIndex, RECT& rcCell) const
+{
+    if (itemIndex < 0 || itemIndex >= GetItemCount()) return false;
+    if (subItemIndex < 0 || subItemIndex >= (int)m_columns.size()) return false;
+
+    int yTop = m_headerHeight + (itemIndex - m_scrollY) * m_rowHeight;
+    int xAccum = GetGutterWidth() - m_scrollX;
+    for (int c = 0; c < subItemIndex; ++c)
+    {
+        xAccum += m_columns[c].width;
+    }
+    rcCell.left = xAccum;
+    rcCell.top = yTop;
+    rcCell.right = xAccum + m_columns[subItemIndex].width;
+    rcCell.bottom = yTop + m_rowHeight;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Child Scrollbar: Create, Layout, Theme
 // ---------------------------------------------------------------------------
@@ -659,13 +677,14 @@ void CustomListControl::LayoutScrollbars()
     int innerW    = cw - V_SCROLLBAR_WIDTH;            // width  when vscroll visible
 
     // Need vertical?
-    int visRows = (clientAreaH - m_headerHeight) / m_rowHeight;
+    const int BOTTOM_MARGIN = 6;
+    int visRows = (std::max)(0, clientAreaH - m_headerHeight - BOTTOM_MARGIN) / m_rowHeight;
     bool needV  = (itemCount > visRows);
     // Need horizontal?
     bool needH  = (totalColsWidth > (needV ? innerW : cw));
 
     // Re-check vertical with hscroll taking space
-    if (needH) visRows = (innerH - m_headerHeight) / m_rowHeight;
+    if (needH) visRows = (std::max)(0, innerH - m_headerHeight - BOTTOM_MARGIN) / m_rowHeight;
     if (!needV && needH) needV = (itemCount > visRows);
 
     m_vScroll.SetVisible(needV);
@@ -696,7 +715,8 @@ void CustomListControl::UpdateScrollbars()
     RECT rc = GetListRect();
     int listW     = rc.right - rc.left;
     int listH     = rc.bottom - rc.top;
-    int visRows   = listH / m_rowHeight;
+    const int BOTTOM_MARGIN = 6;
+    int visRows   = (std::max)(0, listH - BOTTOM_MARGIN) / m_rowHeight;
     if (visRows < 1) visRows = 1;
     int itemCount = GetItemCount();
 
@@ -824,14 +844,15 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         bool hasH = m_hScroll.IsVisible();
 
         int itemCount  = GetItemCount();
-        int visibleRows = (rcList.bottom - rcList.top) / m_rowHeight + 1;
+        const int BOTTOM_MARGIN = 6;
+        int visibleRows = (std::max)(0, (int)(rcList.bottom - rcList.top) - BOTTOM_MARGIN) / m_rowHeight;
         int startRow   = m_scrollY;
         int endRow     = startRow + visibleRows;
         if (endRow > itemCount) endRow = itemCount;
 
         // --- Draw row cells with strict GDI clipping to rcList ---
         int savedDCRows = SaveDC(hMemDC);
-        IntersectClipRect(hMemDC, 0, m_headerHeight, listW, rcList.bottom);
+        IntersectClipRect(hMemDC, 0, m_headerHeight, listW, rcList.bottom - BOTTOM_MARGIN);
 
         int totalColsWidth = 0;
         for (const auto& col : m_columns) totalColsWidth += col.width;
@@ -2000,7 +2021,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         {
             return 0;
         }
-        if (m_hScroll.IsVisible() && y >= rcList.bottom)
+        if ((m_hScroll.IsVisible() && y >= rcList.bottom) || y >= rcList.bottom - 6)
         {
             return 0;
         }
@@ -2348,7 +2369,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         RECT rcList = GetListRect();
         int listW = rcList.right - rcList.left;
         if (m_vScroll.IsVisible() && x >= listW) return 0;
-        if (m_hScroll.IsVisible() && y >= rcList.bottom) return 0;
+        if ((m_hScroll.IsVisible() && y >= rcList.bottom) || y >= rcList.bottom - 6) return 0;
 
         if (y > m_headerHeight)
         {
@@ -3541,6 +3562,8 @@ void CustomListControl::CancelItemDrag()
 int CustomListControl::GetItemIndexFromPoint(POINT ptClient) const
 {
     if (ptClient.y <= m_headerHeight) return -1;
+    RECT rcList = GetListRect();
+    if (ptClient.y >= rcList.bottom - 6) return -1;
     int row = m_scrollY + (ptClient.y - m_headerHeight) / m_rowHeight;
     if (row < 0 || row >= GetItemCount()) return -1;
     return row;

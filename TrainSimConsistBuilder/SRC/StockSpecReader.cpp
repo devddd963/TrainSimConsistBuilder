@@ -133,59 +133,78 @@ namespace StockSpecReader
         outFound = false;
         if (relPath.empty()) return L"";
 
-        std::wstring normRel = NormalizePath(relPath);
+        std::wstring trimmed = relPath;
+        size_t first = trimmed.find_first_not_of(L" \t\r\n");
+        if (first == std::wstring::npos) return L"";
+        size_t last = trimmed.find_last_not_of(L" \t\r\n");
+        trimmed = trimmed.substr(first, (last - first + 1));
+
+        std::wstring normRel = NormalizePath(trimmed);
 
         // Strip leading slashes to get clean relative path (handles //, \\, /, \)
         size_t firstChar = normRel.find_first_not_of(L"\\/");
         std::wstring cleanRel = (firstChar != std::wstring::npos) ? normRel.substr(firstChar) : normRel;
-
-        // 1. Direct relative to current vehicle folder (handles local file, ./file, sub/file, //sub/file)
-        std::wstring p1 = ResolvePathRelative(folderDir, cleanRel);
-        if (GetFileAttributesW(p1.c_str()) != INVALID_FILE_ATTRIBUTES)
+        if (cleanRel.empty() || cleanRel == L".s" || (cleanRel.length() >= 3 && cleanRel.substr(cleanRel.length() - 3) == L"\\.s"))
         {
-            outFound = true;
-            return p1;
+            return L"";
         }
 
-        // 2. Relative to parent of vehicle folder (TRAINSET level, e.g. //tboards/..., ../tboards/...)
-        std::wstring p2 = ResolvePathRelative(folderDir + L"..\\", cleanRel);
-        if (GetFileAttributesW(p2.c_str()) != INVALID_FILE_ATTRIBUTES)
+        std::wstring cleanRelExt = cleanRel;
+        if (cleanRelExt.length() > 2 && cleanRelExt.substr(cleanRelExt.length() - 2) != L".s" && cleanRelExt.substr(cleanRelExt.length() - 2) != L".S")
         {
-            outFound = true;
-            return p2;
+            cleanRelExt += L".s";
         }
 
-        // 3. Relative using original normRel (handles ../.. chains)
-        std::wstring p3 = ResolvePathRelative(folderDir, normRel);
-        if (GetFileAttributesW(p3.c_str()) != INVALID_FILE_ATTRIBUTES)
+        std::wstring candidates[2] = { cleanRel, cleanRelExt };
+        for (const auto& cRel : candidates)
         {
-            outFound = true;
-            return p3;
-        }
-
-        // 4. Using trainsetBasePath if provided
-        if (!trainsetBasePath.empty())
-        {
-            if (!folderName.empty())
-            {
-                std::wstring p4a = ResolvePathRelative(trainsetBasePath + L"TRAINS\\TRAINSET\\" + folderName + L"\\", cleanRel);
-                if (GetFileAttributesW(p4a.c_str()) != INVALID_FILE_ATTRIBUTES)
-                {
-                    outFound = true;
-                    return p4a;
-                }
-            }
-
-            std::wstring p4b = ResolvePathRelative(trainsetBasePath + L"TRAINS\\TRAINSET\\", cleanRel);
-            if (GetFileAttributesW(p4b.c_str()) != INVALID_FILE_ATTRIBUTES)
+            // 1. Direct relative to current vehicle folder (handles local file, ./file, sub/file, //sub/file)
+            std::wstring p1 = ResolvePathRelative(folderDir, cRel);
+            if (GetFileAttributesW(p1.c_str()) != INVALID_FILE_ATTRIBUTES)
             {
                 outFound = true;
-                return p4b;
+                return p1;
+            }
+
+            // 2. Relative to parent of vehicle folder (TRAINSET level, e.g. //tboards/..., ../tboards/...)
+            std::wstring p2 = ResolvePathRelative(folderDir + L"..\\", cRel);
+            if (GetFileAttributesW(p2.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                outFound = true;
+                return p2;
+            }
+
+            // 3. Relative using original normRel (handles ../.. chains)
+            std::wstring p3 = ResolvePathRelative(folderDir, cRel);
+            if (GetFileAttributesW(p3.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                outFound = true;
+                return p3;
+            }
+
+            // 4. Using trainsetBasePath if provided
+            if (!trainsetBasePath.empty())
+            {
+                if (!folderName.empty())
+                {
+                    std::wstring p4a = ResolvePathRelative(trainsetBasePath + L"TRAINS\\TRAINSET\\" + folderName + L"\\", cRel);
+                    if (GetFileAttributesW(p4a.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    {
+                        outFound = true;
+                        return p4a;
+                    }
+                }
+
+                std::wstring p4b = ResolvePathRelative(trainsetBasePath + L"TRAINS\\TRAINSET\\", cRel);
+                if (GetFileAttributesW(p4b.c_str()) != INVALID_FILE_ATTRIBUTES)
+                {
+                    outFound = true;
+                    return p4b;
+                }
             }
         }
 
-        // Default to p1 or p2 for display/copy
-        return p1.empty() ? p2 : p1;
+        return ResolvePathRelative(folderDir, cleanRel);
     }
 
     // =========================================================================

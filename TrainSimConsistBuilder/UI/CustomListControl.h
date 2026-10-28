@@ -278,6 +278,7 @@ public:
     // Size Helper
     void Resize(int x, int y, int width, int height);
     std::wstring GetCellText(int itemIndex, int subItemIndex) const;
+    bool GetCellRect(int itemIndex, int subItemIndex, RECT& rcCell) const;
 
 private:
     static LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);

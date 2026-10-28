@@ -903,9 +903,13 @@ namespace
 
             {
 
-                int totalW = w - 60;
+                int leftX = 16;
 
-                int gap = 12;
+                int rightMargin = 16;
+
+                int gap = 8;
+
+                int totalW = w - (leftX + rightMargin);
 
                 int rightColW = (totalW - gap) * 34 / 100;
 
@@ -913,13 +917,14 @@ namespace
 
                 int listW = totalW - gap - rightColW;
 
-                int leftX = 30;
+                int topY = 118;
 
-                int topY = 164;
+                int cardBottom = h - 60;
 
-                int listH = (h - 68) - topY;
+                int listH = cardBottom - topY;
 
                 if (listH < 100) listH = 100;
+
 
 
 
@@ -1515,11 +1520,11 @@ namespace
 
         int availW = listW - 14;
 
-        int fixedW = 60 + 85 + 115 + 155; // Col 0, 2, 4, 5
+        int fixedW = 64 + 85 + 115 + 170; // Col 0 (64px), 2, 4, 5 (170px for full 'Target Mutation / Source')
 
         int remW = availW - fixedW;
 
-        if (remW < 160) remW = 160;
+        if (remW < 180) remW = 180;
 
 
 
@@ -1529,7 +1534,7 @@ namespace
 
 
 
-        g_State.batchConsistList.SetColumnWidth(0, 60);
+        g_State.batchConsistList.SetColumnWidth(0, 64);
 
         g_State.batchConsistList.SetColumnWidth(1, col1);
 
@@ -1539,7 +1544,8 @@ namespace
 
         g_State.batchConsistList.SetColumnWidth(4, 115);
 
-        g_State.batchConsistList.SetColumnWidth(5, 155);
+        g_State.batchConsistList.SetColumnWidth(5, 170);
+
 
         g_State.batchConsistList.Invalidate();
 
@@ -1685,7 +1691,7 @@ namespace
 
             std::wstring targetStr;
 
-            if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit)
+            if (bc.actionExecutionMode == 2)
 
             {
 
@@ -1693,7 +1699,7 @@ namespace
 
             }
 
-            else if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::RebuildConsist)
+            else if (bc.actionExecutionMode == 1)
 
             {
 
@@ -1709,7 +1715,7 @@ namespace
 
                 const auto* pSrc = FindSourceNodeById(bc.assignedSourceId);
 
-                targetStr = (pSrc ? pSrc->name : L"Source A");
+                targetStr = L"🔧 " + (pSrc ? pSrc->name : L"Source A");
 
             }
 
@@ -1807,7 +1813,7 @@ namespace
 
                         std::wstring uTarget;
 
-                        if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::PurgeUnit)
+                        if (bc.actionExecutionMode == 2)
 
                         {
 
@@ -1815,7 +1821,7 @@ namespace
 
                         }
 
-                        else if (g_State.tab2Action == MutatorDlgState::Tab2ActionMode::RebuildConsist)
+                        else if (bc.actionExecutionMode == 1)
 
                         {
 
@@ -1879,34 +1885,6 @@ namespace
 
         const auto& bc = g_State.brokenConsists[dRow.consistIndex];
 
-        auto& cState = GetConsistSectionState(dRow.consistIndex);
-
-
-
-        bool isFirstInCard = (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER);
-
-        bool isLastInCard = (!cState.isExpanded || (itemIndex + 1 >= (int)g_State.displayRows.size()) || (g_State.displayRows[itemIndex + 1].consistIndex != dRow.consistIndex));
-
-
-
-        RECT rc = rcRow;
-
-        if (isFirstInCard && itemIndex > 0)
-
-        {
-
-            rc.top += 4;
-
-        }
-
-        if (isLastInCard)
-
-        {
-
-            rc.bottom -= 1;
-
-        }
-
 
 
         int brokenCount = 0;
@@ -1949,21 +1927,39 @@ namespace
 
 
 
+        // Continuous edge-to-edge row geometry (no rounded cards or pill gaps)
+
+        RECT rc = rcRow;
+
+        rc.left = 0;
+
+        rc.top = rcRow.top - 1;
+
+        rc.bottom = rcRow.bottom + 1;
+
+        rc.right = (std::max)((int)rcRow.right + 10, 2000);
+
+
+
         COLORREF bgCol;
-
-        COLORREF borderCol = RGB(46, 54, 68);
-
-
 
         if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
 
         {
 
-            bgCol = (brokenCount > 0) ? RGB(32, 26, 32) : RGB(24, 30, 42);
+            // Distinct Consist Section Banner
 
-            if (isSelected) bgCol = RGB(36, 68, 110);
+            if (isSelected)
 
-            else if (isHovered) bgCol = (brokenCount > 0) ? RGB(40, 32, 40) : RGB(30, 40, 56);
+                bgCol = isHovered ? RGB(44, 78, 122) : RGB(36, 68, 110);
+
+            else if (isHovered)
+
+                bgCol = (brokenCount > 0) ? RGB(44, 34, 46) : RGB(34, 44, 62);
+
+            else
+
+                bgCol = (brokenCount > 0) ? RGB(34, 28, 36) : RGB(26, 34, 48);
 
         }
 
@@ -1971,11 +1967,19 @@ namespace
 
         {
 
-            bgCol = (dRow.unitIndex % 2 == 0) ? RGB(20, 24, 30) : RGB(23, 27, 34);
+            // Alternating zebra striping for child units
 
-            if (isSelected) bgCol = RGB(28, 52, 85);
+            if (isSelected)
 
-            else if (isHovered) bgCol = RGB(30, 38, 50);
+                bgCol = isHovered ? RGB(34, 62, 100) : RGB(28, 52, 85);
+
+            else if (isHovered)
+
+                bgCol = RGB(30, 38, 50);
+
+            else
+
+                bgCol = (dRow.unitIndex % 2 == 0) ? RGB(20, 24, 30) : RGB(24, 28, 36);
 
         }
 
@@ -1983,57 +1987,65 @@ namespace
 
         {
 
-            bgCol = RGB(19, 23, 30);
+            if (isSelected)
 
-            if (isSelected) bgCol = RGB(28, 52, 85);
+                bgCol = RGB(28, 52, 85);
 
-            else if (isHovered) bgCol = RGB(26, 32, 44);
+            else if (isHovered)
+
+                bgCol = RGB(26, 32, 44);
+
+            else
+
+                bgCol = RGB(20, 24, 30);
 
         }
 
 
+
+        // Fill row background
 
         HBRUSH hbrBg = CreateSolidBrush(bgCol);
 
-        HPEN hpenBorder = CreatePen(PS_SOLID, 1, borderCol);
+        FillRect(hdc, &rc, hbrBg);
 
-        HGDIOBJ oldBr = SelectObject(hdc, hbrBg);
-
-        HGDIOBJ oldPn = SelectObject(hdc, hpenBorder);
+        DeleteObject(hbrBg);
 
 
 
-        if (isFirstInCard && isLastInCard)
+        // Horizontal Grid Dividers
 
-        {
-
-            RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 6, 6);
-
-        }
-
-        else if (isFirstInCard)
+        if (dRow.rowType == MutatorDlgState::MUTATOR_ROW_CONSIST_HEADER)
 
         {
 
-            RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom + 6, 6, 6);
+            // Subtle top & bottom framing border for section header
 
-            HPEN hInnerPen = CreatePen(PS_SOLID, 1, RGB(38, 46, 58));
+            HPEN hPenHdrTop = CreatePen(PS_SOLID, 1, RGB(52, 64, 82));
 
-            SelectObject(hdc, hInnerPen);
+            HGDIOBJ oldP = SelectObject(hdc, hPenHdrTop);
 
-            MoveToEx(hdc, rc.left + 1, rc.bottom - 1, NULL);
+            MoveToEx(hdc, rc.left, rc.top, NULL);
 
-            LineTo(hdc, rc.right - 1, rc.bottom - 1);
+            LineTo(hdc, rc.right, rc.top);
 
-            DeleteObject(hInnerPen);
 
-        }
 
-        else if (isLastInCard)
+            HPEN hPenHdrBtm = CreatePen(PS_SOLID, 1, RGB(40, 50, 66));
 
-        {
+            SelectObject(hdc, hPenHdrBtm);
 
-            RoundRect(hdc, rc.left, rc.top - 6, rc.right, rc.bottom, 6, 6);
+            MoveToEx(hdc, rc.left, rc.bottom - 1, NULL);
+
+            LineTo(hdc, rc.right, rc.bottom - 1);
+
+
+
+            SelectObject(hdc, oldP);
+
+            DeleteObject(hPenHdrTop);
+
+            DeleteObject(hPenHdrBtm);
 
         }
 
@@ -2041,39 +2053,27 @@ namespace
 
         {
 
-            FillRect(hdc, &rc, hbrBg);
+            // Subtle 1px horizontal bottom grid line between unit rows
 
-            HPEN hSidePen = CreatePen(PS_SOLID, 1, borderCol);
+            HPEN hPenGrid = CreatePen(PS_SOLID, 1, RGB(32, 38, 48));
 
-            SelectObject(hdc, hSidePen);
+            HGDIOBJ oldP = SelectObject(hdc, hPenGrid);
 
-            MoveToEx(hdc, rc.left, rc.top, NULL); LineTo(hdc, rc.left, rc.bottom);
+            MoveToEx(hdc, rc.left, rc.bottom - 1, NULL);
 
-            MoveToEx(hdc, rc.right - 1, rc.top, NULL); LineTo(hdc, rc.right - 1, rc.bottom);
+            LineTo(hdc, rc.right, rc.bottom - 1);
 
-            DeleteObject(hSidePen);
+            SelectObject(hdc, oldP);
+
+            DeleteObject(hPenGrid);
 
         }
 
 
 
-        SelectObject(hdc, oldBr);
+        // Left Accent Color Stripe (clean 3px bar at column 0 left edge)
 
-        SelectObject(hdc, oldPn);
-
-        DeleteObject(hbrBg);
-
-        DeleteObject(hpenBorder);
-
-
-
-        // Left Accent Color Stripe
-
-        int stripeLeft = rc.left + 1;
-
-        int stripeW = 4;
-
-        RECT rcStripe = { stripeLeft, rc.top + (isFirstInCard ? 2 : 0), stripeLeft + stripeW, rc.bottom - (isLastInCard ? 2 : 0) };
+        RECT rcStripe = { rc.left, rc.top, rc.left + 3, rc.bottom };
 
         HBRUSH hbrStripe = CreateSolidBrush(accentColor);
 
@@ -2083,33 +2083,9 @@ namespace
 
 
 
-        // Inter-card separator gap line
-
-        if (isFirstInCard && itemIndex > 0)
-
-        {
-
-            HPEN hSepPen = CreatePen(PS_SOLID, 1, RGB(30, 35, 45));
-
-            HGDIOBJ oldSep = SelectObject(hdc, hSepPen);
-
-            MoveToEx(hdc, rc.left - 2, rc.top - 2, NULL);
-
-            LineTo(hdc, rc.right + 2, rc.top - 2);
-
-            SelectObject(hdc, oldSep);
-
-            DeleteObject(hSepPen);
-
-        }
-
-
-
         return true;
 
     }
-
-
 
     static bool Mutator_DrawCellCallback(HDC hdc, int itemIndex, int subItemIndex, const RECT& rcCell, bool isSelected, bool isHovered, void* pParam)
 
@@ -2859,7 +2835,7 @@ namespace
 
                         RECT rcTxt = { rc.left + 18, rc.top, rc.right - 14, rc.bottom };
 
-                        std::wstring label = L"Src " + srcLetter;
+                        std::wstring label = L"SRC " + srcLetter;
 
                         DrawTextW(hdc, label.c_str(), -1, &rcTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
@@ -5421,11 +5397,37 @@ namespace
 
                                 {
 
-                                    POINT ptScreen;
+                                    RECT rcAnchor = { 0 };
 
-                                    GetCursorPos(&ptScreen);
+                                    if (g_State.batchConsistList.GetCellRect(clickedRow, 5, rcAnchor))
 
-                                    RECT rcAnchor = { ptScreen.x - 50, ptScreen.y, ptScreen.x + 50, ptScreen.y + 20 };
+                                    {
+
+                                        MapWindowPoints(g_State.hBatchConsistListWnd, hWnd, (LPPOINT)&rcAnchor, 2);
+
+                                        rcAnchor.top += 3;
+
+                                        rcAnchor.bottom -= 3;
+
+                                        rcAnchor.left += 4;
+
+                                        rcAnchor.right -= 6;
+
+                                    }
+
+                                    else
+
+                                    {
+
+                                        POINT ptScreen;
+
+                                        GetCursorPos(&ptScreen);
+
+                                        ScreenToClient(hWnd, &ptScreen);
+
+                                        rcAnchor = { ptScreen.x - 50, ptScreen.y, ptScreen.x + 50, ptScreen.y + 20 };
+
+                                    }
 
                                     ShowSourceDropdownForConsist(hWnd, bc, rcAnchor);
 
@@ -5481,11 +5483,37 @@ namespace
 
                                 {
 
-                                    POINT ptScreen;
+                                    RECT rcAnchor = { 0 };
 
-                                    GetCursorPos(&ptScreen);
+                                    if (g_State.batchConsistList.GetCellRect(clickedRow, 5, rcAnchor))
 
-                                    RECT rcAnchor = { ptScreen.x - 50, ptScreen.y, ptScreen.x + 50, ptScreen.y + 20 };
+                                    {
+
+                                        MapWindowPoints(g_State.hBatchConsistListWnd, hWnd, (LPPOINT)&rcAnchor, 2);
+
+                                        rcAnchor.top += 3;
+
+                                        rcAnchor.bottom -= 3;
+
+                                        rcAnchor.left += 4;
+
+                                        rcAnchor.right -= 6;
+
+                                    }
+
+                                    else
+
+                                    {
+
+                                        POINT ptScreen;
+
+                                        GetCursorPos(&ptScreen);
+
+                                        ScreenToClient(hWnd, &ptScreen);
+
+                                        rcAnchor = { ptScreen.x - 50, ptScreen.y, ptScreen.x + 50, ptScreen.y + 20 };
+
+                                    }
 
                                     ShowSourceDropdownForUnit(hWnd, bu, rcAnchor);
 
@@ -5897,7 +5925,7 @@ namespace
 
             // Create Batch Consist Matrix List Control with Sound Studio Card Styling
 
-            g_State.hBatchConsistListWnd = g_State.batchConsistList.Create(hWnd, 30, 164, 600, 400, 205);
+            g_State.hBatchConsistListWnd = g_State.batchConsistList.Create(hWnd, 16, 118, 600, 400, 205);
 
             if (g_State.hBatchConsistListWnd)
 
@@ -5907,7 +5935,9 @@ namespace
 
                 g_State.batchConsistList.SetMultiSelect(false);
 
-                g_State.batchConsistList.SetShowVerticalDividers(false);
+                g_State.batchConsistList.SetShowVerticalDividers(true);
+
+                g_State.batchConsistList.SetDrawCardBorder(true);
 
                 g_State.batchConsistList.SetAutoFitLastColumn(false);
 
@@ -5921,7 +5951,7 @@ namespace
 
 
 
-                g_State.batchConsistList.AddColumn(L"#", 60, 0);
+                g_State.batchConsistList.AddColumn(L"#", 64, 0);
 
                 g_State.batchConsistList.AddColumn(L"Consist / Unit Name", 220, 0);
 
@@ -5931,7 +5961,7 @@ namespace
 
                 g_State.batchConsistList.AddColumn(L"Current Status", 115, 1);
 
-                g_State.batchConsistList.AddColumn(L"Target Mutation / Source", 155, 0);
+                g_State.batchConsistList.AddColumn(L"Target Mutation / Source", 170, 0);
 
 
 
@@ -6667,7 +6697,18 @@ namespace
 
                     g_State.tab2Action = MutatorDlgState::Tab2ActionMode::ReplaceUnit;
 
-                    for (auto& bc : g_State.brokenConsists) bc.actionExecutionMode = 0;
+                    bool anySel = false;
+
+                    for (const auto& bc : g_State.brokenConsists) { if (bc.isSelected) { anySel = true; break; } }
+
+                    for (auto& bc : g_State.brokenConsists)
+
+                    {
+
+                        if (!anySel || bc.isSelected) bc.actionExecutionMode = 0;
+
+                    }
+
 
                     PopulateBatchConsistMatrix();
 
@@ -6683,7 +6724,50 @@ namespace
 
                     g_State.tab2Action = MutatorDlgState::Tab2ActionMode::RebuildConsist;
 
-                    for (auto& bc : g_State.brokenConsists) bc.actionExecutionMode = 1;
+                    bool anySel = false;
+
+                    for (const auto& bc : g_State.brokenConsists) { if (bc.isSelected) { anySel = true; break; } }
+
+                    for (auto& bc : g_State.brokenConsists)
+
+                    {
+
+                        if (!anySel || bc.isSelected)
+
+                        {
+
+                            bc.actionExecutionMode = 1;
+
+                            const auto* curSrc = FindSourceNodeById(bc.assignedSourceId);
+
+                            if (!curSrc || (curSrc->sourceType != 1 && curSrc->sourceType != 2))
+
+                            {
+
+                                for (const auto& n : g_State.sourceNodes)
+
+                                {
+
+                                    if (n.sourceType == 1 || n.sourceType == 2)
+
+                                    {
+
+                                        bc.assignedSourceId = n.sourceId;
+
+                                        for (auto& bu : bc.brokenUnits) bu.assignedSourceId = n.sourceId;
+
+                                        break;
+
+                                    }
+
+                                }
+
+                            }
+
+                        }
+
+                    }
+
 
                     PopulateBatchConsistMatrix();
 
@@ -6699,7 +6783,18 @@ namespace
 
                     g_State.tab2Action = MutatorDlgState::Tab2ActionMode::PurgeUnit;
 
-                    for (auto& bc : g_State.brokenConsists) bc.actionExecutionMode = 2;
+                    bool anySel = false;
+
+                    for (const auto& bc : g_State.brokenConsists) { if (bc.isSelected) { anySel = true; break; } }
+
+                    for (auto& bc : g_State.brokenConsists)
+
+                    {
+
+                        if (!anySel || bc.isSelected) bc.actionExecutionMode = 2;
+
+                    }
+
 
                     PopulateBatchConsistMatrix();
 
@@ -7163,58 +7258,433 @@ namespace
 
 
 
-            SelectObject(hmemDC, g_State.hFontBold);
+            if (g_State.activeTab != 2)
 
-            SIZE sumSz = { 0 };
+            {
 
-            GetTextExtentPoint32W(hmemDC, targetSummary.c_str(), (int)targetSummary.length(), &sumSz);
+                // Tabs 0 & 1: Standard Ribbon Header
 
-            int statusW = (std::max)(180, (int)sumSz.cx + 10);
+                SelectObject(hmemDC, g_State.hFontBold);
 
-            if (statusW > rcClient.right - 180) statusW = rcClient.right - 180;
+                SIZE sumSz = { 0 };
 
+                GetTextExtentPoint32W(hmemDC, targetSummary.c_str(), (int)targetSummary.length(), &sumSz);
 
+                int statusW = (std::max)(180, (int)sumSz.cx + 10);
 
-            RECT rcStatus = { rcClient.right - statusW - 20, toolbarY, rcClient.right - 20, toolbarY + toolbarH };
-
-            RECT rcTitle = { 54, toolbarY + 5, rcStatus.left - 16, toolbarY + 24 };
-
-            RECT rcSub = { 54, toolbarY + 24, rcStatus.left - 16, toolbarY + 42 };
+                if (statusW > rcClient.right - 180) statusW = rcClient.right - 180;
 
 
 
-            SetTextColor(hmemDC, textPrimary);
+                RECT rcStatus = { rcClient.right - statusW - 20, toolbarY, rcClient.right - 20, toolbarY + toolbarH };
 
-            const wchar_t* tabTitle = (g_State.activeTab == 0) ? L"Whole Consist Pool Overhaul / Mutation" :
+                RECT rcTitle = { 54, toolbarY + 5, rcStatus.left - 16, toolbarY + 24 };
 
-                                      ((g_State.activeTab == 1) ? L"Position-Based Unit Injection" : L"Batch Consist Editing");
-
-            DrawTextW(hmemDC, tabTitle, -1, &rcTitle, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                RECT rcSub = { 54, toolbarY + 24, rcStatus.left - 16, toolbarY + 42 };
 
 
 
-            SelectObject(hmemDC, g_State.hFontSmall);
+                SetTextColor(hmemDC, textPrimary);
 
-            SetTextColor(hmemDC, textSecondary);
+                const wchar_t* tabTitle = (g_State.activeTab == 0) ? L"Whole Consist Pool Overhaul / Mutation" : L"Position-Based Unit Injection";
 
-            const wchar_t* tabSub = (g_State.activeTab == 0) ? L"Regenerate and vary entire consist file(s) drawn from selected Pool Preset" :
-
-                                    ((g_State.activeTab == 1) ? L"Inject new units into consist file(s) at Head, Behind Locos, Tail, or Specific Index" :
-
-                                     L"Batch repair broken units or rebuild entire consist files from presets and train configurations");
-
-            DrawTextW(hmemDC, tabSub, -1, &rcSub, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                DrawTextW(hmemDC, tabTitle, -1, &rcTitle, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
 
 
-            // Right-aligned status: Target context summary
+                SelectObject(hmemDC, g_State.hFontSmall);
 
-            SelectObject(hmemDC, g_State.hFontBold);
+                SetTextColor(hmemDC, textSecondary);
 
-            SetTextColor(hmemDC, accentCol);
+                const wchar_t* tabSub = (g_State.activeTab == 0) ? L"Regenerate and vary entire consist file(s) drawn from selected Pool Preset" :
 
-            DrawTextW(hmemDC, targetSummary.c_str(), -1, &rcStatus, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                                          L"Inject new units into consist file(s) at Head, Behind Locos, Tail, or Specific Index";
 
+                DrawTextW(hmemDC, tabSub, -1, &rcSub, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+
+
+                SelectObject(hmemDC, g_State.hFontBold);
+
+                SetTextColor(hmemDC, accentCol);
+
+                DrawTextW(hmemDC, targetSummary.c_str(), -1, &rcStatus, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            }
+
+            else
+
+            {
+
+                // Tab 2: Integrated Command Bar & Counters in Burgundy Ribbon Header
+
+                int totalConsists = (int)g_State.brokenConsists.size();
+
+                int totalUnits = 0;
+
+                int totalBrokenUnits = 0;
+
+                int selectedUnits = 0;
+
+                for (const auto& bc : g_State.brokenConsists)
+
+                {
+
+                    if (bc.brokenUnits.empty())
+
+                    {
+
+                        totalUnits++;
+
+                        if (bc.isSelected) selectedUnits++;
+
+                    }
+
+                    else
+
+                    {
+
+                        for (const auto& bu : bc.brokenUnits)
+
+                        {
+
+                            totalUnits++;
+
+                            if (bu.isBroken) totalBrokenUnits++;
+
+                            if (bc.isSelected && bu.isSelected) selectedUnits++;
+
+                        }
+
+                    }
+
+                }
+
+
+
+                bool isAllMaster = (totalUnits > 0 && selectedUnits == totalUnits);
+
+                bool isIndeterminateMaster = (selectedUnits > 0 && !isAllMaster);
+
+
+
+                // Command Buttons vertically centered in ribbon (Y = 66..112, H = 46)
+
+                int btnH = 26;
+
+                int btnY = toolbarY + (toolbarH - btnH) / 2; // Y = 76
+
+
+
+                // Align buttons over the left grid column width, ending at leftGridRight
+
+                int leftX = 16;
+
+                int rightMargin = 16;
+
+                int gap = 8;
+
+                int totalW = rcClient.right - (leftX + rightMargin);
+
+                int rightColW = (totalW - gap) * 34 / 100;
+
+                if (rightColW < 320) rightColW = 320;
+
+                int listW = totalW - gap - rightColW;
+
+                int leftGridRight = leftX + listW;
+
+                int rightX = leftX + listW + gap;
+
+
+
+                int masterW = 58;
+
+                int filtW = 112;
+
+                int brokenBtnW = 100;
+
+                int colBtnW = 84;
+
+                int expBtnW = 74;
+
+
+
+                int rightEdge = leftGridRight;
+
+                if (rightEdge < 540) rightEdge = 540;
+
+
+
+                g_State.rcMasterBrokenCheck = { rightEdge - masterW, btnY, rightEdge, btnY + btnH };
+
+                int filtX = g_State.rcMasterBrokenCheck.left - filtW - 5;
+
+                g_State.rcTab2FilterBtn = { filtX, btnY, filtX + filtW, btnY + btnH };
+
+                int brokenBtnX = filtX - brokenBtnW - 5;
+
+                g_State.rcTab2BtnSelectBroken = { brokenBtnX, btnY, brokenBtnX + brokenBtnW, btnY + btnH };
+
+                int colBtnX = brokenBtnX - colBtnW - 5;
+
+                g_State.rcBtnCollapseAll = { colBtnX, btnY, colBtnX + colBtnW, btnY + btnH };
+
+                int expBtnX = colBtnX - expBtnW - 5;
+
+                g_State.rcBtnExpandAll = { expBtnX, btnY, expBtnX + expBtnW, btnY + btnH };
+
+
+
+                // 1. [ ☵ Expand ] Button
+
+                COLORREF expBg = g_State.isHoverBtnExpandAll ? RGB(64, 28, 36) : RGB(40, 20, 26);
+
+                COLORREF expBdr = g_State.isHoverBtnExpandAll ? RGB(140, 58, 72) : RGB(88, 38, 48);
+
+                HBRUSH hbrExp = CreateSolidBrush(expBg); HPEN hpenExp = CreatePen(PS_SOLID, 1, expBdr);
+
+                SelectObject(hmemDC, hbrExp); SelectObject(hmemDC, hpenExp);
+
+                RoundRect(hmemDC, g_State.rcBtnExpandAll.left, g_State.rcBtnExpandAll.top, g_State.rcBtnExpandAll.right, g_State.rcBtnExpandAll.bottom, 4, 4);
+
+                DeleteObject(hbrExp); DeleteObject(hpenExp);
+
+                SelectObject(hmemDC, g_State.hFontSmall);
+
+                SetTextColor(hmemDC, textPrimary);
+
+                DrawTextW(hmemDC, L"☵ Expand", -1, &g_State.rcBtnExpandAll, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+
+
+                // 2. [ ☵ Collapse ] Button
+
+                COLORREF colBg = g_State.isHoverBtnCollapseAll ? RGB(64, 28, 36) : RGB(40, 20, 26);
+
+                COLORREF colBdr = g_State.isHoverBtnCollapseAll ? RGB(140, 58, 72) : RGB(88, 38, 48);
+
+                HBRUSH hbrCol = CreateSolidBrush(colBg); HPEN hpenCol = CreatePen(PS_SOLID, 1, colBdr);
+
+                SelectObject(hmemDC, hbrCol); SelectObject(hmemDC, hpenCol);
+
+                RoundRect(hmemDC, g_State.rcBtnCollapseAll.left, g_State.rcBtnCollapseAll.top, g_State.rcBtnCollapseAll.right, g_State.rcBtnCollapseAll.bottom, 4, 4);
+
+                DeleteObject(hbrCol); DeleteObject(hpenCol);
+
+                SelectObject(hmemDC, g_State.hFontSmall);
+
+                SetTextColor(hmemDC, textPrimary);
+
+                DrawTextW(hmemDC, L"☵ Collapse", -1, &g_State.rcBtnCollapseAll, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+
+
+                // 3. [ ⚠ Broken Only ] Toggle Button
+
+                bool isBrokenActive = (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenOnly);
+
+                COLORREF brkBg = isBrokenActive ? RGB(78, 22, 28) : (g_State.isHoverTab2BtnSelectBroken ? RGB(64, 28, 36) : RGB(40, 20, 26));
+
+                COLORREF brkBdr = isBrokenActive ? RGB(239, 68, 68) : (g_State.isHoverTab2BtnSelectBroken ? RGB(140, 58, 72) : RGB(88, 38, 48));
+
+                COLORREF brkTxt = isBrokenActive ? RGB(255, 160, 160) : textPrimary;
+
+                HBRUSH hbrBrk = CreateSolidBrush(brkBg); HPEN hpenBrk = CreatePen(PS_SOLID, 1, brkBdr);
+
+                SelectObject(hmemDC, hbrBrk); SelectObject(hmemDC, hpenBrk);
+
+                RoundRect(hmemDC, g_State.rcTab2BtnSelectBroken.left, g_State.rcTab2BtnSelectBroken.top, g_State.rcTab2BtnSelectBroken.right, g_State.rcTab2BtnSelectBroken.bottom, 4, 4);
+
+                DeleteObject(hbrBrk); DeleteObject(hpenBrk);
+
+                SelectObject(hmemDC, g_State.hFontSmall);
+
+                SetTextColor(hmemDC, brkTxt);
+
+                DrawTextW(hmemDC, L"⚠ Broken Only", -1, &g_State.rcTab2BtnSelectBroken, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+
+
+                // 4. [ All Consists ▼ ] Filter Dropdown Button
+
+                COLORREF filtBg = g_State.isHoverTab2FilterBtn ? RGB(64, 28, 36) : RGB(40, 20, 26);
+
+                COLORREF filtBorder = g_State.isHoverTab2FilterBtn ? RGB(140, 58, 72) : RGB(88, 38, 48);
+
+                HBRUSH hbrFilt = CreateSolidBrush(filtBg); HPEN hpenFilt = CreatePen(PS_SOLID, 1, filtBorder);
+
+                SelectObject(hmemDC, hbrFilt); SelectObject(hmemDC, hpenFilt);
+
+                RoundRect(hmemDC, g_State.rcTab2FilterBtn.left, g_State.rcTab2FilterBtn.top, g_State.rcTab2FilterBtn.right, g_State.rcTab2FilterBtn.bottom, 4, 4);
+
+                DeleteObject(hbrFilt); DeleteObject(hpenFilt);
+
+                const wchar_t* filtText = L"All Consists";
+
+                if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenAndEmpty) filtText = L"Broken + Empty";
+
+                else if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenOnly) filtText = L"Broken Only";
+
+                else if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::EmptyOnly) filtText = L"Empty Only";
+
+                SelectObject(hmemDC, g_State.hFontSmall);
+
+                SetTextColor(hmemDC, textPrimary);
+
+                RECT rcFiltTxt = { g_State.rcTab2FilterBtn.left + 8, btnY, g_State.rcTab2FilterBtn.right - 18, btnY + btnH };
+
+                DrawTextW(hmemDC, filtText, -1, &rcFiltTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                DrawSolidTriangle(hmemDC, g_State.rcTab2FilterBtn.right - 9, btnY + (btnH / 2), textSecondary, true, 3);
+
+
+
+                // 5. [✓ All] Master Checkbox Pill Button
+
+                COLORREF mBtnBg = g_State.isHoverMasterBroken ? RGB(64, 28, 36) : RGB(40, 20, 26);
+
+                COLORREF mBtnBdr = g_State.isHoverMasterBroken ? RGB(140, 58, 72) : RGB(88, 38, 48);
+
+                HBRUSH hbrMBtn = CreateSolidBrush(mBtnBg); HPEN hpMBtn = CreatePen(PS_SOLID, 1, mBtnBdr);
+
+                SelectObject(hmemDC, hbrMBtn); SelectObject(hmemDC, hpMBtn);
+
+                RoundRect(hmemDC, g_State.rcMasterBrokenCheck.left, g_State.rcMasterBrokenCheck.top, g_State.rcMasterBrokenCheck.right, g_State.rcMasterBrokenCheck.bottom, 4, 4);
+
+                DeleteObject(hbrMBtn); DeleteObject(hpMBtn);
+
+
+
+                int chkSz = 14;
+
+                int chkBoxX = g_State.rcMasterBrokenCheck.left + 7;
+
+                int chkBoxY = btnY + (btnH - chkSz) / 2;
+
+                RECT rcMChkBox = { chkBoxX, chkBoxY, chkBoxX + chkSz, chkBoxY + chkSz };
+
+                COLORREF chkBg = (isAllMaster || isIndeterminateMaster) ? accentCol : RGB(30, 16, 20);
+
+                COLORREF chkBdr = (isAllMaster || isIndeterminateMaster) ? accentCol : RGB(100, 48, 58);
+
+                HBRUSH hbrMChk = CreateSolidBrush(chkBg);
+
+                HPEN hpenMChk = CreatePen(PS_SOLID, 1, chkBdr);
+
+                hOldB = (HBRUSH)SelectObject(hmemDC, hbrMChk);
+
+                hOldP = (HPEN)SelectObject(hmemDC, hpenMChk);
+
+                RoundRect(hmemDC, rcMChkBox.left, rcMChkBox.top, rcMChkBox.right, rcMChkBox.bottom, 3, 3);
+
+                if (isAllMaster)
+
+                {
+
+                    SelectObject(hmemDC, g_State.hFontIcon ? g_State.hFontIcon : g_State.hFontSmall);
+
+                    SetTextColor(hmemDC, RGB(255, 255, 255));
+
+                    RECT rcGlyph = { rcMChkBox.left, rcMChkBox.top - 1, rcMChkBox.right, rcMChkBox.bottom };
+
+                    DrawTextW(hmemDC, L"\uE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                }
+
+                else if (isIndeterminateMaster)
+
+                {
+
+                    HBRUSH hbrInd = CreateSolidBrush(RGB(255, 255, 255));
+
+                    RECT rcInd = { rcMChkBox.left + 3, rcMChkBox.top + 6, rcMChkBox.right - 3, rcMChkBox.top + 8 };
+
+                    FillRect(hmemDC, &rcInd, hbrInd);
+
+                    DeleteObject(hbrInd);
+
+                }
+
+                SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP);
+
+                DeleteObject(hbrMChk); DeleteObject(hpenMChk);
+
+
+
+                SelectObject(hmemDC, g_State.hFontSmall);
+
+                SetTextColor(hmemDC, textPrimary);
+
+                RECT rcMText = { chkBoxX + chkSz + 5, btnY, g_State.rcMasterBrokenCheck.right - 4, btnY + btnH };
+
+                DrawTextW(hmemDC, L"All", -1, &rcMText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+
+
+                // Left Header Title: "Consists & Formations" (alone, so never truncates!)
+
+                RECT rcLeftTitle = { 46, toolbarY, expBtnX - 12, toolbarY + toolbarH };
+
+                SelectObject(hmemDC, g_State.hFontBold);
+
+                SetTextColor(hmemDC, textPrimary);
+
+                DrawTextW(hmemDC, L"Consists & Formations", -1, &rcLeftTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+
+
+                // Right Section: Consist & Unit Selection Summary in the previously empty area above the right panel!
+
+                RECT rcRightSummary = { rightX, toolbarY, rcClient.right - 16, toolbarY + toolbarH };
+
+                std::wstring sumUnits = std::to_wstring(totalConsists) + L" consist(s), " + std::to_wstring(totalUnits) + L" units \u2022 " + std::to_wstring(selectedUnits) + L" selected";
+
+                if (totalBrokenUnits > 0)
+
+                {
+
+                    sumUnits += L" (⚠ " + std::to_wstring(totalBrokenUnits) + L" missing)";
+
+                }
+
+
+
+                // Render Summary pill container on the right
+
+                SIZE rSz = { 0 };
+
+                SelectObject(hmemDC, g_State.hFontBold);
+
+                GetTextExtentPoint32W(hmemDC, sumUnits.c_str(), (int)sumUnits.length(), &rSz);
+
+                int rPillW = (int)rSz.cx + 20;
+
+                if (rPillW > (rcRightSummary.right - rcRightSummary.left)) rPillW = rcRightSummary.right - rcRightSummary.left;
+
+                RECT rcRPill = { rcRightSummary.right - rPillW, btnY, rcRightSummary.right, btnY + btnH };
+
+
+
+                HBRUSH hbrRPill = CreateSolidBrush(RGB(42, 20, 26));
+
+                HPEN hpenRPill = CreatePen(PS_SOLID, 1, RGB(92, 40, 50));
+
+                SelectObject(hmemDC, hbrRPill); SelectObject(hmemDC, hpenRPill);
+
+                RoundRect(hmemDC, rcRPill.left, rcRPill.top, rcRPill.right, rcRPill.bottom, 4, 4);
+
+                DeleteObject(hbrRPill); DeleteObject(hpenRPill);
+
+
+
+                SelectObject(hmemDC, g_State.hFontSmall);
+
+                SetTextColor(hmemDC, totalBrokenUnits > 0 ? RGB(255, 150, 150) : RGB(220, 225, 235));
+
+                DrawTextW(hmemDC, sumUnits.c_str(), -1, &rcRPill, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            }
 
 
             // =========================================================================
@@ -8417,17 +8887,21 @@ namespace
 
 
 
-                int cardBottom = rcClient.bottom - 68;
+                int cardBottom = rcClient.bottom - 60;
 
-                int totalW = rcClient.right - 60;
+                int leftX = 16;
 
-                int gap = 12;
+                int rightMargin = 16;
+
+                int gap = 8;
+
+                int totalW = rcClient.right - (leftX + rightMargin);
 
 
 
                 // 2-Area Distribution:
 
-                // Left Area (~66%): Collapsible Card-Row Matrix (CustomListControl)
+                // Left Area (~66%): Grid View Matrix (CustomListControl)
 
                 // Right Area (~34%): Batch Action Radios + Source Nodes
 
@@ -8439,15 +8913,13 @@ namespace
 
 
 
-                int leftX = 30;
-
                 int rightX = leftX + listW + gap;
 
 
 
-                RECT rcListPane  = { leftX, 126, leftX + listW, cardBottom };
+                RECT rcListPane  = { leftX, 118, leftX + listW, cardBottom };
 
-                RECT rcRightPane = { rightX, 126, rightX + rightColW, cardBottom };
+                RECT rcRightPane = { rightX, 118, rightX + rightColW, cardBottom };
 
 
 
@@ -8465,303 +8937,14 @@ namespace
 
 
 
-                // Sub-Toolbar / Header Bar above the List Control
-
-                int headerY = 126;
-
-                int headerH = 34;
-
-                RECT rcHeaderCard = { leftX, headerY, leftX + listW, headerY + headerH };
-
-
-
-                // Draw Header Card Background
-
-                HBRUSH hbrHdr = CreateSolidBrush(cardBgCol);
-
-                HPEN hpenHdr = CreatePen(PS_SOLID, 1, borderCol);
-
-                hOldB = (HBRUSH)SelectObject(hmemDC, hbrHdr);
-
-                hOldP = (HPEN)SelectObject(hmemDC, hpenHdr);
-
-                RoundRect(hmemDC, rcHeaderCard.left, rcHeaderCard.top, rcHeaderCard.right, rcHeaderCard.bottom, 6, 6);
-
-                SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP);
-
-                DeleteObject(hbrHdr); DeleteObject(hpenHdr);
-
-
-
-                // Count total / selected units for master checkbox
-
-                int totalUnits = 0;
-
-                int selectedUnits = 0;
-
-                int totalConsists = (int)g_State.brokenConsists.size();
-
-                for (const auto& bc : g_State.brokenConsists)
-
-                {
-
-                    if (bc.brokenUnits.empty())
-
-                    {
-
-                        totalUnits++;
-
-                        if (bc.isSelected) selectedUnits++;
-
-                    }
-
-                    else
-
-                    {
-
-                        for (const auto& bu : bc.brokenUnits)
-
-                        {
-
-                            totalUnits++;
-
-                            if (bc.isSelected && bu.isSelected) selectedUnits++;
-
-                        }
-
-                    }
-
-                }
-
-                bool isAllMaster = (totalUnits > 0 && selectedUnits == totalUnits);
-
-                bool isIndeterminateMaster = (selectedUnits > 0 && !isAllMaster);
-
-
-
-                // Sub-toolbar elements from right to left:
-
-                // 1. [✓ All] master checkbox
-
-                int btnH = 24;
-
-                int btnY = headerY + 5;
-
-                int masterW = 54;
-
-                g_State.rcMasterBrokenCheck = { rcHeaderCard.right - masterW - 8, btnY, rcHeaderCard.right - 8, btnY + btnH };
-
-                RECT rcMChkBox = { g_State.rcMasterBrokenCheck.left, btnY + 4, g_State.rcMasterBrokenCheck.left + 16, btnY + 20 };
-
-                HBRUSH hbrMChk = CreateSolidBrush((isAllMaster || isIndeterminateMaster) ? accentCol : RGB(40, 40, 44));
-
-                HPEN hpenMChk = CreatePen(PS_SOLID, 1, (isAllMaster || isIndeterminateMaster) ? accentCol : borderCol);
-
-                hOldB = (HBRUSH)SelectObject(hmemDC, hbrMChk);
-
-                hOldP = (HPEN)SelectObject(hmemDC, hpenMChk);
-
-                RoundRect(hmemDC, rcMChkBox.left, rcMChkBox.top, rcMChkBox.right, rcMChkBox.bottom, 4, 4);
-
-                if (isAllMaster)
-
-                {
-
-                    SelectObject(hmemDC, g_State.hFontIcon);
-
-                    SetTextColor(hmemDC, RGB(255, 255, 255));
-
-                    RECT rcGlyph = { rcMChkBox.left, rcMChkBox.top - 1, rcMChkBox.right, rcMChkBox.bottom };
-
-                    DrawTextW(hmemDC, L"\xE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                }
-
-                else if (isIndeterminateMaster)
-
-                {
-
-                    HBRUSH hbrInd = CreateSolidBrush(RGB(255, 255, 255));
-
-                    RECT rcInd = { rcMChkBox.left + 3, rcMChkBox.top + 7, rcMChkBox.right - 3, rcMChkBox.top + 9 };
-
-                    FillRect(hmemDC, &rcInd, hbrInd);
-
-                    DeleteObject(hbrInd);
-
-                }
-
-                SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP);
-
-                DeleteObject(hbrMChk); DeleteObject(hpenMChk);
-
-
-
-                SelectObject(hmemDC, g_State.hFontMain);
-
-                SetTextColor(hmemDC, textPrimary);
-
-                RECT rcMText = { g_State.rcMasterBrokenCheck.left + 20, btnY, g_State.rcMasterBrokenCheck.right, btnY + btnH };
-
-                DrawTextW(hmemDC, L"All", -1, &rcMText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-
-
-                // 2. Filter Dropdown Button: [ All Consists ▼ ]
-
-                int filtW = 120;
-
-                int filtX = g_State.rcMasterBrokenCheck.left - filtW - 8;
-
-                g_State.rcTab2FilterBtn = { filtX, btnY, filtX + filtW, btnY + btnH };
-
-                COLORREF filtBg = g_State.isHoverTab2FilterBtn ? RGB(45, 45, 52) : RGB(32, 32, 36);
-
-                COLORREF filtBorder = g_State.isHoverTab2FilterBtn ? RGB(90, 90, 100) : borderCol;
-
-                HBRUSH hbrFilt = CreateSolidBrush(filtBg);
-
-                HPEN hpenFilt = CreatePen(PS_SOLID, 1, filtBorder);
-
-                SelectObject(hmemDC, hbrFilt); SelectObject(hmemDC, hpenFilt);
-
-                RoundRect(hmemDC, g_State.rcTab2FilterBtn.left, g_State.rcTab2FilterBtn.top, g_State.rcTab2FilterBtn.right, g_State.rcTab2FilterBtn.bottom, 4, 4);
-
-                DeleteObject(hbrFilt); DeleteObject(hpenFilt);
-
-
-
-                const wchar_t* filtText = L"All Consists";
-
-                if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenAndEmpty) filtText = L"Broken + Empty";
-
-                else if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenOnly) filtText = L"Broken Only";
-
-                else if (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::EmptyOnly) filtText = L"Empty Only";
-
-
-
-                SelectObject(hmemDC, g_State.hFontSmall);
-
-                SetTextColor(hmemDC, textPrimary);
-
-                RECT rcFiltTxt = { g_State.rcTab2FilterBtn.left + 8, btnY, g_State.rcTab2FilterBtn.right - 18, btnY + btnH };
-
-                DrawTextW(hmemDC, filtText, -1, &rcFiltTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                DrawSolidTriangle(hmemDC, g_State.rcTab2FilterBtn.right - 9, btnY + (btnH / 2), textSecondary, true, 3);
-
-
-
-                // 3. Quick Action: [ ⚠ Broken Only ]
-
-                int brokenBtnW = 105;
-
-                int brokenBtnX = filtX - brokenBtnW - 6;
-
-                g_State.rcTab2BtnSelectBroken = { brokenBtnX, btnY, brokenBtnX + brokenBtnW, btnY + btnH };
-
-                bool isBrokenActive = (g_State.tab2Filter == MutatorDlgState::Tab2FilterMode::BrokenOnly);
-
-                COLORREF brkBg = isBrokenActive ? RGB(60, 24, 28) : (g_State.isHoverTab2BtnSelectBroken ? RGB(45, 45, 52) : RGB(32, 32, 36));
-
-                COLORREF brkBdr = isBrokenActive ? RGB(239, 68, 68) : (g_State.isHoverTab2BtnSelectBroken ? RGB(90, 90, 100) : borderCol);
-
-                COLORREF brkTxt = isBrokenActive ? RGB(255, 140, 140) : textPrimary;
-
-                HBRUSH hbrBrk = CreateSolidBrush(brkBg); HPEN hpenBrk = CreatePen(PS_SOLID, 1, brkBdr);
-
-                SelectObject(hmemDC, hbrBrk); SelectObject(hmemDC, hpenBrk);
-
-                RoundRect(hmemDC, g_State.rcTab2BtnSelectBroken.left, g_State.rcTab2BtnSelectBroken.top, g_State.rcTab2BtnSelectBroken.right, g_State.rcTab2BtnSelectBroken.bottom, 4, 4);
-
-                DeleteObject(hbrBrk); DeleteObject(hpenBrk);
-
-                SelectObject(hmemDC, g_State.hFontSmall);
-
-                SetTextColor(hmemDC, brkTxt);
-
-                DrawTextW(hmemDC, L"⚠ Broken Only", -1, &g_State.rcTab2BtnSelectBroken, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-
-
-                // 4. [ ☵ Collapse All ]
-
-                int colBtnW = 90;
-
-                int colBtnX = brokenBtnX - colBtnW - 6;
-
-                g_State.rcBtnCollapseAll = { colBtnX, btnY, colBtnX + colBtnW, btnY + btnH };
-
-                COLORREF colBg = g_State.isHoverBtnCollapseAll ? RGB(45, 45, 52) : RGB(32, 32, 36);
-
-                COLORREF colBdr = g_State.isHoverBtnCollapseAll ? RGB(90, 90, 100) : borderCol;
-
-                HBRUSH hbrCol = CreateSolidBrush(colBg); HPEN hpenCol = CreatePen(PS_SOLID, 1, colBdr);
-
-                SelectObject(hmemDC, hbrCol); SelectObject(hmemDC, hpenCol);
-
-                RoundRect(hmemDC, g_State.rcBtnCollapseAll.left, g_State.rcBtnCollapseAll.top, g_State.rcBtnCollapseAll.right, g_State.rcBtnCollapseAll.bottom, 4, 4);
-
-                DeleteObject(hbrCol); DeleteObject(hpenCol);
-
-                SelectObject(hmemDC, g_State.hFontSmall);
-
-                SetTextColor(hmemDC, textPrimary);
-
-                DrawTextW(hmemDC, L"☵ Collapse", -1, &g_State.rcBtnCollapseAll, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-
-
-                // 5. [ ☵ Expand All ]
-
-                int expBtnW = 80;
-
-                int expBtnX = colBtnX - expBtnW - 6;
-
-                g_State.rcBtnExpandAll = { expBtnX, btnY, expBtnX + expBtnW, btnY + btnH };
-
-                COLORREF expBg = g_State.isHoverBtnExpandAll ? RGB(45, 45, 52) : RGB(32, 32, 36);
-
-                COLORREF expBdr = g_State.isHoverBtnExpandAll ? RGB(90, 90, 100) : borderCol;
-
-                HBRUSH hbrExp = CreateSolidBrush(expBg); HPEN hpenExp = CreatePen(PS_SOLID, 1, expBdr);
-
-                SelectObject(hmemDC, hbrExp); SelectObject(hmemDC, hpenExp);
-
-                RoundRect(hmemDC, g_State.rcBtnExpandAll.left, g_State.rcBtnExpandAll.top, g_State.rcBtnExpandAll.right, g_State.rcBtnExpandAll.bottom, 4, 4);
-
-                DeleteObject(hbrExp); DeleteObject(hpenExp);
-
-                SelectObject(hmemDC, g_State.hFontSmall);
-
-                SetTextColor(hmemDC, textPrimary);
-
-                DrawTextW(hmemDC, L"☵ Expand", -1, &g_State.rcBtnExpandAll, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-
-
-                // Left Header Title: "Consists & Formations (N consists, M units)"
-
-                RECT rcLeftTitle = { rcHeaderCard.left + 10, btnY, expBtnX - 8, btnY + btnH };
-
-                SelectObject(hmemDC, g_State.hFontBold);
-
-                SetTextColor(hmemDC, textPrimary);
-
-                std::wstring titleStr = L"Consists & Formations (" + std::to_wstring(totalConsists) + L" consists, " + std::to_wstring(totalUnits) + L" units)";
-
-                DrawTextW(hmemDC, titleStr.c_str(), -1, &rcLeftTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-
-
                 // Empty state if brokenConsists is empty
 
                 if (g_State.brokenConsists.empty())
 
                 {
 
-                    RECT rcEmptyArea = { leftX, 164, leftX + listW, cardBottom };
+                    RECT rcEmptyArea = { leftX, 118, leftX + listW, cardBottom };
+
 
                     HBRUSH hbrEm = CreateSolidBrush(cardBgCol);
 
@@ -9907,7 +10090,7 @@ void ShowPoolMutatorDialog(
 
 
 
-    int dlgW = 980;
+    int dlgW = 1080;
 
     int dlgH = 700;
 

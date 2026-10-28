@@ -720,11 +720,12 @@ static void RenderPreviewFrame(UnitPreviewState* pState)
 
             for (const auto& pSub : pState->compositeStock.subShapes)
             {
-                if (!pSub || !pSub->isLoaded || !pSub->shape.isValid || !pSub->shape.pVertexBuffer || !pSub->shape.pIndexBuffer) continue;
+                if (!pSub || !pSub->isLoaded || !pSub->shape.isValid || !pSub->shape.pVertexBuffer || !pSub->shape.pIndexBuffer || pSub->shape.indices.empty()) continue;
 
                 bool hasMatching = false;
                 for (const auto& sm : pSub->shape.subMeshes)
                 {
+                    if (sm.indexCount == 0 || (sm.startIndex + sm.indexCount > pSub->shape.indices.size())) continue;
                     if (passMode == 0 && !sm.isTransparent) { hasMatching = true; break; }
                     if (passMode == 1 && (sm.isTransparent && sm.isAlphaTest)) { hasMatching = true; break; }
                     if (passMode == 2 && (sm.isTransparent && !sm.isAlphaTest)) { hasMatching = true; break; }
@@ -762,6 +763,7 @@ static void RenderPreviewFrame(UnitPreviewState* pState)
 
                 for (const auto& sm : pSub->shape.subMeshes)
                 {
+                    if (sm.indexCount == 0 || (sm.startIndex + sm.indexCount > pSub->shape.indices.size())) continue;
                     bool match = (passMode == 0 && !sm.isTransparent) ||
                                  (passMode == 1 && sm.isTransparent && sm.isAlphaTest) ||
                                  (passMode == 2 && sm.isTransparent && !sm.isAlphaTest);

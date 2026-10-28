@@ -1705,68 +1705,74 @@ static void RenderViewport(VisualStudioState* pState)
             pState->pD3DContext->VSSetConstantBuffers(1, 1, &pState->pBoneConstantBuffer);
         }
 
-        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
-        pState->pD3DContext->IASetInputLayout(pState->pShapeLayout);
-        UINT stride = sizeof(GPUVertex);
-        UINT offset = 0;
-        pState->pD3DContext->IASetVertexBuffers(0, 1, &pState->currentShape.pVertexBuffer, &stride, &offset);
-        pState->pD3DContext->IASetIndexBuffer(pState->currentShape.pIndexBuffer, DXGI_FORMAT_R32_UINT, 0);
-        pState->pD3DContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-        pState->pD3DContext->VSSetShader(pState->pShapeVS, NULL, 0);
-        pState->pD3DContext->PSSetShader(pState->pShapePS, NULL, 0);
-
-        // Pass 1: Opaque SubMeshes (Depth Write Enabled)
-        pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateWrite, 0);
-        pState->pD3DContext->OMSetBlendState(pState->pBlendStateOpaque, NULL, 0xFFFFFFFF);
-        cb.AlphaCutoff = 0.0f;
-        cb.GlassTintAlpha = 0.0f;
-        pState->pD3DContext->UpdateSubresource(pState->pConstantBuffer, 0, NULL, &cb, 0, 0);
-        for (const auto& subMesh : pState->currentShape.subMeshes)
+        if (pState->currentShape.pVertexBuffer && pState->currentShape.pIndexBuffer && !pState->currentShape.indices.empty())
         {
-            if (!subMesh.isTransparent)
-            {
-                ID3D11ShaderResourceView* srv = subMesh.pSRV ? subMesh.pSRV : pState->pTextureLoader->GetDefaultTexture();
-                pState->pD3DContext->PSSetShaderResources(0, 1, &srv);
-                pState->pD3DContext->DrawIndexed(subMesh.indexCount, subMesh.startIndex, 0);
-            }
-        }
+            pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
+            pState->pD3DContext->IASetInputLayout(pState->pShapeLayout);
+            UINT stride = sizeof(GPUVertex);
+            UINT offset = 0;
+            pState->pD3DContext->IASetVertexBuffers(0, 1, &pState->currentShape.pVertexBuffer, &stride, &offset);
+            pState->pD3DContext->IASetIndexBuffer(pState->currentShape.pIndexBuffer, DXGI_FORMAT_R32_UINT, 0);
+            pState->pD3DContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-        // Pass 2: Alpha-Test Cutout SubMeshes (Open Rails: Depth Write Enabled, BlendState = Alpha, AlphaCutoff = 10/255)
-        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
-        pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateWrite, 0);
-        pState->pD3DContext->OMSetBlendState(pState->pBlendStateAlpha, NULL, 0xFFFFFFFF);
-        cb.AlphaCutoff = 0.0392f;
-        cb.GlassTintAlpha = 0.0f;
-        pState->pD3DContext->UpdateSubresource(pState->pConstantBuffer, 0, NULL, &cb, 0, 0);
-        for (const auto& subMesh : pState->currentShape.subMeshes)
-        {
-            if (subMesh.isTransparent && subMesh.isAlphaTest)
-            {
-                ID3D11ShaderResourceView* srv = subMesh.pSRV ? subMesh.pSRV : pState->pTextureLoader->GetDefaultTexture();
-                pState->pD3DContext->PSSetShaderResources(0, 1, &srv);
-                pState->pD3DContext->DrawIndexed(subMesh.indexCount, subMesh.startIndex, 0);
-            }
-        }
-        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
+            pState->pD3DContext->VSSetShader(pState->pShapeVS, NULL, 0);
+            pState->pD3DContext->PSSetShader(pState->pShapePS, NULL, 0);
 
-        // Pass 3: Smooth Alpha-Blended Decals, Glass & Transparent SubMeshes (Depth Read-Only, Blend Alpha)
-        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
-        pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateReadOnly, 0);
-        pState->pD3DContext->OMSetBlendState(pState->pBlendStateAlpha, NULL, 0xFFFFFFFF);
-        cb.AlphaCutoff = 0.005f;
-        cb.GlassTintAlpha = 0.0f;
-        pState->pD3DContext->UpdateSubresource(pState->pConstantBuffer, 0, NULL, &cb, 0, 0);
-        for (const auto& subMesh : pState->currentShape.subMeshes)
-        {
-            if (subMesh.isTransparent && !subMesh.isAlphaTest)
+            // Pass 1: Opaque SubMeshes (Depth Write Enabled)
+            pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateWrite, 0);
+            pState->pD3DContext->OMSetBlendState(pState->pBlendStateOpaque, NULL, 0xFFFFFFFF);
+            cb.AlphaCutoff = 0.0f;
+            cb.GlassTintAlpha = 0.0f;
+            pState->pD3DContext->UpdateSubresource(pState->pConstantBuffer, 0, NULL, &cb, 0, 0);
+            for (const auto& subMesh : pState->currentShape.subMeshes)
             {
-                ID3D11ShaderResourceView* srv = subMesh.pSRV ? subMesh.pSRV : pState->pTextureLoader->GetDefaultTexture();
-                pState->pD3DContext->PSSetShaderResources(0, 1, &srv);
-                pState->pD3DContext->DrawIndexed(subMesh.indexCount, subMesh.startIndex, 0);
+                if (subMesh.indexCount == 0 || (subMesh.startIndex + subMesh.indexCount > pState->currentShape.indices.size())) continue;
+                if (!subMesh.isTransparent)
+                {
+                    ID3D11ShaderResourceView* srv = subMesh.pSRV ? subMesh.pSRV : pState->pTextureLoader->GetDefaultTexture();
+                    pState->pD3DContext->PSSetShaderResources(0, 1, &srv);
+                    pState->pD3DContext->DrawIndexed(subMesh.indexCount, subMesh.startIndex, 0);
+                }
             }
+
+            // Pass 2: Alpha-Test Cutout SubMeshes (Open Rails: Depth Write Enabled, BlendState = Alpha, AlphaCutoff = 10/255)
+            pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
+            pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateWrite, 0);
+            pState->pD3DContext->OMSetBlendState(pState->pBlendStateAlpha, NULL, 0xFFFFFFFF);
+            cb.AlphaCutoff = 0.0392f;
+            cb.GlassTintAlpha = 0.0f;
+            pState->pD3DContext->UpdateSubresource(pState->pConstantBuffer, 0, NULL, &cb, 0, 0);
+            for (const auto& subMesh : pState->currentShape.subMeshes)
+            {
+                if (subMesh.indexCount == 0 || (subMesh.startIndex + subMesh.indexCount > pState->currentShape.indices.size())) continue;
+                if (subMesh.isTransparent && subMesh.isAlphaTest)
+                {
+                    ID3D11ShaderResourceView* srv = subMesh.pSRV ? subMesh.pSRV : pState->pTextureLoader->GetDefaultTexture();
+                    pState->pD3DContext->PSSetShaderResources(0, 1, &srv);
+                    pState->pD3DContext->DrawIndexed(subMesh.indexCount, subMesh.startIndex, 0);
+                }
+            }
+            pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
+
+            // Pass 3: Smooth Alpha-Blended Decals, Glass & Transparent SubMeshes (Depth Read-Only, Blend Alpha)
+            pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
+            pState->pD3DContext->OMSetDepthStencilState(pState->pDepthStencilStateReadOnly, 0);
+            pState->pD3DContext->OMSetBlendState(pState->pBlendStateAlpha, NULL, 0xFFFFFFFF);
+            cb.AlphaCutoff = 0.005f;
+            cb.GlassTintAlpha = 0.0f;
+            pState->pD3DContext->UpdateSubresource(pState->pConstantBuffer, 0, NULL, &cb, 0, 0);
+            for (const auto& subMesh : pState->currentShape.subMeshes)
+            {
+                if (subMesh.indexCount == 0 || (subMesh.startIndex + subMesh.indexCount > pState->currentShape.indices.size())) continue;
+                if (subMesh.isTransparent && !subMesh.isAlphaTest)
+                {
+                    ID3D11ShaderResourceView* srv = subMesh.pSRV ? subMesh.pSRV : pState->pTextureLoader->GetDefaultTexture();
+                    pState->pD3DContext->PSSetShaderResources(0, 1, &srv);
+                    pState->pD3DContext->DrawIndexed(subMesh.indexCount, subMesh.startIndex, 0);
+                }
+            }
+            pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
         }
-        pState->pD3DContext->RSSetState(pState->showWireframe ? pState->pRasterStateWireframe : pState->pRasterStateSolid);
     }
     // 3. Render Composite Rolling Stock (Tab 1: Rolling Stock Inspector - Main Body + ORTS Freight Animations)
     else if (pState->activeTab == 1 && pState->compositeStock.isValid)
@@ -1782,12 +1788,13 @@ static void RenderViewport(VisualStudioState* pState)
         {
             for (const auto& sub : pState->compositeStock.subShapes)
             {
-                if (!sub->isLoaded || !sub->shape.isValid || !sub->shape.pVertexBuffer || !sub->shape.pIndexBuffer) continue;
+                if (!sub || !sub->isLoaded || !sub->shape.isValid || !sub->shape.pVertexBuffer || !sub->shape.pIndexBuffer || sub->shape.indices.empty()) continue;
 
                 // Check if this subshape contains any submeshes matching this pass
                 bool hasMatching = false;
                 for (const auto& sm : sub->shape.subMeshes)
                 {
+                    if (sm.indexCount == 0 || (sm.startIndex + sm.indexCount > sub->shape.indices.size())) continue;
                     if (passMode == 0 && !sm.isTransparent) { hasMatching = true; break; }
                     if (passMode == 1 && (sm.isTransparent && sm.isAlphaTest)) { hasMatching = true; break; }
                     if (passMode == 2 && (sm.isTransparent && !sm.isAlphaTest)) { hasMatching = true; break; }
@@ -1837,6 +1844,7 @@ static void RenderViewport(VisualStudioState* pState)
 
                 for (const auto& sm : sub->shape.subMeshes)
                 {
+                    if (sm.indexCount == 0 || (sm.startIndex + sm.indexCount > sub->shape.indices.size())) continue;
                     bool match = (passMode == 0 && !sm.isTransparent) ||
                                  (passMode == 1 && sm.isTransparent && sm.isAlphaTest) ||
                                  (passMode == 2 && sm.isTransparent && !sm.isAlphaTest);

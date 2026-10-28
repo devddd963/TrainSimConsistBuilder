@@ -177,29 +177,33 @@ namespace FastZlib
             capacity = (initCap > 65536) ? initCap : 65536;
             data = (uint8_t*)std::malloc(capacity);
             size = 0;
+            if (!data) capacity = 0;
         }
         ~FastBuffer() {
             if (data) std::free(data);
         }
 
-        inline void EnsureCapacity(size_t additional) {
+        inline bool EnsureCapacity(size_t additional) {
+            if (!data) return false;
             if (size + additional > capacity) {
                 size_t newCap = capacity * 2 + additional + 65536;
                 uint8_t* newData = (uint8_t*)std::realloc(data, newCap);
-                if (newData) {
-                    data = newData;
-                    capacity = newCap;
-                }
+                if (!newData) return false;
+                data = newData;
+                capacity = newCap;
             }
+            return data != nullptr;
         }
 
-        inline void AppendByte(uint8_t b) {
-            if (size >= capacity) EnsureCapacity(1);
+        inline bool AppendByte(uint8_t b) {
+            if (!EnsureCapacity(1)) return false;
             data[size++] = b;
+            return true;
         }
 
-        inline void AppendMatch(size_t dist, size_t len) {
-            EnsureCapacity(len);
+        inline bool AppendMatch(size_t dist, size_t len) {
+            if (!EnsureCapacity(len)) return false;
+            if (dist > size) return false;
             size_t start = size - dist;
             uint8_t* pDst = data + size;
             const uint8_t* pSrc = data + start;
@@ -211,6 +215,7 @@ namespace FastZlib
                 }
             }
             size += len;
+            return true;
         }
     };
 
@@ -221,7 +226,7 @@ namespace FastZlib
             if (sym == 256) break;
 
             if (sym < 256) {
-                out.AppendByte((uint8_t)sym);
+                if (!out.AppendByte((uint8_t)sym)) return false;
             } else {
                 sym -= 257;
                 int len = kLenBases[sym] + (int)bs.Get(kLenExtra[sym]);
@@ -230,7 +235,7 @@ namespace FastZlib
                 int dist = kDistBases[distSym] + (int)bs.Get(kDistExtra[distSym]);
 
                 if (dist <= 0 || dist > (int)out.size) return false;
-                out.AppendMatch((size_t)dist, (size_t)len);
+                if (!out.AppendMatch((size_t)dist, (size_t)len)) return false;
             }
         }
         return true;
@@ -249,6 +254,7 @@ namespace FastZlib
 
         bool isFinal = false;
         FastBuffer buf(srcLen * 4);
+        if (!buf.data) return false;
 
         while (!isFinal) {
             bs.Refill();
@@ -264,12 +270,12 @@ namespace FastZlib
                 uint16_t len = (uint16_t)bs.Get(16);
                 uint16_t nlen = (uint16_t)bs.Get(16);
 
-                buf.EnsureCapacity(len);
+                if (!buf.EnsureCapacity(len)) return false;
                 for (uint16_t i = 0; i < len; ++i) {
                     if (bs.bitsInBuf >= 8) {
-                        buf.AppendByte((uint8_t)bs.Get(8));
+                        if (!buf.AppendByte((uint8_t)bs.Get(8))) return false;
                     } else if (bs.bytePos < bs.srcLen) {
-                        buf.AppendByte(bs.src[bs.bytePos++]);
+                        if (!buf.AppendByte(bs.src[bs.bytePos++])) return false;
                     } else {
                         return false;
                     }

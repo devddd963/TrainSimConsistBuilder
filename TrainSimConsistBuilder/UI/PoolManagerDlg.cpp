@@ -3259,6 +3259,11 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
                 {
                 case ClickableControl::COMBO_PRESET_CLICK:
                 {
+                    if (CustomDropDownMenu::WasClosedByAnchor(500))
+                    {
+                        break;
+                    }
+
                     std::vector<DropDownItem> items;
                     items.push_back(DropDownItem::Header(L"PRESETS"));
 
@@ -3600,6 +3605,11 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
                 case ClickableControl::BTN_GROUP_CATEGORY_EDIT:
                 {
+                    if (CustomDropDownMenu::WasClosedByAnchor(500))
+                    {
+                        break;
+                    }
+
                     int gIdx = ctrl.poolIdx;
                     if (gIdx >= 0 && gIdx < (int)PoolManager::g_ReplacementGroupsCache.size())
                     {

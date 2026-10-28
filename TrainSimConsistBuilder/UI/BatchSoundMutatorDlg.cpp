@@ -2434,6 +2434,24 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         return 0;
     }
 
+    case WM_GETMINMAXINFO:
+    {
+        MINMAXINFO* pMMI = (MINMAXINFO*)lParam;
+        HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+        if (hMonitor)
+        {
+            MONITORINFO mi = { sizeof(mi) };
+            if (GetMonitorInfoW(hMonitor, &mi))
+            {
+                pMMI->ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
+                pMMI->ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
+                pMMI->ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
+                pMMI->ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
+            }
+        }
+        return 0;
+    }
+
     case WM_NCCALCSIZE:
     {
         if (wParam)
@@ -3940,7 +3958,7 @@ void ShowBatchSoundMutatorDialog(HWND hWndParent, const std::wstring& basePath, 
     {
         WNDCLASSEXW wc = { 0 };
         wc.cbSize = sizeof(wc);
-        wc.style = CS_HREDRAW | CS_VREDRAW;
+        wc.style = CS_DBLCLKS;
         wc.lpfnWndProc = BatchSoundMutatorWndProc;
         wc.hInstance = GetModuleHandleW(NULL);
         wc.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107 /* IDI_TRAINSIMCONSISTBUILDER */));
@@ -3981,7 +3999,7 @@ void ShowBatchSoundMutatorDialog(HWND hWndParent, const std::wstring& basePath, 
         WS_EX_APPWINDOW,
         BATCH_SOUND_WNDCLASS,
         L"Sound Studio - Presets & Batch Mutator",
-        WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN | WS_THICKFRAME | WS_MINIMIZEBOX,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, w, h,
         hWndParent, NULL, GetModuleHandleW(NULL), pState
     );

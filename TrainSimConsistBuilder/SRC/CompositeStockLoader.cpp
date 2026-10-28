@@ -271,6 +271,12 @@ namespace CompositeStockLoader
                 if (FAILED(hr)) continue;
             }
 
+            if (!sub->shape.pVertexBuffer || !sub->shape.pIndexBuffer)
+            {
+                sub->isLoaded = false;
+                continue;
+            }
+
             // 3. Initialize Sub-Shape Texture Loader & Preload Textures (Shared Cache)
             TextureLoader* pTL = pSharedTextureLoader;
             if (!pTL)

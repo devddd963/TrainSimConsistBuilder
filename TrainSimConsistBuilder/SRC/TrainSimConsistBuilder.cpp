@@ -855,6 +855,11 @@ void SwitchActiveConsistTab(HWND hWnd, int newSel)
         RECT rc;
         GetClientRect(hWnd, &rc);
         SendMessage(hWnd, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
+
+        if (g_hStockHeader && IsWindow(g_hStockHeader))
+        {
+            InvalidateRect(g_hStockHeader, NULL, TRUE);
+        }
     }
 }
         // 0 = MAIN CONSISTS, 1 = ACTIVITY CONSISTS
@@ -3089,6 +3094,9 @@ static RECT GetStockDeckTabRect(const RECT& rcClient, int tabIndex)
 
 static int HitTestStockDeckTab(HWND hWnd, POINT pt)
 {
+    // Sound tab is strictly shown and switchable when on Sound Studio tab (g_ActiveTab == 2)
+    if (g_ActiveTab != 2) return -1;
+
     RECT rcClient;
     GetClientRect(hWnd, &rcClient);
     for (int t = 0; t < 2; ++t)
@@ -3132,6 +3140,11 @@ static int HitTestStockModeBtn(HWND hWnd, POINT pt)
 
 LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
+    if (g_ActiveTab != 2 && g_StockDeckTab != STOCK_DECK_ROLLING_STOCK)
+    {
+        g_StockDeckTab = STOCK_DECK_ROLLING_STOCK;
+    }
+
     switch (uMsg)
     {
     case WM_NCHITTEST:
@@ -3144,8 +3157,8 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         RECT rcClient;
         GetClientRect(hWnd, &rcClient);
 
-        // Check if cursor is over one of the bottom deck tabs
-        if (HitTestStockDeckTab(hWnd, ptClient) >= 0)
+        // Check if cursor is over one of the bottom deck tabs (strictly switchable in Sound Studio)
+        if (g_ActiveTab == 2 && HitTestStockDeckTab(hWnd, ptClient) >= 0)
         {
             return HTCLIENT;
         }
@@ -3169,7 +3182,9 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         POINT pt;
         GetCursorPos(&pt);
         ScreenToClient(hWnd, &pt);
-        if (HitTestStockDeckTab(hWnd, pt) >= 0 ||
+        int tabHit = HitTestStockDeckTab(hWnd, pt);
+        bool isClickableTab = (g_ActiveTab == 2 && tabHit >= 0 && tabHit != (int)g_StockDeckTab);
+        if (isClickableTab ||
             (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK && HitTestStockModeBtn(hWnd, pt) >= 0))
         {
             SetCursor(LoadCursor(NULL, IDC_HAND));
@@ -3213,7 +3228,7 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         POINT pt = { (int)(short)LOWORD(lParam), (int)(short)HIWORD(lParam) };
 
         int tabHit = HitTestStockDeckTab(hWnd, pt);
-        if (tabHit >= 0)
+        if (g_ActiveTab == 2 && tabHit >= 0)
         {
             if (tabHit != (int)g_StockDeckTab)
             {
@@ -3320,12 +3335,14 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         SetBkMode(hMemDC, TRANSPARENT);
 
         // 1. Draw Stock Deck Tabs on the left: [ Rolling Stock ] and [ Sound Files (.sms) ]
+        // The Sound tab is shown strictly when user is on Sound Studio tab (g_ActiveTab == 2).
+        int numTabs = (g_ActiveTab == 2) ? 2 : 1;
         const wchar_t* deckTabLabels[2] = { L"Rolling Stock", L"Sound Files (.sms)" };
-        for (int t = 0; t < 2; ++t)
+        for (int t = 0; t < numTabs; ++t)
         {
             RECT rcTab = GetStockDeckTabRect(rc, t);
             bool isCurrent = (g_StockDeckTab == (StockDeckTab)t);
-            bool isHovered = (s_hoverStockDeckTab == t);
+            bool isHovered = (g_ActiveTab == 2 && s_hoverStockDeckTab == t);
 
             COLORREF bgPill = isCurrent ? RGB(0, 120, 215) : (isHovered ? RGB(60, 60, 68) : RGB(40, 40, 46));
             COLORREF borderPill = isCurrent ? RGB(60, 160, 255) : (isHovered ? RGB(85, 85, 95) : RGB(58, 58, 65));
@@ -3348,7 +3365,8 @@ LRESULT CALLBACK StockHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LP
         }
 
         // 2. Summary text next to tabs
-        int summaryStartX = 8 + 115 + 6 + 140 + 12;
+        int tabTotalW = (numTabs == 2) ? (8 + 115 + 6 + 140) : (8 + 115);
+        int summaryStartX = tabTotalW + 12;
         RECT rcBtnSingle = GetStockModeBtnRect(rc, 0);
         int summaryEndX = (g_StockDeckTab == STOCK_DECK_ROLLING_STOCK) ? (rcBtnSingle.left - 10) : (rc.right - 10);
         RECT rcSummary = { summaryStartX, 0, summaryEndX, rc.bottom };
@@ -9200,6 +9218,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         RECT rc;
         GetClientRect(hWnd, &rc);
         SendMessage(hWnd, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
+
+        if (g_hStockHeader && IsWindow(g_hStockHeader))
+        {
+            InvalidateRect(g_hStockHeader, NULL, TRUE);
+        }
         InvalidateRect(hWnd, NULL, TRUE);
         return 0;
     }
@@ -9796,11 +9819,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
         if (g_hVisualConsistView)
         {
-            if (isFloating)
-            {
-                ShowWindow(g_hVisualConsistView, SW_HIDE);
-            }
-            else
+            if (!isFloating)
             {
                 int visY = paneY + paneHeight - visH;
                 SetWindowPos(g_hVisualConsistView, NULL, wLeftPane + 9, visY, wEditor, visH, SWP_NOZORDER | SWP_SHOWWINDOW);
@@ -11519,6 +11538,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     }
 
     case WM_DESTROY:
+        if (g_hVisualConsistView && IsWindow(g_hVisualConsistView))
+        {
+            DestroyWindow(g_hVisualConsistView);
+            g_hVisualConsistView = NULL;
+        }
         g_bCancelScan = TRUE;
         CancelStockScan(g_hStockScanThread);
         CancelSoundScan(g_hSoundScanThread);

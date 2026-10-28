@@ -1426,6 +1426,24 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
         return 0;
     }
 
+    case WM_GETMINMAXINFO:
+    {
+        MINMAXINFO* pMMI = (MINMAXINFO*)lParam;
+        HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+        if (hMonitor)
+        {
+            MONITORINFO mi = { sizeof(mi) };
+            if (GetMonitorInfoW(hMonitor, &mi))
+            {
+                pMMI->ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
+                pMMI->ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
+                pMMI->ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
+                pMMI->ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
+            }
+        }
+        return 0;
+    }
+
     case WM_NCCALCSIZE:
     {
         if (wParam)
@@ -3378,7 +3396,7 @@ void ShowSmsStreamMutatorDialog(
     if (!s_registered)
     {
         WNDCLASSEXW wcex = { sizeof(wcex) };
-        wcex.style = CS_HREDRAW | CS_VREDRAW;
+        wcex.style = CS_DBLCLKS;
         wcex.lpfnWndProc = SmsStreamMutatorProc;
         wcex.hInstance = GetModuleHandleW(NULL);
         wcex.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(107 /* IDI_TRAINSIMCONSISTBUILDER */));
@@ -3437,7 +3455,7 @@ void ShowSmsStreamMutatorDialog(
         WS_EX_APPWINDOW,
         SMS_STREAM_MUTATOR_WNDCLASS,
         L"SMS Stream Mutator & Presets Library",
-        WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN | WS_THICKFRAME | WS_MINIMIZEBOX,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         x, y, w, h,
         hWndParent, NULL, GetModuleHandleW(NULL), pState
     );

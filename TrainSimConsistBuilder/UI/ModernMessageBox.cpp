@@ -39,6 +39,51 @@ struct MsgBoxState {
     bool isCheckboxHovered;
 };
 
+static void SafeCloseMessageBox(MsgBoxState* pState, HWND hWnd, int resultId)
+{
+    if (!pState)
+    {
+        DestroyWindow(hWnd);
+        return;
+    }
+
+    pState->result = resultId;
+    pState->isClosed = true;
+
+    // 1. Re-enable parent window BEFORE destroying modal dialog so Windows has an eligible window to activate:
+    HWND hParent = pState->hParent;
+    if (hParent && IsWindow(hParent))
+    {
+        EnableWindow(hParent, TRUE);
+
+        // AttachThreadInput guard to guarantee foreground activation permission:
+        DWORD dwForeThread = GetWindowThreadProcessId(GetForegroundWindow(), NULL);
+        DWORD dwAppThread = GetCurrentThreadId();
+        if (dwForeThread != 0 && dwForeThread != dwAppThread)
+        {
+            AttachThreadInput(dwAppThread, dwForeThread, TRUE);
+        }
+
+        if (IsIconic(hParent))
+        {
+            ShowWindow(hParent, SW_RESTORE);
+        }
+        SetWindowPos(hParent, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        SetActiveWindow(hParent);
+        SetForegroundWindow(hParent);
+        BringWindowToTop(hParent);
+        SetFocus(hParent);
+
+        if (dwForeThread != 0 && dwForeThread != dwAppThread)
+        {
+            AttachThreadInput(dwAppThread, dwForeThread, FALSE);
+        }
+    }
+
+    // 2. Now destroy the message box window:
+    DestroyWindow(hWnd);
+}
+
 static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     MsgBoxState* pState = (MsgBoxState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
@@ -376,9 +421,7 @@ static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             {
                 if (PtInRect(&pState->buttons[clicked].rc, { x, y }))
                 {
-                    pState->result = pState->buttons[clicked].id;
-                    pState->isClosed = true;
-                    DestroyWindow(hWnd);
+                    SafeCloseMessageBox(pState, hWnd, pState->buttons[clicked].id);
                     return 0;
                 }
             }
@@ -408,23 +451,21 @@ static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             {
                 cancelId = pState->buttons.back().id;
             }
-            pState->result = cancelId;
-            pState->isClosed = true;
-            DestroyWindow(hWnd);
+            SafeCloseMessageBox(pState, hWnd, cancelId);
             return 0;
         }
         else if (wParam == VK_RETURN || wParam == VK_SPACE)
         {
+            int retId = 0;
             if (pState->focusedButton >= 0 && pState->focusedButton < (int)pState->buttons.size())
             {
-                pState->result = pState->buttons[pState->focusedButton].id;
+                retId = pState->buttons[pState->focusedButton].id;
             }
             else if (!pState->buttons.empty())
             {
-                pState->result = pState->buttons[0].id;
+                retId = pState->buttons[0].id;
             }
-            pState->isClosed = true;
-            DestroyWindow(hWnd);
+            SafeCloseMessageBox(pState, hWnd, retId);
             return 0;
         }
         else if (wParam == VK_TAB || wParam == VK_RIGHT)
@@ -446,6 +487,20 @@ static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             return 0;
         }
         break;
+    }
+
+    case WM_CLOSE:
+    {
+        int cancelId = IDCANCEL;
+        if (pState && !pState->buttons.empty())
+        {
+            for (const auto& btn : pState->buttons)
+            {
+                if (btn.id == IDCANCEL || btn.id == IDNO) { cancelId = btn.id; break; }
+            }
+        }
+        SafeCloseMessageBox(pState, hWnd, cancelId);
+        return 0;
     }
 
     case WM_DESTROY:
@@ -688,8 +743,9 @@ static int ShowModernMessageBoxImpl(HWND hWndParent, LPCWSTR lpText, LPCWSTR lpC
     if (posX + dlgWidth > rcWorkArea.right) posX = rcWorkArea.right - dlgWidth;
     if (posY + dlgHeight > rcWorkArea.bottom) posY = rcWorkArea.bottom - dlgHeight;
 
+    DWORD dwExStyle = (hWndParent && IsWindow(hWndParent)) ? WS_EX_TOOLWINDOW : (WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
     HWND hMsgBox = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        dwExStyle,
         L"ModernMsgBoxWindow", state.caption.c_str(),
         WS_POPUP,
         posX, posY, dlgWidth, dlgHeight,

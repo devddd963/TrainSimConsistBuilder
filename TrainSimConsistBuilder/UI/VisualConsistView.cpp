@@ -838,11 +838,12 @@ static void Render3DConsist(VisualConsistState* pState)
 
             for (const auto& sub : unit.compositeStock.subShapes)
             {
-                if (!sub || !sub->isLoaded || !sub->shape.pVertexBuffer) continue;
+                if (!sub || !sub->isLoaded || !sub->shape.isValid || !sub->shape.pVertexBuffer || !sub->shape.pIndexBuffer || sub->shape.indices.empty()) continue;
 
                 bool hasMatching = false;
                 for (const auto& sm : sub->shape.subMeshes)
                 {
+                    if (sm.indexCount == 0 || (sm.startIndex + sm.indexCount > sub->shape.indices.size())) continue;
                     if (passMode == 0 && !sm.isTransparent) { hasMatching = true; break; }
                     if (passMode == 1 && (sm.isTransparent && sm.isAlphaTest)) { hasMatching = true; break; }
                     if (passMode == 2 && (sm.isTransparent && !sm.isAlphaTest)) { hasMatching = true; break; }
@@ -880,6 +881,7 @@ static void Render3DConsist(VisualConsistState* pState)
 
                 for (const auto& sm : sub->shape.subMeshes)
                 {
+                    if (sm.indexCount == 0 || (sm.startIndex + sm.indexCount > sub->shape.indices.size())) continue;
                     bool match = (passMode == 0 && !sm.isTransparent) ||
                                  (passMode == 1 && sm.isTransparent && sm.isAlphaTest) ||
                                  (passMode == 2 && sm.isTransparent && !sm.isAlphaTest);
@@ -1272,23 +1274,26 @@ static void RecalcVisualConsistLayout(VisualConsistState* pState, int clientW, i
 
     if (pState->isFloating)
     {
-        pState->rcBtnClose = { 0, 0, 0, 0 };
-        pState->rcBtnFloat = { 0, 0, 0, 0 };
         pState->rcBtnCollapse = { 0, 0, 0, 0 };
+        pState->rcBtnFloat = { 0, 0, 0, 0 };
 
-        // 1. Settings Button
+        // 1. Close 'X' Button at far right (returns to main app window)
+        pState->rcBtnClose = { curRight - btnW, btnY, curRight, btnY + btnH };
+        curRight -= (btnW + 4);
+
+        // 2. Settings Button
         pState->rcBtnSettings = { curRight - btnW, btnY, curRight, btnY + btnH };
         curRight -= (btnW + 4);
 
-        // 2. Wireframe Button
+        // 3. Wireframe Button
         pState->rcBtnWireframe = { curRight - btnW, btnY, curRight, btnY + btnH };
         curRight -= (btnW + 4);
 
-        // 3. 3D Orbit Toggle Button
+        // 4. 3D Orbit Toggle Button
         pState->rcBtnOrbit3D = { curRight - 94, btnY, curRight, btnY + btnH };
         curRight -= (94 + 4);
 
-        // 4. Side View Reset Button (TSRE5 Mode)
+        // 5. Side View Reset Button (TSRE5 Mode)
         pState->rcBtnSideView = { curRight - 76, btnY, curRight, btnY + btnH };
         curRight -= (76 + 4);
     }
@@ -1321,12 +1326,12 @@ static void RecalcVisualConsistLayout(VisualConsistState* pState, int clientW, i
         curRight -= (76 + 4);
     }
 
-    int footerH = pState->isFloating ? 40 : 0;
+    int footerH = 0;
     int scrollbarH = 12;
     int unitBarH = 22; // Unit numbering display strip (1, 2, 3...)
-    pState->rcFooter = { 0, clientH - footerH, clientW, clientH };
-    pState->rcBtnFooterClose = { clientW - 120, clientH - footerH + 6, clientW - 12, clientH - 8 };
-    pState->rcChkStartupCollapse = { 16, clientH - footerH + 8, 300, clientH - 8 };
+    pState->rcFooter = { 0, 0, 0, 0 };
+    pState->rcBtnFooterClose = { 0, 0, 0, 0 };
+    pState->rcChkStartupCollapse = { 0, 0, 0, 0 };
 
     // Viewport bounds
     int vpTop = HEADER_HEIGHT;
@@ -1607,13 +1612,16 @@ static void PaintHeader(HWND hWnd, HDC hdc, VisualConsistState* pState)
     FillRect(memDC, &pState->rcHeader, hbrBg);
     DeleteObject(hbrBg);
 
-    // Top Separator Border Line (Section 3 Dock Separator)
-    HPEN hPenTopBorder = CreatePen(PS_SOLID, 1, RGB(65, 65, 65));
-    HPEN hOldPT = (HPEN)SelectObject(memDC, hPenTopBorder);
-    MoveToEx(memDC, 0, 0, NULL);
-    LineTo(memDC, rcClient.right, 0);
-    SelectObject(memDC, hOldPT);
-    DeleteObject(hPenTopBorder);
+    // Top Separator Border Line (Section 3 Dock Separator - only when docked)
+    if (!pState->isFloating)
+    {
+        HPEN hPenTopBorder = CreatePen(PS_SOLID, 1, RGB(65, 65, 65));
+        HPEN hOldPT = (HPEN)SelectObject(memDC, hPenTopBorder);
+        MoveToEx(memDC, 0, 0, NULL);
+        LineTo(memDC, rcClient.right, 0);
+        SelectObject(memDC, hOldPT);
+        DeleteObject(hPenTopBorder);
+    }
 
     // Bottom Border Line
     HPEN hPenBorder = CreatePen(PS_SOLID, 1, RGB(38, 42, 50));
@@ -1792,12 +1800,14 @@ static void PaintHeader(HWND hWnd, HDC hdc, VisualConsistState* pState)
     }
 
     // Helper: Draw Button
-    auto DrawHeaderButton = [&](RECT rc, const wchar_t* icon, const wchar_t* text, bool isHover, bool isActive) {
+    auto DrawHeaderButton = [&](RECT rc, const wchar_t* icon, const wchar_t* text, bool isHover, bool isActive, bool isClose = false) {
         if (rc.right <= rc.left) return;
 
         if (isHover || isActive)
         {
-            HBRUSH hbrBtn = CreateSolidBrush(isActive ? RGB(0, 120, 215) : RGB(45, 50, 60));
+            COLORREF btnBg = isClose ? (isHover ? RGB(196, 43, 28) : RGB(45, 50, 60))
+                                     : (isActive ? RGB(0, 120, 215) : RGB(45, 50, 60));
+            HBRUSH hbrBtn = CreateSolidBrush(btnBg);
             FillRect(memDC, &rc, hbrBtn);
             DeleteObject(hbrBtn);
         }
@@ -1811,7 +1821,7 @@ static void PaintHeader(HWND hWnd, HDC hdc, VisualConsistState* pState)
         else if (icon && pState->hFontIcons)
         {
             SelectObject(memDC, pState->hFontIcons);
-            SetTextColor(memDC, isHover ? RGB(255, 255, 255) : RGB(190, 195, 205));
+            SetTextColor(memDC, (isHover || isActive) ? RGB(255, 255, 255) : RGB(190, 195, 205));
             DrawTextW(memDC, icon, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
     };
@@ -1827,22 +1837,22 @@ static void PaintHeader(HWND hWnd, HDC hdc, VisualConsistState* pState)
         DrawHeaderButton(pState->rcBtnFloat, L"\xE8A7", NULL, pState->hoverFloat, false);
         DrawHeaderButton(pState->rcBtnCollapse, pState->isCollapsed ? L"\xE70E" : L"\xE70D", NULL, pState->hoverCollapse, false);
     }
+    else
+    {
+        // Close 'X' button to return to main window
+        DrawHeaderButton(pState->rcBtnClose, L"\xE8BB", NULL, pState->hoverClose, false, true);
+    }
 
-    // Floating Footer Bar
+    // 1px Subtle Outer Border when floating
     if (pState->isFloating)
     {
-        HBRUSH hbrF = CreateSolidBrush(RGB(22, 24, 28));
-        FillRect(memDC, &pState->rcFooter, hbrF);
-        DeleteObject(hbrF);
-
-        // Footer Close Button
-        HBRUSH hbrClose = CreateSolidBrush(pState->hoverFooterClose ? RGB(60, 65, 75) : RGB(40, 44, 52));
-        FillRect(memDC, &pState->rcBtnFooterClose, hbrClose);
-        DeleteObject(hbrClose);
-
-        SelectObject(memDC, pState->hFontTitle);
-        SetTextColor(memDC, RGB(235, 240, 250));
-        DrawTextW(memDC, L"Dock to Main Window", -1, &pState->rcBtnFooterClose, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        HPEN hPenBorder = CreatePen(PS_SOLID, 1, RGB(55, 58, 64));
+        HPEN hOldP = (HPEN)SelectObject(memDC, hPenBorder);
+        HBRUSH hOldB = (HBRUSH)SelectObject(memDC, GetStockObject(NULL_BRUSH));
+        Rectangle(memDC, 0, 0, rcClient.right, rcClient.bottom);
+        SelectObject(memDC, hOldB);
+        SelectObject(memDC, hOldP);
+        DeleteObject(hPenBorder);
     }
 
     BitBlt(hdc, 0, 0, rcClient.right, rcClient.bottom, memDC, 0, 0, SRCCOPY);
@@ -2181,6 +2191,65 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
         return 0;
     }
 
+    case WM_NCCALCSIZE:
+    {
+        if (pState && pState->isFloating && wParam == TRUE)
+        {
+            // Returning 0 indicates that the client area covers the entire window,
+            // completely eliminating the default OS caption/white top border
+            return 0;
+        }
+        break;
+    }
+
+    case WM_NCHITTEST:
+    {
+        if (pState && pState->isFloating)
+        {
+            POINT ptScreen = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            RECT rcWin;
+            GetWindowRect(hWnd, &rcWin);
+
+            const int BORDER_SIZE = 6;
+            bool left   = ptScreen.x < rcWin.left + BORDER_SIZE;
+            bool right  = ptScreen.x >= rcWin.right - BORDER_SIZE;
+            bool top    = ptScreen.y < rcWin.top + BORDER_SIZE;
+            bool bottom = ptScreen.y >= rcWin.bottom - BORDER_SIZE;
+
+            if (top && left)     return HTTOPLEFT;
+            if (top && right)    return HTTOPRIGHT;
+            if (bottom && left)  return HTBOTTOMLEFT;
+            if (bottom && right) return HTBOTTOMRIGHT;
+            if (left)            return HTLEFT;
+            if (right)           return HTRIGHT;
+            if (top)             return HTTOP;
+            if (bottom)          return HTBOTTOM;
+
+            // Inside client area
+            POINT ptClient = ptScreen;
+            ScreenToClient(hWnd, &ptClient);
+
+            // Action buttons must receive client mouse clicks & hover
+            if (PtInRect(&pState->rcBtnClose, ptClient) ||
+                PtInRect(&pState->rcBtnSettings, ptClient) ||
+                PtInRect(&pState->rcBtnWireframe, ptClient) ||
+                PtInRect(&pState->rcBtnOrbit3D, ptClient) ||
+                PtInRect(&pState->rcBtnSideView, ptClient))
+            {
+                return HTCLIENT;
+            }
+
+            // Drag window anywhere on header bar
+            if (ptClient.y < HEADER_HEIGHT)
+            {
+                return HTCAPTION;
+            }
+
+            return HTCLIENT;
+        }
+        break;
+    }
+
     case WM_SIZE:
     {
         if (pState && wParam != SIZE_MINIMIZED)
@@ -2413,7 +2482,7 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
         bool oldFloat = pState->hoverFloat;
         bool oldCol = pState->hoverCollapse;
         bool oldSet = pState->hoverSettings;
-        bool oldClose = pState->hoverFooterClose;
+        bool oldClose = pState->hoverClose;
 
         pState->hoverSideView = PtInRect(&pState->rcBtnSideView, pt);
         pState->hoverOrbit3D = PtInRect(&pState->rcBtnOrbit3D, pt);
@@ -2421,15 +2490,15 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
         pState->hoverFloat = PtInRect(&pState->rcBtnFloat, pt);
         pState->hoverCollapse = PtInRect(&pState->rcBtnCollapse, pt);
         pState->hoverSettings = PtInRect(&pState->rcBtnSettings, pt);
-        pState->hoverFooterClose = PtInRect(&pState->rcBtnFooterClose, pt);
+        pState->hoverClose = PtInRect(&pState->rcBtnClose, pt);
+        pState->hoverFooterClose = false;
 
         if (oldSide != pState->hoverSideView || oldOrbit != pState->hoverOrbit3D ||
             oldWire != pState->hoverWireframe || oldFloat != pState->hoverFloat ||
             oldCol != pState->hoverCollapse || oldSet != pState->hoverSettings ||
-            oldClose != pState->hoverFooterClose)
+            oldClose != pState->hoverClose)
         {
             InvalidateRect(hWnd, &pState->rcHeader, FALSE);
-            if (pState->isFloating) InvalidateRect(hWnd, &pState->rcFooter, FALSE);
         }
         return 0;
     }
@@ -2523,9 +2592,14 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
             Render3DConsist(pState);
             return 0;
         }
-        if (PtInRect(&pState->rcBtnFloat, pt))
+        if (!pState->isFloating && PtInRect(&pState->rcBtnFloat, pt))
         {
-            VisualConsistView_SetFloating(hWnd, !pState->isFloating);
+            VisualConsistView_SetFloating(hWnd, true);
+            return 0;
+        }
+        if (pState->isFloating && PtInRect(&pState->rcBtnClose, pt))
+        {
+            VisualConsistView_SetFloating(hWnd, false);
             return 0;
         }
         if (!pState->isFloating && PtInRect(&pState->rcBtnCollapse, pt))
@@ -2533,11 +2607,6 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
             pState->isCollapsed = !pState->isCollapsed;
             SendMessage(pState->hParent, WM_VISUAL_DOCK_CHANGED, 0, 0);
             InvalidateRect(hWnd, NULL, FALSE);
-            return 0;
-        }
-        if (pState->isFloating && PtInRect(&pState->rcBtnFooterClose, pt))
-        {
-            VisualConsistView_SetFloating(hWnd, false);
             return 0;
         }
         if (PtInRect(&pState->rcBtnSettings, pt))
@@ -2583,6 +2652,14 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
     case WM_MOUSELEAVE:
     {
         if (!pState) break;
+        pState->hoverSideView = false;
+        pState->hoverOrbit3D = false;
+        pState->hoverWireframe = false;
+        pState->hoverFloat = false;
+        pState->hoverCollapse = false;
+        pState->hoverSettings = false;
+        pState->hoverClose = false;
+        InvalidateRect(hWnd, &pState->rcHeader, FALSE);
         if (pState->scrollBar.OnMouseLeave(hWnd))
         {
             InvalidateRect(hWnd, &pState->scrollBar.GetBounds(), FALSE);
@@ -2852,10 +2929,16 @@ void VisualConsistView_SetFloating(HWND hWnd, bool bFloating)
     if (bFloating)
     {
         SetParent(hWnd, NULL);
-        DWORD style = WS_POPUP | WS_CLIPCHILDREN | WS_VISIBLE;
-        DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+        SetWindowLongPtrW(hWnd, GWLP_HWNDPARENT, (LONG_PTR)pState->hParent);
+        DWORD style = WS_POPUP | WS_CLIPCHILDREN | WS_VISIBLE | WS_THICKFRAME;
+        DWORD exStyle = WS_EX_TOOLWINDOW;
         SetWindowLongPtrW(hWnd, GWL_STYLE, style);
         SetWindowLongPtrW(hWnd, GWL_EXSTYLE, exStyle);
+
+        BOOL bDark = TRUE;
+        DwmSetWindowAttribute(hWnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &bDark, sizeof(bDark));
+        COLORREF clrBorder = RGB(55, 55, 60);
+        DwmSetWindowAttribute(hWnd, 34 /* DWMWA_BORDER_COLOR */, &clrBorder, sizeof(clrBorder));
 
         DWM_WINDOW_CORNER_PREFERENCE corner = (DWM_WINDOW_CORNER_PREFERENCE)DWMWCP_ROUND;
         DwmSetWindowAttribute(hWnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
@@ -2867,7 +2950,7 @@ void VisualConsistView_SetFloating(HWND hWnd, bool bFloating)
         int floatX = rcParent.left + (rcParent.right - rcParent.left - floatW) / 2;
         int floatY = rcParent.bottom - floatH - 30;
 
-        SetWindowPos(hWnd, HWND_TOPMOST, floatX, floatY, floatW, floatH, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        SetWindowPos(hWnd, HWND_TOP, floatX, floatY, floatW, floatH, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
     }
     else
     {
@@ -2876,6 +2959,7 @@ void VisualConsistView_SetFloating(HWND hWnd, bool bFloating)
         SetWindowLongPtrW(hWnd, GWL_STYLE, style);
         SetWindowLongPtrW(hWnd, GWL_EXSTYLE, exStyle);
         SetParent(hWnd, pState->hParent);
+        SetWindowLongPtrW(hWnd, GWLP_HWNDPARENT, (LONG_PTR)pState->hParent);
     }
 
     SendMessage(pState->hParent, WM_VISUAL_DOCK_CHANGED, 0, 0);
