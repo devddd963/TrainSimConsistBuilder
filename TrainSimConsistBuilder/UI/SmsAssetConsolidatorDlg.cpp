@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <sstream>
 #include <cwctype>
+#include <thread>
+#include <atomic>
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "shell32.lib")
@@ -40,6 +42,18 @@ namespace
         MODE_SAME_FOLDER = 0,
         MODE_SUBFOLDER = 1,
         MODE_STANDALONE_EXPORT = 2
+    };
+
+#define WM_CONSOLIDATE_PROGRESS (WM_USER + 601)
+#define WM_CONSOLIDATE_COMPLETE (WM_USER + 602)
+
+    struct ConsolidateCopyProgress
+    {
+        int filesCopied = 0;
+        int filesSkipped = 0;
+        int filesMissing = 0;
+        int totalFiles = 0;
+        bool wasCancelled = false;
     };
 
     struct ScannedWavItem
@@ -131,6 +145,15 @@ namespace
 
         bool isConfirmed = false;
         SmsConsolidateResult result;
+
+        // Background worker & progress state
+        std::atomic<bool> isConsolidating{ false };
+        std::atomic<bool> cancelRequested{ false };
+        std::thread workerThread;
+        int progressCopied = 0;
+        int progressTotal = 0;
+        std::wstring progressCurrentFile;
+        RECT rcBottomBar = { 0 };
     };
 
     static HFONT CreateCustomFont(int pointSize, int weight, const wchar_t* faceName)
@@ -278,6 +301,12 @@ namespace
             std::wstring subNative = subNorm;
             for (auto& c : subNative) { if (c == L'/') c = L'\\'; }
 
+            // Strip redundant leading ./ or .\\ sequences if user entered them
+            while (subNorm.rfind(L"./", 0) == 0) subNorm.erase(0, 2);
+            while (subNorm.rfind(L".\\", 0) == 0) subNorm.erase(0, 2);
+            while (!subNorm.empty() && (subNorm.front() == L'/' || subNorm.front() == L'\\' || subNorm.front() == L' ')) subNorm.erase(subNorm.begin());
+            while (!subNorm.empty() && (subNorm.back() == L'/' || subNorm.back() == L'\\' || subNorm.back() == L' ')) subNorm.pop_back();
+
             if (subNorm.empty())
             {
                 effectiveDestDir = state.smsDir;
@@ -286,7 +315,7 @@ namespace
             else
             {
                 effectiveDestDir = state.smsDir + L"\\" + subNative;
-                relPrefix = subNorm + L"/";
+                relPrefix = L"./" + subNorm + L"/";
             }
         }
         else if (state.mode == MODE_STANDALONE_EXPORT)
@@ -644,6 +673,109 @@ namespace
             return 0;
         }
 
+        case WM_CONSOLIDATE_PROGRESS:
+        {
+            if (pState)
+            {
+                pState->progressCopied = (int)wParam;
+                size_t idx = (size_t)lParam;
+                if (idx < pState->items.size())
+                {
+                    pState->progressCurrentFile = pState->items[idx].baseFileName;
+                }
+                InvalidateRect(hWnd, &pState->rcBottomBar, FALSE);
+            }
+            return 0;
+        }
+
+        case WM_CONSOLIDATE_COMPLETE:
+        {
+            auto* pProg = (ConsolidateCopyProgress*)lParam;
+            if (!pState || !pProg) { delete pProg; return 0; }
+
+            if (pState->workerThread.joinable())
+            {
+                pState->workerThread.join();
+            }
+
+            pState->isConsolidating = false;
+
+            int filesCopied = pProg->filesCopied;
+            int filesSkipped = pProg->filesSkipped;
+            int filesMissing = pProg->filesMissing;
+            bool wasCancelled = pProg->wasCancelled;
+            delete pProg;
+
+            if (wasCancelled)
+            {
+                pState->isConfirmed = false;
+                EnableWindow(pState->hEditSubfolder, TRUE);
+                EnableWindow(pState->hEditExportPath, TRUE);
+                ShowModernMessageBox(hWnd, (L"Consolidation was cancelled by user.\n\nFiles copied before cancel: " + std::to_wstring(filesCopied)).c_str(), L"Consolidation Cancelled", MB_OK | MB_ICONWARNING);
+                InvalidateRect(hWnd, NULL, FALSE);
+                return 0;
+            }
+
+            // Update SMS document memory references if requested
+            if (pState->optUpdateRefs)
+            {
+                for (auto& item : pState->items)
+                {
+                    for (auto* pRef : item.pFileRefs)
+                    {
+                        if (pRef)
+                        {
+                            pRef->fileName = item.targetRef;
+                            pRef->resolvedDiskPath = item.targetDiskPath;
+                            pRef->existsOnDisk = true;
+                        }
+                    }
+                }
+            }
+
+            // If Standalone Export mode, save copy of SMS file into destination directory
+            if (pState->mode == MODE_STANDALONE_EXPORT)
+            {
+                std::wstring exportSmsFile = pState->computedDestDir + L"\\" + pState->smsFileName;
+                SmsParser_SaveToFile(*pState->pDoc, exportSmsFile);
+                App_NotifySoundLibraryChanged(exportSmsFile);
+            }
+
+            pState->result.isApplied = true;
+            pState->result.docModified = (pState->optUpdateRefs && filesCopied > 0);
+            pState->result.filesCopied = filesCopied;
+            pState->result.filesSkipped = filesSkipped;
+            pState->result.filesMissing = filesMissing;
+            pState->result.destFolder = pState->computedDestDir;
+
+            // Open destination folder in Windows Explorer if checked
+            if (pState->optOpenExplorer)
+            {
+                ShellExecuteW(NULL, L"explore", pState->computedDestDir.c_str(), NULL, NULL, SW_SHOWNORMAL);
+            }
+
+            // Show success summary
+            std::wstring msg = L"WAV Asset Consolidation Complete!\n\n";
+            msg += L"• Files copied: " + std::to_wstring(filesCopied) + L"\n";
+            msg += L"• Files already in destination: " + std::to_wstring(filesSkipped) + L"\n";
+            if (filesMissing > 0)
+            {
+                msg += L"• Files missing on disk: " + std::to_wstring(filesMissing) + L"\n";
+            }
+            msg += L"\nDestination:\n" + pState->computedDestDir;
+
+            if (pState->optUpdateRefs)
+            {
+                msg += L"\n\nSMS document references have been updated successfully.";
+            }
+
+            ShowModernMessageBox(hWnd, msg.c_str(), L"Consolidation Complete", MB_OK | MB_ICONINFORMATION);
+
+            pState->isConfirmed = true;
+            DestroyWindow(hWnd);
+            return 0;
+        }
+
         case WM_MOUSEWHEEL:
         {
             if (pState)
@@ -665,8 +797,8 @@ namespace
 
             bool redrawNeeded = false;
             bool hovClose = PtInRect(&pState->rcCloseBtn, pt);
-            bool hovBrowse = PtInRect(&pState->rcBtnBrowseExport, pt);
-            bool hovApply = PtInRect(&pState->rcBtnApply, pt);
+            bool hovBrowse = !pState->isConsolidating && PtInRect(&pState->rcBtnBrowseExport, pt);
+            bool hovApply = !pState->isConsolidating && PtInRect(&pState->rcBtnApply, pt);
             bool hovCancel = PtInRect(&pState->rcBtnCancel, pt);
 
             if (hovClose != pState->isHoverClose || hovBrowse != pState->isHoverBrowse ||
@@ -883,6 +1015,26 @@ namespace
                 return 0;
             }
 
+            // If currently consolidating, only allow Cancel
+            if (pState->isConsolidating)
+            {
+                if (PtInRect(&pState->rcBtnCancel, pt) && !pState->cancelRequested)
+                {
+                    pState->cancelRequested = true;
+                    pState->progressCurrentFile = L"Cancelling consolidation... please wait";
+                    InvalidateRect(hWnd, &pState->rcBottomBar, FALSE);
+                }
+                return 0;
+            }
+
+            // Close button (X)
+            if (PtInRect(&pState->rcCloseBtn, pt))
+            {
+                pState->isConfirmed = false;
+                DestroyWindow(hWnd);
+                return 0;
+            }
+
             // Cancel button
             if (PtInRect(&pState->rcBtnCancel, pt))
             {
@@ -910,91 +1062,64 @@ namespace
                     return 0;
                 }
 
-                int filesCopied = 0;
-                int filesSkipped = 0;
-                int filesMissing = 0;
+                pState->isConsolidating = true;
+                pState->cancelRequested = false;
+                pState->progressCopied = 0;
+                pState->progressTotal = (int)pState->items.size();
+                pState->progressCurrentFile = L"Initializing copy process...";
+                EnableWindow(pState->hEditSubfolder, FALSE);
+                EnableWindow(pState->hEditExportPath, FALSE);
+                InvalidateRect(hWnd, &pState->rcBottomBar, FALSE);
 
-                // Copy files
-                for (auto& item : pState->items)
-                {
-                    if (!item.existsOnDisk)
-                    {
-                        filesMissing++;
-                        continue;
-                    }
+                HWND hDlg = hWnd;
+                pState->workerThread = std::thread([hDlg, pState]() {
+                    int filesCopied = 0;
+                    int filesSkipped = 0;
+                    int filesMissing = 0;
+                    int total = (int)pState->items.size();
 
-                    if (item.alreadyInTarget && pState->optSkipExisting)
+                    for (size_t i = 0; i < pState->items.size(); ++i)
                     {
-                        filesSkipped++;
-                    }
-                    else
-                    {
-                        if (CopyFileW(item.resolvedDiskPath.c_str(), item.targetDiskPath.c_str(), FALSE))
+                        if (pState->cancelRequested.load())
                         {
-                            filesCopied++;
+                            break;
                         }
-                        else
+
+                        auto& item = pState->items[i];
+                        PostMessageW(hDlg, WM_CONSOLIDATE_PROGRESS, (WPARAM)(i + 1), (LPARAM)i);
+
+                        if (!item.existsOnDisk)
+                        {
+                            filesMissing++;
+                            continue;
+                        }
+
+                        if (item.alreadyInTarget && pState->optSkipExisting)
                         {
                             filesSkipped++;
                         }
-                    }
-
-                    // Update SMS document memory references if requested
-                    if (pState->optUpdateRefs)
-                    {
-                        for (auto* pRef : item.pFileRefs)
+                        else
                         {
-                            if (pRef)
+                            if (CopyFileW(item.resolvedDiskPath.c_str(), item.targetDiskPath.c_str(), FALSE))
                             {
-                                pRef->fileName = item.targetRef;
-                                pRef->resolvedDiskPath = item.targetDiskPath;
-                                pRef->existsOnDisk = true;
+                                filesCopied++;
+                            }
+                            else
+                            {
+                                filesSkipped++;
                             }
                         }
                     }
-                }
 
-                // If Standalone Export mode, save copy of SMS file into destination directory
-                std::wstring exportSmsFile = L"";
-                if (pState->mode == MODE_STANDALONE_EXPORT)
-                {
-                    exportSmsFile = pState->computedDestDir + L"\\" + pState->smsFileName;
-                    SmsParser_SaveToFile(*pState->pDoc, exportSmsFile);
-                    App_NotifySoundLibraryChanged(exportSmsFile);
-                }
+                    auto* pResult = new ConsolidateCopyProgress();
+                    pResult->filesCopied = filesCopied;
+                    pResult->filesSkipped = filesSkipped;
+                    pResult->filesMissing = filesMissing;
+                    pResult->totalFiles = total;
+                    pResult->wasCancelled = pState->cancelRequested.load();
+                    PostMessageW(hDlg, WM_CONSOLIDATE_COMPLETE, 0, (LPARAM)pResult);
+                });
 
-                pState->result.isApplied = true;
-                pState->result.docModified = (pState->optUpdateRefs && filesCopied > 0);
-                pState->result.filesCopied = filesCopied;
-                pState->result.filesSkipped = filesSkipped;
-                pState->result.filesMissing = filesMissing;
-                pState->result.destFolder = pState->computedDestDir;
-
-                // Open destination folder in Windows Explorer if checked
-                if (pState->optOpenExplorer)
-                {
-                    ShellExecuteW(NULL, L"explore", pState->computedDestDir.c_str(), NULL, NULL, SW_SHOWNORMAL);
-                }
-
-                // Show success summary
-                std::wstring msg = L"WAV Asset Consolidation Complete!\n\n";
-                msg += L"• Files copied: " + std::to_wstring(filesCopied) + L"\n";
-                msg += L"• Files already in destination: " + std::to_wstring(filesSkipped) + L"\n";
-                if (filesMissing > 0)
-                {
-                    msg += L"• Files missing on disk: " + std::to_wstring(filesMissing) + L"\n";
-                }
-                msg += L"\nDestination:\n" + pState->computedDestDir;
-
-                if (pState->optUpdateRefs)
-                {
-                    msg += L"\n\nSMS document references have been updated successfully.";
-                }
-
-                ShowModernMessageBox(hWnd, msg.c_str(), L"Consolidation Complete", MB_OK | MB_ICONINFORMATION);
-
-                pState->isConfirmed = true;
-                DestroyWindow(hWnd);
                 return 0;
             }
 
@@ -1133,8 +1258,10 @@ namespace
             SelectObject(memDC, pState->hFontSmall);
             SetTextColor(memDC, RGB(100, 175, 240));
             RECT rcPreview1 = { pState->rcBoxSubfolder.left, pState->rcBoxSubfolder.bottom + 4, pState->rcBoxSubfolder.right, pState->rcBoxSubfolder.bottom + 20 };
+            std::wstring prevRef = pState->subfolderName.empty() ? L"" : (L"./" + pState->subfolderName + L"/");
+            for (auto& c : prevRef) if (c == L'\\') c = L'/';
             std::wstring prevSubStr = L"Destination preview: " + (pState->computedDestDir.empty() ? pState->smsDir : pState->computedDestDir)
-                + L"  •  References: \"" + (pState->subfolderName.empty() ? L"" : (pState->subfolderName + L"/")) + L"sound.wav\"";
+                + L"  •  References: \"" + prevRef + L"sound.wav\"";
             DrawTextW(memDC, prevSubStr.c_str(), -1, &rcPreview1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
             // Mode 2: Export Standalone Sound Pack
@@ -1349,33 +1476,87 @@ namespace
             // Paint Custom Scrollbar
             pState->vScroll.Paint(memDC);
 
-            // 6. Bottom Action Bar (y: height - 60 to height)
-            RECT rcBottomBar = { 0, height - 60, width, height };
+            // 6. Bottom Action Bar (y: height - 64 to height)
+            pState->rcBottomBar = { 0, height - 64, width, height };
             HBRUSH hBotBr = CreateSolidBrush(RGB(24, 26, 34));
-            FillRect(memDC, &rcBottomBar, hBotBr);
+            FillRect(memDC, &pState->rcBottomBar, hBotBr);
             DeleteObject(hBotBr);
 
             HPEN hBotPen = CreatePen(PS_SOLID, 1, RGB(45, 48, 62));
             oP = SelectObject(memDC, hBotPen);
-            MoveToEx(memDC, 0, height - 60, NULL);
-            LineTo(memDC, width, height - 60);
+            MoveToEx(memDC, 0, height - 64, NULL);
+            LineTo(memDC, width, height - 64);
             SelectObject(memDC, oP);
             DeleteObject(hBotPen);
 
-            // Left status text in bottom bar
-            SelectObject(memDC, pState->hFontBold);
-            SetTextColor(memDC, RGB(180, 200, 235));
-            RECT rcBotStatus = { 24, height - 52, width - 360, height - 10 };
-            std::wstring botTxt = L"Destination: " + (pState->computedDestDir.empty() ? L"(None)" : pState->computedDestDir)
-                + L"  •  " + std::to_wstring(pState->countWillCopy) + L" files to copy";
-            DrawTextW(memDC, botTxt.c_str(), -1, &rcBotStatus, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            pState->rcBtnApply = { width - 310, height - 50, width - 110, height - 14 };
+            pState->rcBtnCancel = { width - 100, height - 50, width - 20, height - 14 };
 
-            // Right action buttons
-            pState->rcBtnApply = { width - 310, height - 48, width - 110, height - 14 };
-            pState->rcBtnCancel = { width - 100, height - 48, width - 20, height - 14 };
+            if (pState->isConsolidating)
+            {
+                int total = pState->progressTotal > 0 ? pState->progressTotal : (int)pState->items.size();
+                int cur = pState->progressCopied;
+                int pct = (total > 0) ? (cur * 100 / total) : 0;
+                if (pct > 100) pct = 100;
 
-            DrawModernButton(memDC, pState->rcBtnApply, L"Consolidate & Copy Assets", pState->isHoverApply, false, true, pState->hFontBold);
-            DrawModernButton(memDC, pState->rcBtnCancel, L"Cancel", pState->isHoverCancel, false, false, pState->hFontBody);
+                std::wstring statText = pState->cancelRequested ? L"Cancelling consolidation... please wait" :
+                    (L"Copying: " + std::to_wstring(cur) + L" of " + std::to_wstring(total) + L" files (" + std::to_wstring(pct) + L"%)");
+
+                if (!pState->cancelRequested && !pState->progressCurrentFile.empty())
+                {
+                    statText += L"  •  " + pState->progressCurrentFile;
+                }
+
+                SelectObject(memDC, pState->hFontBold);
+                SetTextColor(memDC, pState->cancelRequested ? RGB(255, 130, 130) : RGB(225, 235, 255));
+                RECT rcProgText = { 24, height - 56, width - 120, height - 34 };
+                DrawTextW(memDC, statText.c_str(), -1, &rcProgText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                // Modern rounded progress track & fill
+                RECT rcProgressBar = { 24, height - 30, width - 120, height - 18 };
+                HBRUSH hTrackBr = CreateSolidBrush(RGB(35, 38, 50));
+                HPEN hTrackPen = CreatePen(PS_SOLID, 1, RGB(55, 60, 78));
+                HGDIOBJ oldTrB = SelectObject(memDC, hTrackBr);
+                HGDIOBJ oldTrP = SelectObject(memDC, hTrackPen);
+                RoundRect(memDC, rcProgressBar.left, rcProgressBar.top, rcProgressBar.right, rcProgressBar.bottom, 4, 4);
+                SelectObject(memDC, oldTrB);
+                SelectObject(memDC, oldTrP);
+                DeleteObject(hTrackBr);
+                DeleteObject(hTrackPen);
+
+                int barW = rcProgressBar.right - rcProgressBar.left;
+                int fillW = (total > 0) ? (barW * cur) / total : 0;
+                if (fillW > barW) fillW = barW;
+                if (fillW > 0)
+                {
+                    RECT rcFill = { rcProgressBar.left, rcProgressBar.top, rcProgressBar.left + fillW, rcProgressBar.bottom };
+                    HBRUSH hFillBr = CreateSolidBrush(RGB(0, 140, 240));
+                    HPEN hFillPen = CreatePen(PS_SOLID, 1, RGB(56, 189, 248));
+                    HGDIOBJ oldFiB = SelectObject(memDC, hFillBr);
+                    HGDIOBJ oldFiP = SelectObject(memDC, hFillPen);
+                    RoundRect(memDC, rcFill.left, rcFill.top, rcFill.right, rcFill.bottom, 4, 4);
+                    SelectObject(memDC, oldFiB);
+                    SelectObject(memDC, oldFiP);
+                    DeleteObject(hFillBr);
+                    DeleteObject(hFillPen);
+                }
+
+                // Active Cancel button to allow aborting safely
+                DrawModernButton(memDC, pState->rcBtnCancel, L"Cancel", pState->isHoverCancel, false, false, pState->hFontBody);
+            }
+            else
+            {
+                // Left status text in bottom bar
+                SelectObject(memDC, pState->hFontBold);
+                SetTextColor(memDC, RGB(180, 200, 235));
+                RECT rcBotStatus = { 24, height - 52, width - 340, height - 12 };
+                std::wstring botTxt = L"Destination: " + (pState->computedDestDir.empty() ? L"(None)" : pState->computedDestDir)
+                    + L"  •  " + std::to_wstring(pState->countWillCopy) + L" files to copy";
+                DrawTextW(memDC, botTxt.c_str(), -1, &rcBotStatus, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                DrawModernButton(memDC, pState->rcBtnApply, L"Consolidate & Copy Assets", pState->isHoverApply, false, true, pState->hFontBold);
+                DrawModernButton(memDC, pState->rcBtnCancel, L"Cancel", pState->isHoverCancel, false, false, pState->hFontBody);
+            }
 
             // BitBlt double-buffer
             BitBlt(hdc, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
@@ -1390,6 +1571,11 @@ namespace
         {
             if (pState)
             {
+                pState->cancelRequested = true;
+                if (pState->workerThread.joinable())
+                {
+                    pState->workerThread.join();
+                }
                 if (pState->hFontTitle) DeleteObject(pState->hFontTitle);
                 if (pState->hFontSub) DeleteObject(pState->hFontSub);
                 if (pState->hFontBody) DeleteObject(pState->hFontBody);
@@ -1514,6 +1700,13 @@ bool ShowSmsAssetConsolidatorDialog(
         {
             if (msg.wParam == VK_ESCAPE)
             {
+                if (state.isConsolidating)
+                {
+                    state.cancelRequested = true;
+                    state.progressCurrentFile = L"Cancelling consolidation... please wait";
+                    InvalidateRect(hDlg, &state.rcBottomBar, FALSE);
+                    continue;
+                }
                 state.isConfirmed = false;
                 if (hWndParent && IsWindow(hWndParent))
                 {
@@ -1536,6 +1729,10 @@ bool ShowSmsAssetConsolidatorDialog(
         SetActiveWindow(hWndParent);
     }
 
+    if (state.workerThread.joinable())
+    {
+        state.workerThread.join();
+    }
     outResult = state.result;
     return state.isConfirmed && state.result.isApplied;
 }
