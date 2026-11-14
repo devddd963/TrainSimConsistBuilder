@@ -1,6 +1,7 @@
 #include "ActivityConsistReader.h"
 #include "AppLogging.h"
 #include "StockSpecReader.h"
+#include "ShapeReader.h"
 #include <windows.h>
 #include <sstream>
 #include <algorithm>
@@ -398,7 +399,9 @@ namespace ActivityConsistReader {
         {
             con.isBroken = false;
             con.hasMissingStock = false;
+            con.hasCorruptedStock = false;
             con.hasMissingShape = false;
+            con.hasCorruptedShape = false;
             for (const auto& u : con.units)
             {
                 if (u.uid.empty() || u.parentDir.empty())
@@ -429,13 +432,27 @@ namespace ActivityConsistReader {
                     uPath = altPath;
                 }
 
+                if (StockSpecReader::IsStockCorrupted(uPath))
+                {
+                    con.hasCorruptedStock = true;
+                    continue;
+                }
+
                 StockSpecReader::StockSpec spec = StockSpecReader::ReadFullSpec(uPath, basePath);
-                if (!spec.mainShapeFile.empty() && !spec.shapeExistsOnDisk)
+                if (spec.isCorruptedStock)
+                {
+                    con.hasCorruptedStock = true;
+                }
+                else if (!spec.mainShapeFile.empty() && !spec.shapeExistsOnDisk)
                 {
                     con.hasMissingShape = true;
                 }
+                else if (spec.shapeExistsOnDisk && !spec.fullShapePath.empty() && ShapeReader::IsShapeCorrupted(spec.fullShapePath))
+                {
+                    con.hasCorruptedShape = true;
+                }
             }
-            if (con.hasMissingStock || con.hasMissingShape)
+            if (con.hasMissingStock || con.hasCorruptedStock || con.hasMissingShape || con.hasCorruptedShape)
             {
                 con.isBroken = true;
             }

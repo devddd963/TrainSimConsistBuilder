@@ -1,3 +1,4 @@
+#include "ModernEditControl.h"
 #include "TrainConfigStudioDlg.h"
 #include "PoolManagerDlg.h"
 #include "UITheme.h"
@@ -63,528 +64,12 @@ namespace StudioTheme
 // Sleek Modern Input Prompt Dialog (Custom Polished Dark Modal - matching PoolManagerDlg)
 // ------------------------------------------------------------------------------------------------
 
-struct StudioPromptState
-{
-    HWND hWnd = NULL;
-    HWND hParent = NULL;
-    HWND hEdit = NULL;
-    std::wstring title;
-    std::wstring prompt;
-    std::wstring resultText;
-    bool isConfirmed = false;
-    bool isNumericOnly = false;
-    bool allowDecimal = false;
-    HFONT hFontTitle = NULL;
-    HFONT hFontPrompt = NULL;
-    HFONT hFontMain = NULL;
-    HFONT hFontBold = NULL;
-    HFONT hFontIcon = NULL;
-    RECT rcOkBtn = { 0 };
-    RECT rcCancelBtn = { 0 };
-    RECT rcCloseBtn = { 0 };
-    bool isHoverOk = false;
-    bool isHoverCancel = false;
-    bool isHoverClose = false;
-};
-
-static HFONT StudioCreateFont(int pointSize, int weight, const wchar_t* faceName)
-{
-    LOGFONTW lf = { 0 };
-    lf.lfHeight = -MulDiv(pointSize, GetDpiForSystem(), 72);
-    lf.lfWeight = weight;
-    lf.lfCharSet = DEFAULT_CHARSET;
-    lf.lfQuality = CLEARTYPE_QUALITY;
-    wcscpy_s(lf.lfFaceName, faceName);
-    return CreateFontIndirectW(&lf);
-}
-
-static LRESULT CALLBACK StudioPromptEditSubclassProc(
-    HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
-    UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
-{
-    StudioPromptState* pState = (StudioPromptState*)dwRefData;
-    if (uMsg == WM_CHAR && pState && pState->isNumericOnly)
-    {
-        wchar_t ch = (wchar_t)wParam;
-        if (ch < 32)
-        {
-            // allow control keys (backspace, enter, escape, ctrl combinations)
-        }
-        else if (ch >= L'0' && ch <= L'9')
-        {
-            // allow digit
-        }
-        else if (ch == L'.' && pState->allowDecimal)
-        {
-            wchar_t szBuf[128] = { 0 };
-            GetWindowTextW(hWnd, szBuf, 128);
-            DWORD dwSel = (DWORD)SendMessageW(hWnd, EM_GETSEL, 0, 0);
-            int selStart = LOWORD(dwSel);
-            int selEnd = HIWORD(dwSel);
-
-            wchar_t* pDot = wcschr(szBuf, L'.');
-            if (pDot)
-            {
-                int dotPos = (int)(pDot - szBuf);
-                if (!(selStart <= dotPos && selEnd > dotPos))
-                {
-                    return 0; // extra decimal point rejected
-                }
-            }
-        }
-        else
-        {
-            return 0; // letters, spaces and symbols rejected
-        }
-    }
-    else if (uMsg == WM_KEYDOWN && wParam == VK_RETURN)
-    {
-        HWND hParent = GetParent(hWnd);
-        if (hParent && pState)
-        {
-            wchar_t buf[256] = { 0 };
-            GetWindowTextW(hWnd, buf, 256);
-            pState->resultText = buf;
-            pState->isConfirmed = true;
-            if (pState->hParent && IsWindow(pState->hParent))
-            {
-                EnableWindow(pState->hParent, TRUE);
-                SetForegroundWindow(pState->hParent);
-                SetActiveWindow(pState->hParent);
-            }
-            DestroyWindow(hParent);
-            return 0;
-        }
-    }
-    else if (uMsg == WM_KEYDOWN && wParam == VK_ESCAPE)
-    {
-        HWND hParent = GetParent(hWnd);
-        if (hParent && pState)
-        {
-            pState->isConfirmed = false;
-            if (pState->hParent && IsWindow(pState->hParent))
-            {
-                EnableWindow(pState->hParent, TRUE);
-                SetForegroundWindow(pState->hParent);
-                SetActiveWindow(pState->hParent);
-            }
-            DestroyWindow(hParent);
-            return 0;
-        }
-    }
-    else if (uMsg == WM_NCDESTROY)
-    {
-        RemoveWindowSubclass(hWnd, StudioPromptEditSubclassProc, uIdSubclass);
-    }
-    return DefSubclassProc(hWnd, uMsg, wParam, lParam);
-}
-
-static void StudioDrawPromptButton(HDC hdc, const RECT& rc, const wchar_t* text, bool isHovered, bool isPressed, bool isAccent, HFONT hFont)
-{
-    COLORREF bgCol;
-    COLORREF borderCol;
-    COLORREF textCol;
-
-    if (isAccent)
-    {
-        bgCol = isPressed ? RGB(0, 100, 185) : (isHovered ? RGB(20, 140, 235) : RGB(0, 120, 215));
-        borderCol = bgCol;
-        textCol = RGB(255, 255, 255);
-    }
-    else
-    {
-        bgCol = isPressed ? RGB(36, 36, 36) : (isHovered ? RGB(52, 52, 52) : RGB(40, 40, 40));
-        borderCol = isHovered ? RGB(80, 80, 80) : RGB(60, 60, 60);
-        textCol = RGB(245, 245, 245);
-    }
-
-    HBRUSH hbr = CreateSolidBrush(bgCol);
-    HPEN hPen = CreatePen(PS_SOLID, 1, borderCol);
-    HBRUSH holdBr = (HBRUSH)SelectObject(hdc, hbr);
-    HPEN holdPen = (HPEN)SelectObject(hdc, hPen);
-
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8);
-
-    SelectObject(hdc, holdBr);
-    SelectObject(hdc, holdPen);
-    DeleteObject(hbr);
-    DeleteObject(hPen);
-
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, textCol);
-    SelectObject(hdc, hFont);
-    RECT rcText = rc;
-    DrawTextW(hdc, text, -1, &rcText, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-}
-
-static LRESULT CALLBACK StudioPromptWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
-{
-    StudioPromptState* pState = (StudioPromptState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
-
-    switch (uMsg)
-    {
-    case WM_NCCREATE:
-    {
-        CREATESTRUCTW* cs = (CREATESTRUCTW*)lParam;
-        pState = (StudioPromptState*)cs->lpCreateParams;
-        pState->hWnd = hWnd;
-        SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)pState);
-        return TRUE;
-    }
-
-    case WM_CREATE:
-    {
-        pState->hFontTitle  = StudioCreateFont(12, FW_SEMIBOLD, L"Segoe UI");
-        pState->hFontPrompt = StudioCreateFont(10, FW_NORMAL, L"Segoe UI");
-        pState->hFontMain   = StudioCreateFont(10, FW_NORMAL, L"Segoe UI");
-        pState->hFontBold   = StudioCreateFont(10, FW_SEMIBOLD, L"Segoe UI");
-        pState->hFontIcon   = StudioCreateFont(10, FW_NORMAL, L"Segoe Fluent Icons");
-        if (!pState->hFontIcon)
-            pState->hFontIcon = StudioCreateFont(10, FW_NORMAL, L"Segoe MDL2 Assets");
-
-        pState->hEdit = CreateWindowExW(
-            0, L"EDIT", pState->resultText.c_str(),
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-            34, 82, 388, 20, hWnd, (HMENU)101, GetModuleHandleW(NULL), NULL
-        );
-        SendMessageW(pState->hEdit, WM_SETFONT, (WPARAM)pState->hFontMain, TRUE);
-        SendMessageW(pState->hEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 6));
-        SendMessageW(pState->hEdit, EM_SETSEL, 0, -1);
-        if (pState->hEdit)
-        {
-            SetWindowSubclass(pState->hEdit, StudioPromptEditSubclassProc, 1, (DWORD_PTR)pState);
-        }
-        SetFocus(pState->hEdit);
-        return 0;
-    }
-
-    case WM_NCHITTEST:
-    {
-        if (!pState) break;
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        ScreenToClient(hWnd, &pt);
-
-        if (PtInRect(&pState->rcOkBtn, pt) ||
-            PtInRect(&pState->rcCancelBtn, pt) ||
-            PtInRect(&pState->rcCloseBtn, pt) ||
-            (pt.x >= 24 && pt.x <= 436 && pt.y >= 74 && pt.y <= 110))
-        {
-            return HTCLIENT;
-        }
-
-        if (pt.y < 50)
-        {
-            return HTCAPTION;
-        }
-        return HTCLIENT;
-    }
-
-    case WM_CTLCOLOREDIT:
-    {
-        HDC hdc = (HDC)wParam;
-        COLORREF bgCol = RGB(28, 28, 28);
-        COLORREF txtCol = RGB(245, 245, 245);
-        SetBkColor(hdc, bgCol);
-        SetTextColor(hdc, txtCol);
-        static HBRUSH hbrEditDark = CreateSolidBrush(RGB(28, 28, 28));
-        return (LRESULT)hbrEditDark;
-    }
-
-    case WM_ERASEBKGND:
-        return TRUE;
-
-    case WM_PAINT:
-    {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
-        RECT rc;
-        GetClientRect(hWnd, &rc);
-        int w = rc.right;
-        int h = rc.bottom;
-
-        HDC hdcMem = CreateCompatibleDC(hdc);
-        HBITMAP hbm = CreateCompatibleBitmap(hdc, w, h);
-        HBITMAP holdBmp = (HBITMAP)SelectObject(hdcMem, hbm);
-
-        // 1. Background Fill
-        COLORREF bgCol = RGB(20, 20, 20);
-        HBRUSH hbrBg = CreateSolidBrush(bgCol);
-        FillRect(hdcMem, &rc, hbrBg);
-        DeleteObject(hbrBg);
-
-        SetBkMode(hdcMem, TRANSPARENT);
-
-        // 2. Header Icon & Title
-        if (pState->hFontIcon)
-        {
-            SelectObject(hdcMem, pState->hFontIcon);
-            SetTextColor(hdcMem, RGB(96, 205, 255));
-            RECT rcIcon = { 20, 16, 44, 42 };
-            DrawTextW(hdcMem, L"\xE70F", -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        }
-
-        SelectObject(hdcMem, pState->hFontTitle);
-        SetTextColor(hdcMem, RGB(255, 255, 255));
-        RECT rcTitle = { 46, 15, w - 50, 42 };
-        DrawTextW(hdcMem, pState->title.c_str(), -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-        // Close Button [✕] at top right
-        pState->rcCloseBtn = { w - 38, 14, w - 14, 38 };
-        if (pState->isHoverClose)
-        {
-            HBRUSH hbrCloseHover = CreateSolidBrush(RGB(55, 55, 55));
-            FillRect(hdcMem, &pState->rcCloseBtn, hbrCloseHover);
-            DeleteObject(hbrCloseHover);
-        }
-        SelectObject(hdcMem, pState->hFontMain);
-        SetTextColor(hdcMem, pState->isHoverClose ? RGB(255, 100, 100) : RGB(160, 160, 160));
-        DrawTextW(hdcMem, L"✕", -1, &pState->rcCloseBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-        // 3. Prompt Subtitle Label
-        SelectObject(hdcMem, pState->hFontPrompt);
-        SetTextColor(hdcMem, RGB(170, 170, 170));
-        RECT rcPrompt = { 24, 48, w - 24, 70 };
-        DrawTextW(hdcMem, pState->prompt.c_str(), -1, &rcPrompt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-        // 4. Custom Rounded Edit Box Container
-        RECT rcEditBox = { 24, 74, w - 24, 110 };
-        COLORREF editBoxBg = RGB(28, 28, 28);
-        COLORREF editBoxBorder = RGB(60, 60, 60);
-
-        HBRUSH hbrBox = CreateSolidBrush(editBoxBg);
-        HPEN hPenBox = CreatePen(PS_SOLID, 1, editBoxBorder);
-        HBRUSH holdB = (HBRUSH)SelectObject(hdcMem, hbrBox);
-        HPEN holdP = (HPEN)SelectObject(hdcMem, hPenBox);
-        RoundRect(hdcMem, rcEditBox.left, rcEditBox.top, rcEditBox.right, rcEditBox.bottom, 6, 6);
-        SelectObject(hdcMem, holdB);
-        SelectObject(hdcMem, holdP);
-        DeleteObject(hbrBox);
-        DeleteObject(hPenBox);
-
-        // 5. Buttons Row
-        int btnW = 90;
-        int btnH = 32;
-        int btnY = h - 48;
-        int btnOkX = w - 24 - btnW;
-        int btnCancelX = btnOkX - 10 - btnW;
-
-        pState->rcOkBtn = { btnOkX, btnY, btnOkX + btnW, btnY + btnH };
-        pState->rcCancelBtn = { btnCancelX, btnY, btnCancelX + btnW, btnY + btnH };
-
-        StudioDrawPromptButton(hdcMem, pState->rcCancelBtn, L"Cancel", pState->isHoverCancel, false, false, pState->hFontMain);
-        StudioDrawPromptButton(hdcMem, pState->rcOkBtn, L"OK", pState->isHoverOk, false, true, pState->hFontBold);
-
-        // 6. 1px Outer Border
-        COLORREF winBorderCol = RGB(50, 50, 50);
-        HPEN hPenWin = CreatePen(PS_SOLID, 1, winBorderCol);
-        HBRUSH hNullB = (HBRUSH)GetStockObject(NULL_BRUSH);
-        SelectObject(hdcMem, hPenWin);
-        SelectObject(hdcMem, hNullB);
-        RoundRect(hdcMem, 0, 0, w, h, 12, 12);
-        DeleteObject(hPenWin);
-
-        BitBlt(hdc, 0, 0, w, h, hdcMem, 0, 0, SRCCOPY);
-        SelectObject(hdcMem, holdBmp);
-        DeleteObject(hbm);
-        DeleteDC(hdcMem);
-
-        EndPaint(hWnd, &ps);
-        return 0;
-    }
-
-    case WM_MOUSEMOVE:
-    {
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        bool hOk = PtInRect(&pState->rcOkBtn, pt) != FALSE;
-        bool hCancel = PtInRect(&pState->rcCancelBtn, pt) != FALSE;
-        bool hClose = PtInRect(&pState->rcCloseBtn, pt) != FALSE;
-
-        if (hOk != pState->isHoverOk || hCancel != pState->isHoverCancel || hClose != pState->isHoverClose)
-        {
-            pState->isHoverOk = hOk;
-            pState->isHoverCancel = hCancel;
-            pState->isHoverClose = hClose;
-            InvalidateRect(hWnd, NULL, FALSE);
-
-            TRACKMOUSEEVENT tme = { 0 };
-            tme.cbSize = sizeof(TRACKMOUSEEVENT);
-            tme.dwFlags = TME_LEAVE;
-            tme.hwndTrack = hWnd;
-            TrackMouseEvent(&tme);
-        }
-        return 0;
-    }
-
-    case WM_MOUSELEAVE:
-    {
-        pState->isHoverOk = false;
-        pState->isHoverCancel = false;
-        pState->isHoverClose = false;
-        InvalidateRect(hWnd, NULL, FALSE);
-        return 0;
-    }
-
-    case WM_LBUTTONUP:
-    {
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        if (PtInRect(&pState->rcOkBtn, pt))
-        {
-            wchar_t buf[256] = { 0 };
-            GetWindowTextW(pState->hEdit, buf, 256);
-            pState->resultText = buf;
-            pState->isConfirmed = true;
-            if (pState->hParent && IsWindow(pState->hParent))
-            {
-                EnableWindow(pState->hParent, TRUE);
-                SetForegroundWindow(pState->hParent);
-                SetActiveWindow(pState->hParent);
-            }
-            DestroyWindow(hWnd);
-            return 0;
-        }
-        else if (PtInRect(&pState->rcCancelBtn, pt) || PtInRect(&pState->rcCloseBtn, pt))
-        {
-            if (pState->hParent && IsWindow(pState->hParent))
-            {
-                EnableWindow(pState->hParent, TRUE);
-                SetForegroundWindow(pState->hParent);
-                SetActiveWindow(pState->hParent);
-            }
-            DestroyWindow(hWnd);
-            return 0;
-        }
-        return 0;
-    }
-
-    case WM_CLOSE:
-    {
-        pState->isConfirmed = false;
-        if (pState->hParent && IsWindow(pState->hParent))
-        {
-            EnableWindow(pState->hParent, TRUE);
-            SetForegroundWindow(pState->hParent);
-            SetActiveWindow(pState->hParent);
-        }
-        DestroyWindow(hWnd);
-        return 0;
-    }
-
-    case WM_DESTROY:
-    {
-        if (pState)
-        {
-            if (pState->hFontTitle)  DeleteObject(pState->hFontTitle);
-            if (pState->hFontPrompt) DeleteObject(pState->hFontPrompt);
-            if (pState->hFontMain)   DeleteObject(pState->hFontMain);
-            if (pState->hFontBold)   DeleteObject(pState->hFontBold);
-            if (pState->hFontIcon)   DeleteObject(pState->hFontIcon);
-        }
-        return 0;
-    }
-    default:
-        break;
-    }
-    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
-}
-
+// ------------------------------------------------------------------------------------------------
+// Forward to Unified Modern Input Prompt Dialog
+// ------------------------------------------------------------------------------------------------
 static bool ShowStudioPrompt(HWND hParent, const std::wstring& title, const std::wstring& prompt, const std::wstring& initialVal, std::wstring& outVal, bool isNumericOnly = false, bool allowDecimal = false)
 {
-    static bool s_PromptRegistered = false;
-    const wchar_t* szClassName = L"TrainConfigStudioPromptModalClass";
-    if (!s_PromptRegistered)
-    {
-        WNDCLASSEXW wcex = { 0 };
-        wcex.cbSize = sizeof(WNDCLASSEXW);
-        wcex.style = CS_HREDRAW | CS_VREDRAW;
-        wcex.lpfnWndProc = StudioPromptWndProc;
-        wcex.hInstance = GetModuleHandleW(NULL);
-        wcex.hCursor = LoadCursorW(NULL, IDC_ARROW);
-        wcex.hbrBackground = CreateSolidBrush(RGB(20, 20, 20));
-        wcex.lpszClassName = szClassName;
-        RegisterClassExW(&wcex);
-        s_PromptRegistered = true;
-    }
-
-    StudioPromptState state;
-    state.hParent = hParent;
-    state.title = title;
-    state.prompt = prompt;
-    state.resultText = initialVal;
-    state.isNumericOnly = isNumericOnly;
-    state.allowDecimal = allowDecimal;
-
-    int dlgW = 460;
-    int dlgH = 180;
-    RECT rcParent;
-    if (hParent && IsWindow(hParent)) GetWindowRect(hParent, &rcParent);
-    else SystemParametersInfoW(SPI_GETWORKAREA, 0, &rcParent, 0);
-
-    int x = rcParent.left + (rcParent.right - rcParent.left - dlgW) / 2;
-    int y = rcParent.top + (rcParent.bottom - rcParent.top - dlgH) / 2;
-
-    HWND hPrompt = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-        szClassName, title.c_str(),
-        WS_POPUP | WS_VISIBLE,
-        x, y, dlgW, dlgH,
-        hParent, NULL, GetModuleHandleW(NULL), &state
-    );
-
-    if (!hPrompt) return false;
-
-    BOOL bDark = TRUE;
-    DwmSetWindowAttribute(hPrompt, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDark, sizeof(bDark));
-    DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
-    DwmSetWindowAttribute(hPrompt, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-
-#ifndef DWMWA_BORDER_COLOR
-#define DWMWA_BORDER_COLOR 34
-#endif
-    COLORREF borderColor = RGB(50, 50, 50);
-    DwmSetWindowAttribute(hPrompt, (DWMWINDOWATTRIBUTE)DWMWA_BORDER_COLOR, &borderColor, sizeof(borderColor));
-
-    if (hParent && IsWindow(hParent))
-    {
-        EnableWindow(hParent, FALSE);
-    }
-
-    MSG msg;
-    while (IsWindow(hPrompt) && GetMessageW(&msg, NULL, 0, 0))
-    {
-        if (msg.message == WM_KEYDOWN)
-        {
-            if (msg.wParam == VK_RETURN)
-            {
-                wchar_t buf[256] = { 0 };
-                GetWindowTextW(state.hEdit, buf, 256);
-                state.resultText = buf;
-                state.isConfirmed = true;
-                DestroyWindow(hPrompt);
-                break;
-            }
-            else if (msg.wParam == VK_ESCAPE)
-            {
-                DestroyWindow(hPrompt);
-                break;
-            }
-        }
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
-
-    if (hParent && IsWindow(hParent))
-    {
-        EnableWindow(hParent, TRUE);
-        SetForegroundWindow(hParent);
-        SetActiveWindow(hParent);
-    }
-
-    if (state.isConfirmed)
-    {
-        outVal = state.resultText;
-        return true;
-    }
-    return false;
+    return ShowModernInputPrompt(hParent, title, prompt, initialVal, outVal, isNumericOnly, allowDecimal);
 }
 
 // Studio Dialog State
@@ -752,6 +237,16 @@ struct StudioDlgState
     int unitDropTargetPool = -1;
     int unitDropTargetUnitIdx = -1;
     RECT rcUnitDropIndicator = { 0 };
+
+        // Blueprint In-Place Edit Controls
+    HWND hEditBpName = NULL;
+    HWND hEditBpId = NULL;
+    HWND hEditBpType = NULL;
+    HWND hEditBpCategory = NULL;
+    HWND hEditBpSpeed = NULL;
+    HWND hEditBpPerf = NULL;
+    HWND hEditBpDesc = NULL;
+    bool isSyncingBpEdits = false;
 
     TrainConfigManager::TrainConfig activeConfig;
     TrainConfigManager::TrainBinding activeBinding;
@@ -936,6 +431,35 @@ struct StudioDlgState
     void SyncActiveConfigFromFields() {}
     void ShowEditorFields(bool) {}
 };
+
+static void SyncBlueprintEditsFromConfig(StudioDlgState* pState)
+{
+    if (!pState) return;
+    pState->isSyncingBpEdits = true;
+    if (pState->hEditBpName && IsWindow(pState->hEditBpName))
+        SetWindowTextW(pState->hEditBpName, pState->activeConfig.name.c_str());
+    if (pState->hEditBpId && IsWindow(pState->hEditBpId))
+        SetWindowTextW(pState->hEditBpId, pState->activeConfig.id.c_str());
+    if (pState->hEditBpType && IsWindow(pState->hEditBpType))
+        SetWindowTextW(pState->hEditBpType, pState->activeConfig.trainType.c_str());
+    if (pState->hEditBpCategory && IsWindow(pState->hEditBpCategory))
+        SetWindowTextW(pState->hEditBpCategory, pState->activeConfig.category.c_str());
+
+    std::wstring speedStr = (pState->activeConfig.maxSpeedKmph > 0.0) ? std::to_wstring((int)pState->activeConfig.maxSpeedKmph) : L"";
+    if (pState->hEditBpSpeed && IsWindow(pState->hEditBpSpeed))
+        SetWindowTextW(pState->hEditBpSpeed, speedStr.c_str());
+
+    wchar_t szPerf[64] = { 0 };
+    swprintf_s(szPerf, 64, (pState->activeConfig.perfFactor == (int)pState->activeConfig.perfFactor) ? L"%.1f" : L"%.3f", pState->activeConfig.perfFactor);
+    std::wstring perfStr = (pState->activeConfig.perfFactor > 0.0) ? szPerf : L"1.0";
+    if (pState->hEditBpPerf && IsWindow(pState->hEditBpPerf))
+        SetWindowTextW(pState->hEditBpPerf, perfStr.c_str());
+
+    if (pState->hEditBpDesc && IsWindow(pState->hEditBpDesc))
+        SetWindowTextW(pState->hEditBpDesc, pState->activeConfig.description.c_str());
+    pState->isSyncingBpEdits = false;
+}
+
 
 #define TIMER_STUDIO_REPEAT_ID 8899
 
@@ -1596,6 +1120,7 @@ static void HandleTreeContextMenuCmd(HWND hWnd, StudioDlgState* pState, int cmd,
                         {
                             pState->selectedConfigIdx = (int)c;
                             pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[c];
+                            SyncBlueprintEditsFromConfig(pState);
                             pState->PopulateFieldsFromActiveConfig();
                             break;
                         }
@@ -1673,6 +1198,7 @@ static void HandleTreeContextMenuCmd(HWND hWnd, StudioDlgState* pState, int cmd,
                 {
                     pState->selectedConfigIdx = 0;
                     pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[0];
+                    SyncBlueprintEditsFromConfig(pState);
                     pState->selectedCategory = pState->activeConfig.category;
                     pState->PopulateFieldsFromActiveConfig();
                 }
@@ -1715,6 +1241,7 @@ static void HandleTreeContextMenuCmd(HWND hWnd, StudioDlgState* pState, int cmd,
                     {
                         pState->selectedConfigIdx = (int)c;
                         pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[c];
+                        SyncBlueprintEditsFromConfig(pState);
                         pState->PopulateFieldsFromActiveConfig();
                         break;
                     }
@@ -1812,6 +1339,7 @@ static void HandleTreeContextMenuCmd(HWND hWnd, StudioDlgState* pState, int cmd,
                 {
                     pState->selectedConfigIdx = 0;
                     pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[0];
+                    SyncBlueprintEditsFromConfig(pState);
                     pState->selectedCategory = pState->activeConfig.category;
                     pState->PopulateFieldsFromActiveConfig();
                 }
@@ -1988,6 +1516,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                 {
                     pState->selectedConfigIdx = (int)i;
                     pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[i];
+                    SyncBlueprintEditsFromConfig(pState);
                     TrainConfigManager::LoadTrainBinding(pState->activeConfig, pState->activeBinding);
                     break;
                 }
@@ -1998,14 +1527,61 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             pState->selectedConfigIdx = -1;
             pState->selectedCategory = L"";
             pState->activeConfig = TrainConfigManager::TrainConfig();
+            SyncBlueprintEditsFromConfig(pState);
             pState->activeBinding = TrainConfigManager::TrainBinding();
         }
+
+        // Create the 7 in-place blueprint editor controls
+        // All controls use ES_LEFT with ES_AUTOHSCROLL for proper viewing and scrolling without glitching.
+        const DWORD dwTextStyle = WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL | ES_MULTILINE | ES_LEFT | WS_TABSTOP;
+        const DWORD dwNumStyle  = WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL | ES_MULTILINE | ES_LEFT | WS_TABSTOP;
+        HINSTANCE hInst = GetModuleHandleW(NULL);
+
+        pState->hEditBpName     = CreateWindowExW(0, L"EDIT", L"", dwTextStyle, 0, 0, 0, 0, hWnd, (HMENU)4001, hInst, NULL);
+        pState->hEditBpId       = CreateWindowExW(0, L"EDIT", L"", dwTextStyle, 0, 0, 0, 0, hWnd, (HMENU)4002, hInst, NULL);
+        pState->hEditBpType     = CreateWindowExW(0, L"EDIT", L"", dwTextStyle, 0, 0, 0, 0, hWnd, (HMENU)4003, hInst, NULL);
+        pState->hEditBpCategory = CreateWindowExW(0, L"EDIT", L"", dwTextStyle, 0, 0, 0, 0, hWnd, (HMENU)4004, hInst, NULL);
+        pState->hEditBpSpeed    = CreateWindowExW(0, L"EDIT", L"", dwNumStyle,  0, 0, 0, 0, hWnd, (HMENU)4005, hInst, NULL);
+        pState->hEditBpPerf     = CreateWindowExW(0, L"EDIT", L"", dwNumStyle,  0, 0, 0, 0, hWnd, (HMENU)4006, hInst, NULL);
+        pState->hEditBpDesc     = CreateWindowExW(0, L"EDIT", L"", dwTextStyle, 0, 0, 0, 0, hWnd, (HMENU)4007, hInst, NULL);
+
+        HWND edits[] = { pState->hEditBpName, pState->hEditBpId, pState->hEditBpType, pState->hEditBpCategory, pState->hEditBpSpeed, pState->hEditBpPerf, pState->hEditBpDesc };
+        for (HWND hEd : edits)
+        {
+            if (hEd)
+            {
+                SendMessageW(hEd, WM_SETFONT, (WPARAM)pState->hFontMain, TRUE);
+                SendMessageW(hEd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(9, 9));
+            }
+        }
+
+        ModernEdit_Attach(pState->hEditBpName, false, true, false, false);
+        ModernEdit_Attach(pState->hEditBpId, false, true, false, false);
+        ModernEdit_Attach(pState->hEditBpType, false, true, false, false);
+        ModernEdit_Attach(pState->hEditBpCategory, false, true, false, false);
+        ModernEdit_Attach(pState->hEditBpSpeed, true, true, false, false);
+        ModernEdit_Attach(pState->hEditBpPerf, true, true, true, false);
+        ModernEdit_Attach(pState->hEditBpDesc, false, true, false, false);
+
+        SendMessageW(pState->hEditBpName, EM_SETCUEBANNER, TRUE, (LPARAM)L"Enter Train Name...");
+        SendMessageW(pState->hEditBpId, EM_SETCUEBANNER, TRUE, (LPARAM)L"Enter Unique ID...");
+        SendMessageW(pState->hEditBpType, EM_SETCUEBANNER, TRUE, (LPARAM)L"e.g. Electric / Diesel / EMU");
+        SendMessageW(pState->hEditBpCategory, EM_SETCUEBANNER, TRUE, (LPARAM)L"e.g. Express / Freight");
+        SendMessageW(pState->hEditBpSpeed, EM_SETCUEBANNER, TRUE, (LPARAM)L"e.g. 130");
+        SendMessageW(pState->hEditBpPerf, EM_SETCUEBANNER, TRUE, (LPARAM)L"e.g. 1.00");
+        SendMessageW(pState->hEditBpDesc, EM_SETCUEBANNER, TRUE, (LPARAM)L"Enter train description, rake details or operational notes...");
+
+        SyncBlueprintEditsFromConfig(pState);
 
         return 0;
     }
 
     case WM_ERASEBKGND:
         return TRUE;
+    case WM_CTLCOLOREDIT:
+    {
+        return ModernEdit_OnCtlColor((HDC)wParam, (HWND)lParam);
+    }
 
     case WM_PAINT:
     {
@@ -2104,7 +1680,8 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             FillRect(hdcMem, &pState->rcSplitter, hbrSplitter);
             DeleteObject(hbrSplitter);
 
-            HPEN hPenSplitter = CreatePen(PS_SOLID, 1, StudioTheme::CardBorder);
+            COLORREF clrSplitter = pState->isDraggingSplitter ? RGB(0, 160, 255) : StudioTheme::CardBorder;
+            HPEN hPenSplitter = CreatePen(PS_SOLID, 1, clrSplitter);
             HPEN hOldP3 = (HPEN)SelectObject(hdcMem, hPenSplitter);
 
             // Left line of the splitter
@@ -2468,70 +2045,41 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
 
                 int curRowY = edY + cardPad;
 
-                auto drawStudioInputField = [&](const wchar_t* label, const std::wstring& val, const wchar_t* placeholder, int lblX, int valX, int valW, int rowY, ClickControl::Type ctrlType) {
+                auto drawStudioLabel = [&](const wchar_t* label, int lblX, int valX, int rowY) {
                     RECT rcLbl = { lblX, rowY, valX - 8, rowY + fieldH };
                     SelectObject(hdcMem, pState->hFontBold);
                     SetTextColor(hdcMem, StudioTheme::TextSecondary);
                     DrawTextW(hdcMem, label, -1, &rcLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                    RECT rcVal = { valX, rowY, valX + valW, rowY + fieldH };
-                    ClickControl cc = { ctrlType, rcVal };
-                    int idx = (int)pState->clickControls.size();
-                    pState->clickControls.push_back(cc);
-
-                    bool isHover = (pState->hoveredControlIdx == idx);
-                    bool isPressed = (pState->pressedControlIdx == idx);
-
-                    COLORREF bgCol = isPressed ? RGB(26, 26, 26) : (isHover ? RGB(45, 45, 45) : RGB(34, 34, 34));
-                    COLORREF borderCol = isPressed ? StudioTheme::AccentBlue : (isHover ? RGB(80, 80, 80) : StudioTheme::CardBorder);
-
-                    HBRUSH hbr = CreateSolidBrush(bgCol);
-                    HPEN hPen = CreatePen(PS_SOLID, 1, borderCol);
-                    SelectObject(hdcMem, hbr);
-                    SelectObject(hdcMem, hPen);
-                    RoundRect(hdcMem, rcVal.left, rcVal.top, rcVal.right, rcVal.bottom, 6, 6);
-                    DeleteObject(hbr);
-                    DeleteObject(hPen);
-
-                    RECT rcText = { rcVal.left + 10, rcVal.top, rcVal.right - (isHover ? 26 : 10), rcVal.bottom };
-                    SelectObject(hdcMem, val.empty() ? pState->hFontSmall : pState->hFontBold);
-                    SetTextColor(hdcMem, val.empty() ? StudioTheme::TextMuted : StudioTheme::TextPrimary);
-                    DrawTextW(hdcMem, val.empty() ? placeholder : val.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                    if (isHover) {
-                        SelectObject(hdcMem, pState->hFontIconSmall);
-                        SetTextColor(hdcMem, StudioTheme::AccentBlue);
-                        RECT rcEditIcon = { rcVal.right - 24, rcVal.top, rcVal.right - 6, rcVal.bottom };
-                        DrawTextW(hdcMem, L"\xE70F", -1, &rcEditIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                    }
                 };
 
                 // Row 1: Train Name & Train ID
-                drawStudioInputField(L"Train Name", pState->activeConfig.name, L"Enter Train Name...", col1LabelX, col1ValX, col1ValW, curRowY, ClickControl::BTN_EDIT_NAME);
-                drawStudioInputField(L"Train ID", pState->activeConfig.id, L"Enter Unique ID...", col2LabelX, col2ValX, col2ValW, curRowY, ClickControl::BTN_EDIT_ID);
+                drawStudioLabel(L"Train Name", col1LabelX, col1ValX, curRowY);
+                if (pState->hEditBpName) SetWindowPos(pState->hEditBpName, NULL, col1ValX, curRowY, col1ValW, fieldH, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+                drawStudioLabel(L"Train ID", col2LabelX, col2ValX, curRowY);
+                if (pState->hEditBpId) SetWindowPos(pState->hEditBpId, NULL, col2ValX, curRowY, col2ValW, fieldH, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
                 curRowY += fieldH + rowGap;
 
                 // Row 2: Type / Power & Category
-                drawStudioInputField(L"Type / Power", pState->activeConfig.trainType, L"e.g. Electric / Diesel / EMU", col1LabelX, col1ValX, col1ValW, curRowY, ClickControl::BTN_EDIT_TYPE);
-                drawStudioInputField(L"Category", pState->activeConfig.category, L"e.g. Express / Freight", col2LabelX, col2ValX, col2ValW, curRowY, ClickControl::BTN_EDIT_CATEGORY);
+                drawStudioLabel(L"Type / Power", col1LabelX, col1ValX, curRowY);
+                if (pState->hEditBpType) SetWindowPos(pState->hEditBpType, NULL, col1ValX, curRowY, col1ValW, fieldH, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+                drawStudioLabel(L"Category", col2LabelX, col2ValX, curRowY);
+                if (pState->hEditBpCategory) SetWindowPos(pState->hEditBpCategory, NULL, col2ValX, curRowY, col2ValW, fieldH, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
                 curRowY += fieldH + rowGap;
 
                 // Row 3: Speed Limit & Performance Factor
-                std::wstring speedStr = (pState->activeConfig.maxSpeedKmph > 0.0) ? std::to_wstring((int)pState->activeConfig.maxSpeedKmph) : L"";
-                drawStudioInputField(L"Speed Limit (km/h)", speedStr, L"e.g. 130", col1LabelX, col1ValX, col1ValW, curRowY, ClickControl::BTN_EDIT_MAXSPEED);
-
-                wchar_t szPerf[64] = { 0 };
-                swprintf_s(szPerf, 64, (pState->activeConfig.perfFactor == (int)pState->activeConfig.perfFactor) ? L"%.1f" : L"%.3f", pState->activeConfig.perfFactor);
-                std::wstring perfStr = (pState->activeConfig.perfFactor > 0.0) ? szPerf : L"1.0";
-                drawStudioInputField(L"Performance Factor (%)", perfStr, L"e.g. 1.0 or 0.100", col2LabelX, col2ValX, col2ValW, curRowY, ClickControl::BTN_EDIT_PERFFACTOR);
+                drawStudioLabel(L"Speed Limit (km/h)", col1LabelX, col1ValX, curRowY);
+                if (pState->hEditBpSpeed) SetWindowPos(pState->hEditBpSpeed, NULL, col1ValX, curRowY, col1ValW, fieldH, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+                drawStudioLabel(L"Performance Factor (%)", col2LabelX, col2ValX, curRowY);
+                if (pState->hEditBpPerf) SetWindowPos(pState->hEditBpPerf, NULL, col2ValX, curRowY, col2ValW, fieldH, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
                 curRowY += fieldH + rowGap;
 
                 // Row 4: Description (Full row width)
                 int descValW = editorW - (cardPad * 2) - labelW - 8;
-                drawStudioInputField(L"Description", pState->activeConfig.description, L"Enter train description, rake details or operational notes...", col1LabelX, col1ValX, descValW, curRowY, ClickControl::BTN_EDIT_DESC);
+                drawStudioLabel(L"Description", col1LabelX, col1ValX, curRowY);
+                if (pState->hEditBpDesc) SetWindowPos(pState->hEditBpDesc, NULL, col1ValX, curRowY, descValW, fieldH, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOACTIVATE);
 
                 edY += cardH + 16;
 
@@ -3792,6 +3340,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
 
     case WM_LBUTTONDOWN:
     {
+        SetFocus(hWnd);
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         RECT rcClient;
         GetClientRect(hWnd, &rcClient);
@@ -3834,6 +3383,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             pState->dragSidebarStartW = pState->sidebarWidth;
             SetCapture(hWnd);
             SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+            InvalidateRect(hWnd, &pState->rcSplitter, FALSE);
             return 0;
         }
 
@@ -3940,6 +3490,15 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         }
 
         // Check potential drag on Binding Unit Chips (Tab 1)
+        if (pState->hEditBpName && IsWindow(pState->hEditBpName)) {
+            ShowWindow(pState->hEditBpName, SW_HIDE);
+            ShowWindow(pState->hEditBpId, SW_HIDE);
+            ShowWindow(pState->hEditBpType, SW_HIDE);
+            ShowWindow(pState->hEditBpCategory, SW_HIDE);
+            ShowWindow(pState->hEditBpSpeed, SW_HIDE);
+            ShowWindow(pState->hEditBpPerf, SW_HIDE);
+            ShowWindow(pState->hEditBpDesc, SW_HIDE);
+        }
         if (pState->activeTab == 1)
         {
             bool hitChildBtn = false;
@@ -4239,6 +3798,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                             {
                                 pState->selectedConfigIdx = cIdx;
                                 pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[cIdx];
+                                SyncBlueprintEditsFromConfig(pState);
                                 pState->selectedCategory = pState->activeConfig.category;
                                 TrainConfigManager::LoadTrainBinding(pState->activeConfig, pState->activeBinding);
                                 pState->PopulateFieldsFromActiveConfig();
@@ -4293,6 +3853,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                     {
                         pState->selectedConfigIdx = idx;
                         pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[idx];
+                        SyncBlueprintEditsFromConfig(pState);
                         pState->selectedCategory = pState->activeConfig.category;
                         TrainConfigManager::LoadTrainBinding(pState->activeConfig, pState->activeBinding);
                         pState->PopulateFieldsFromActiveConfig();
@@ -4316,6 +3877,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                             pState->selectedCategory = newName;
                             pState->selectedConfigIdx = -1;
                             pState->activeConfig = TrainConfigManager::TrainConfig();
+                            SyncBlueprintEditsFromConfig(pState);
                             pState->activeConfig.category = newName;
                             pState->activeBinding = TrainConfigManager::TrainBinding();
                             pState->PopulateFieldsFromActiveConfig();
@@ -4343,6 +3905,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                             pState->selectedCategory = fullCat;
                             pState->selectedConfigIdx = -1;
                             pState->activeConfig = TrainConfigManager::TrainConfig();
+                            SyncBlueprintEditsFromConfig(pState);
                             pState->activeConfig.category = fullCat;
                             pState->activeBinding = TrainConfigManager::TrainBinding();
                             pState->PopulateFieldsFromActiveConfig();
@@ -4483,6 +4046,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                             {
                                 pState->selectedCategory = L"";
                                 pState->activeConfig = TrainConfigManager::TrainConfig();
+                                SyncBlueprintEditsFromConfig(pState);
                                 pState->activeBinding = TrainConfigManager::TrainBinding();
                                 pState->PopulateFieldsFromActiveConfig();
                             }
@@ -4553,6 +4117,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                                 {
                                     pState->selectedConfigIdx = (int)i;
                                     pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[i];
+                                    SyncBlueprintEditsFromConfig(pState);
                                     TrainConfigManager::LoadTrainBinding(pState->activeConfig, pState->activeBinding);
                                     pState->PopulateFieldsFromActiveConfig();
                                     break;
@@ -4604,6 +4169,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                                     {
                                         pState->selectedConfigIdx = (int)i;
                                         pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[i];
+                                        SyncBlueprintEditsFromConfig(pState);
                                         TrainConfigManager::LoadTrainBinding(pState->activeConfig, pState->activeBinding);
                                         pState->PopulateFieldsFromActiveConfig();
                                         break;
@@ -4651,6 +4217,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                                 {
                                     pState->selectedConfigIdx = (int)i;
                                     pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[i];
+                                    SyncBlueprintEditsFromConfig(pState);
                                     TrainConfigManager::LoadTrainBinding(pState->activeConfig, pState->activeBinding);
                                     pState->PopulateFieldsFromActiveConfig();
                                     break;
@@ -4659,6 +4226,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                             if (pState->selectedConfigIdx == -1)
                             {
                                 pState->activeConfig = TrainConfigManager::TrainConfig();
+                                SyncBlueprintEditsFromConfig(pState);
                                 pState->activeBinding = TrainConfigManager::TrainBinding();
                                 pState->PopulateFieldsFromActiveConfig();
                             }
@@ -5690,6 +5258,7 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                     pState->SyncActiveConfigFromFields();
                     pState->selectedConfigIdx = item.configIndex;
                     pState->activeConfig = TrainConfigManager::g_LoadedConfigsCache[item.configIndex];
+                    SyncBlueprintEditsFromConfig(pState);
                     pState->selectedCategory = pState->activeConfig.category;
                     TrainConfigManager::LoadTrainBinding(pState->activeConfig, pState->activeBinding);
                     pState->PopulateFieldsFromActiveConfig();
@@ -5870,10 +5439,46 @@ static LRESULT CALLBACK TrainConfigStudioWndProc(HWND hWnd, UINT uMsg, WPARAM wP
     {
         WORD wmEvent = HIWORD(wParam);
         HWND hwndCtrl = (HWND)lParam;
-        if (wmEvent == EN_CHANGE && hwndCtrl && pState)
+        if (wmEvent == EN_CHANGE && hwndCtrl && pState && !pState->isSyncingBpEdits)
         {
             pState->isDirtyBlueprint = true;
-            InvalidateRect(hwndCtrl, NULL, TRUE);
+            wchar_t buf[512] = { 0 };
+            if (hwndCtrl == pState->hEditBpName)
+            {
+                GetWindowTextW(pState->hEditBpName, buf, 512);
+                pState->activeConfig.name = buf;
+            }
+            else if (hwndCtrl == pState->hEditBpId)
+            {
+                GetWindowTextW(pState->hEditBpId, buf, 512);
+                pState->activeConfig.id = buf;
+            }
+            else if (hwndCtrl == pState->hEditBpType)
+            {
+                GetWindowTextW(pState->hEditBpType, buf, 512);
+                pState->activeConfig.trainType = buf;
+            }
+            else if (hwndCtrl == pState->hEditBpCategory)
+            {
+                GetWindowTextW(pState->hEditBpCategory, buf, 512);
+                pState->activeConfig.category = buf;
+                pState->selectedCategory = buf;
+            }
+            else if (hwndCtrl == pState->hEditBpSpeed)
+            {
+                GetWindowTextW(pState->hEditBpSpeed, buf, 512);
+                try { pState->activeConfig.maxSpeedKmph = std::stod(buf); } catch (...) { pState->activeConfig.maxSpeedKmph = 0.0; }
+            }
+            else if (hwndCtrl == pState->hEditBpPerf)
+            {
+                GetWindowTextW(pState->hEditBpPerf, buf, 512);
+                try { double pf = std::stod(buf); if (pf > 0.0) pState->activeConfig.perfFactor = pf; } catch (...) { pState->activeConfig.perfFactor = 1.0; }
+            }
+            else if (hwndCtrl == pState->hEditBpDesc)
+            {
+                GetWindowTextW(pState->hEditBpDesc, buf, 512);
+                pState->activeConfig.description = buf;
+            }
         }
 
         // Custom TitleBar Navigation Commands (Fallback)

@@ -1,4 +1,5 @@
 #include "CommandBar.h"
+#include "UIScaleEngine.h"
 #include "../SRC/Updater.h"
 #include <uxtheme.h>
 #include <vsstyle.h>
@@ -31,54 +32,6 @@ struct CommandBarState
 
 static CommandBarState g_State;
 
-static HFONT CreateMdl2IconFont(float pointSize)
-{
-    LOGFONTW lf = { 0 };
-    lf.lfHeight = -MulDiv((int)(pointSize * 10), GetDpiForSystem(), 720);
-    lf.lfWeight = FW_NORMAL;
-    lf.lfCharSet = DEFAULT_CHARSET;
-    lf.lfQuality = CLEARTYPE_QUALITY;
-    wcscpy_s(lf.lfFaceName, L"Segoe MDL2 Assets");
-
-    HFONT hFont = CreateFontIndirectW(&lf);
-    if (!hFont)
-    {
-        wcscpy_s(lf.lfFaceName, L"Segoe Fluent Icons");
-        hFont = CreateFontIndirectW(&lf);
-    }
-    if (!hFont)
-    {
-        wcscpy_s(lf.lfFaceName, L"Segoe UI Symbol");
-        hFont = CreateFontIndirectW(&lf);
-    }
-    return hFont;
-}
-
-static HFONT CreateSystemUiFont(int pointSize, int weight = FW_NORMAL)
-{
-    LOGFONTW lf = { 0 };
-    lf.lfHeight = -MulDiv(pointSize, GetDpiForSystem(), 72);
-    lf.lfWeight = weight;
-    lf.lfCharSet = DEFAULT_CHARSET;
-    lf.lfQuality = CLEARTYPE_QUALITY;
-    wcscpy_s(lf.lfFaceName, L"Segoe UI");
-
-    HFONT hFont = CreateFontIndirectW(&lf);
-    if (!hFont)
-    {
-        NONCLIENTMETRICS ncm = { 0 };
-        ncm.cbSize = sizeof(NONCLIENTMETRICS);
-        if (SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICS), &ncm, 0))
-        {
-            ncm.lfMessageFont.lfHeight = lf.lfHeight;
-            ncm.lfMessageFont.lfWeight = weight;
-            ncm.lfMessageFont.lfQuality = CLEARTYPE_QUALITY;
-            hFont = CreateFontIndirectW(&ncm.lfMessageFont);
-        }
-    }
-    return hFont;
-}
-
 static CommandItem g_Items[] = {
     { CMD_ACTION_NEW_CONSIST,        L"\xE710", L"New Consist",        FALSE, FALSE, FALSE, 100, {0}, TRUE },
     { CMD_ACTION_CLONE_CONSIST,      L"\xE8C8", L"Clone Consist",      FALSE, FALSE, FALSE, 105, {0}, TRUE },
@@ -99,12 +52,33 @@ static CommandItem g_Items[] = {
 
 static const int g_NumItems = sizeof(g_Items) / sizeof(g_Items[0]);
 
-static void RecalculateItemLayout(int barWidth, int barHeight, HDC hdc = NULL)
+static void UpdateScaledFonts(HWND hWnd)
 {
+    static float s_lastScale = 0.0f;
+    float curScale = UIScale::GetScale();
+    if (std::abs(curScale - s_lastScale) > 0.005f || !g_State.hFontMain)
+    {
+        s_lastScale = curScale;
+        if (g_State.hFontMain) DeleteObject(g_State.hFontMain);
+        if (g_State.hFontIcons) DeleteObject(g_State.hFontIcons);
+        if (g_State.hFontIconsSmall) DeleteObject(g_State.hFontIconsSmall);
+
+        g_State.hFontMain = UIScale::CreateScaledFont(hWnd, L"Segoe UI", 10, FW_NORMAL);
+        g_State.hFontIcons = UIScale::CreateScaledIconFont(hWnd, 10.0f);
+        g_State.hFontIconsSmall = UIScale::CreateScaledIconFont(hWnd, 7.5f);
+    }
+}
+
+static void RecalculateItemLayout(int barWidth, int barHeight, HDC hdc = NULL, HWND hWnd = NULL)
+{
+    // Update global UI scale based on available width
+    UIScale::Update(hWnd, barWidth, barHeight);
+    UpdateScaledFonts(hWnd);
+
     bool releaseDC = false;
     if (!hdc)
     {
-        hdc = GetDC(NULL);
+        hdc = GetDC(hWnd);
         releaseDC = true;
     }
 
@@ -114,7 +88,7 @@ static void RecalculateItemLayout(int barWidth, int barHeight, HDC hdc = NULL)
         hOldFont = (HFONT)SelectObject(hdc, g_State.hFontMain);
     }
 
-    // Auto-calculate exact compact fixedWidth for each item with 4-6px side padding
+    // Auto-calculate exact compact fixedWidth for each item using scaled dimensions
     for (int i = 0; i < g_NumItems; ++i)
     {
         if (!g_Items[i].isVisible)
@@ -128,10 +102,10 @@ static void RecalculateItemLayout(int barWidth, int barHeight, HDC hdc = NULL)
         {
             GetTextExtentPoint32W(hdc, g_Items[i].label, (int)wcslen(g_Items[i].label), &sz);
         }
-        int iconW = (g_Items[i].iconGlyph && wcslen(g_Items[i].iconGlyph) > 0) ? 16 : 0;
-        int gap = (iconW > 0 && sz.cx > 0) ? 5 : 0;
-        int pad = 6; // Compact 6px padding on each side for a proper button
-        int chevronW = g_Items[i].hasChevron ? 20 : 0;
+        int iconW = (g_Items[i].iconGlyph && wcslen(g_Items[i].iconGlyph) > 0) ? UIScale::Px(16) : 0;
+        int gap = (iconW > 0 && sz.cx > 0) ? UIScale::Px(5) : 0;
+        int pad = UIScale::Px(6); // Dynamically scaled side padding
+        int chevronW = g_Items[i].hasChevron ? UIScale::Px(20) : 0;
         int minW = pad + iconW + gap + sz.cx + pad + chevronW;
         g_Items[i].fixedWidth = minW;
     }
@@ -142,7 +116,7 @@ static void RecalculateItemLayout(int barWidth, int barHeight, HDC hdc = NULL)
     }
     if (releaseDC)
     {
-        ReleaseDC(NULL, hdc);
+        ReleaseDC(hWnd, hdc);
     }
 
     int currentLeftX = 0;
@@ -170,6 +144,9 @@ static void RecalculateItemLayout(int barWidth, int barHeight, HDC hdc = NULL)
         }
     }
 
+    // Zero-overlap collision barrier: right buttons can NEVER cross into left buttons
+    int leftBoundary = currentLeftX + UIScale::Px(4);
+
     // Layout right-aligned items from right edge inward (in reverse order)
     for (int i = g_NumItems - 1; i >= 0; --i)
     {
@@ -181,12 +158,23 @@ static void RecalculateItemLayout(int barWidth, int barHeight, HDC hdc = NULL)
 
         if (g_Items[i].isRightAligned)
         {
-            g_Items[i].rc.right = currentRightX;
-            g_Items[i].rc.left = currentRightX - g_Items[i].fixedWidth;
+            int itemW = g_Items[i].fixedWidth;
+            int rightX = currentRightX;
+            int leftX = rightX - itemW;
+
+            // Prevent collision / overlap under tight window widths
+            if (leftX < leftBoundary)
+            {
+                g_Items[i].rc = { 0, 0, 0, 0 };
+                continue;
+            }
+
+            g_Items[i].rc.right = rightX;
+            g_Items[i].rc.left = leftX;
             g_Items[i].rc.top = topY;
             g_Items[i].rc.bottom = topY + itemHeight;
 
-            currentRightX -= g_Items[i].fixedWidth;
+            currentRightX -= itemW;
         }
     }
 }
@@ -211,14 +199,10 @@ static LRESULT CALLBACK CommandBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
     {
     case WM_CREATE:
     {
-        g_State.hFontMain = CreateSystemUiFont(10, FW_NORMAL);
-        g_State.hFontIcons = CreateMdl2IconFont(10.0f);
-        g_State.hFontIconsSmall = CreateMdl2IconFont(7.5f);
-
         RECT rc;
         GetClientRect(hWnd, &rc);
         HDC hdc = GetDC(hWnd);
-        RecalculateItemLayout(rc.right - rc.left, rc.bottom - rc.top, hdc);
+        RecalculateItemLayout(rc.right - rc.left, rc.bottom - rc.top, hdc, hWnd);
         ReleaseDC(hWnd, hdc);
     }
     break;
@@ -242,7 +226,8 @@ static LRESULT CALLBACK CommandBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         BOOL inDropdown = FALSE;
         if (hit != -1 && g_Items[hit].hasChevron)
         {
-            if (x >= g_Items[hit].rc.right - 20)
+            int chevronW = UIScale::Px(20);
+            if (x >= g_Items[hit].rc.right - chevronW)
             {
                 inDropdown = TRUE;
             }
@@ -281,7 +266,7 @@ static LRESULT CALLBACK CommandBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         {
             g_State.pressedIndex = hit;
             g_State.pressedInDropdown = FALSE;
-            if (g_Items[hit].hasChevron && x >= g_Items[hit].rc.right - 20)
+            if (g_Items[hit].hasChevron && x >= g_Items[hit].rc.right - UIScale::Px(20))
             {
                 g_State.pressedInDropdown = TRUE;
             }
@@ -347,7 +332,7 @@ static LRESULT CALLBACK CommandBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             RECT rcRightHighlight = rcCell;
             if (g_Items[i].hasChevron)
             {
-                rcLeftHighlight.right -= 20;
+                rcLeftHighlight.right -= UIScale::Px(20);
                 rcRightHighlight.left = rcLeftHighlight.right;
             }
 
@@ -472,8 +457,8 @@ static LRESULT CALLBACK CommandBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
                 GetTextExtentPoint32W(hmemDC, g_Items[i].label, (int)wcslen(g_Items[i].label), &szText);
             }
 
-            int iconW = (g_Items[i].iconGlyph && wcslen(g_Items[i].iconGlyph) > 0) ? 16 : 0;
-            int gap = (iconW > 0 && szText.cx > 0) ? 5 : 0;
+            int iconW = (g_Items[i].iconGlyph && wcslen(g_Items[i].iconGlyph) > 0) ? UIScale::Px(16) : 0;
+            int gap = (iconW > 0 && szText.cx > 0) ? UIScale::Px(5) : 0;
             int totalContentW = iconW + gap + szText.cx;
 
             RECT rcTarget = rcLeftHighlight;
@@ -545,7 +530,7 @@ static LRESULT CALLBACK CommandBarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
     {
         int width = LOWORD(lParam);
         int height = HIWORD(lParam);
-        RecalculateItemLayout(width, height);
+        RecalculateItemLayout(width, height, NULL, hWnd);
         InvalidateRect(hWnd, NULL, TRUE);
     }
     break;

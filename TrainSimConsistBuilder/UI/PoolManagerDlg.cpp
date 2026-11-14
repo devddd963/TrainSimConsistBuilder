@@ -10,6 +10,7 @@
 #include "CustomTitleBar.h"
 #include "ModernContextMenu.h"
 #include "CustomDropDownMenu.h"
+#include "ModernEditControl.h"
 #include "../SRC/TrainConfig.h"
 #include <windowsx.h>
 #include <dwmapi.h>
@@ -32,28 +33,6 @@ extern CRITICAL_SECTION g_StockCacheCS;
 
 static HWND g_hPoolManagerDlg = NULL;
 static const UINT_PTR TIMER_REPEAT_ID = 1001;
-
-struct InputPromptState
-{
-    HWND hWnd = NULL;
-    HWND hParent = NULL;
-    HWND hEdit = NULL;
-    std::wstring title;
-    std::wstring prompt;
-    std::wstring resultText;
-    bool isConfirmed = false;
-    HFONT hFontTitle = NULL;
-    HFONT hFontPrompt = NULL;
-    HFONT hFontMain = NULL;
-    HFONT hFontBold = NULL;
-    HFONT hFontIcon = NULL;
-    RECT rcOkBtn = { 0 };
-    RECT rcCancelBtn = { 0 };
-    RECT rcCloseBtn = { 0 };
-    bool isHoverOk = false;
-    bool isHoverCancel = false;
-    bool isHoverClose = false;
-};
 
 static HFONT CreateCustomFont(int pointSize, int weight, const wchar_t* faceName)
 {
@@ -198,370 +177,6 @@ static void DrawModernButton(HDC hdc, const RECT& rc, const wchar_t* text, bool 
     }
 }
 
-// -------------------------------------------------------------
-// Sleek Modern Input Prompt Dialog (Custom Polished Dark Modal)
-// -------------------------------------------------------------
-static LRESULT CALLBACK InputPromptProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
-{
-    InputPromptState* pState = (InputPromptState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
-
-    switch (uMsg)
-    {
-    case WM_NCCREATE:
-    {
-        LPCREATESTRUCTW lpcs = (LPCREATESTRUCTW)lParam;
-        pState = (InputPromptState*)lpcs->lpCreateParams;
-        SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)pState);
-        pState->hWnd = hWnd;
-        return TRUE;
-    }
-
-    case WM_CREATE:
-    {
-        pState->hFontTitle  = CreateCustomFont(12, FW_SEMIBOLD, L"Segoe UI");
-        pState->hFontPrompt = CreateCustomFont(10, FW_NORMAL, L"Segoe UI");
-        pState->hFontMain   = CreateCustomFont(10, FW_NORMAL, L"Segoe UI");
-        pState->hFontBold   = CreateCustomFont(10, FW_SEMIBOLD, L"Segoe UI");
-        pState->hFontIcon   = CreateCustomFont(10, FW_NORMAL, L"Segoe Fluent Icons");
-        if (!pState->hFontIcon)
-            pState->hFontIcon = CreateCustomFont(10, FW_NORMAL, L"Segoe MDL2 Assets");
-
-        pState->hEdit = CreateWindowExW(
-            0, L"EDIT", pState->resultText.c_str(),
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            34, 82, 388, 20, hWnd, (HMENU)101, GetModuleHandleW(NULL), NULL
-        );
-        SendMessageW(pState->hEdit, WM_SETFONT, (WPARAM)pState->hFontMain, TRUE);
-        SendMessageW(pState->hEdit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(6, 6));
-        SendMessageW(pState->hEdit, EM_SETSEL, 0, -1);
-        SetFocus(pState->hEdit);
-        return 0;
-    }
-
-    case WM_NCHITTEST:
-    {
-        if (!pState) break;
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        ScreenToClient(hWnd, &pt);
-
-        if (PtInRect(&pState->rcOkBtn, pt) ||
-            PtInRect(&pState->rcCancelBtn, pt) ||
-            PtInRect(&pState->rcCloseBtn, pt) ||
-            (pt.x >= 24 && pt.x <= 436 && pt.y >= 74 && pt.y <= 110))
-        {
-            return HTCLIENT;
-        }
-
-        if (pt.y < 50)
-        {
-            return HTCAPTION;
-        }
-        return HTCLIENT;
-    }
-
-    case WM_CTLCOLOREDIT:
-    {
-        HDC hdc = (HDC)wParam;
-        COLORREF bgCol = RGB(28, 28, 28);
-        COLORREF txtCol = RGB(245, 245, 245);
-        SetBkColor(hdc, bgCol);
-        SetTextColor(hdc, txtCol);
-        static HBRUSH hbrEditDark = CreateSolidBrush(RGB(28, 28, 28));
-        return (LRESULT)hbrEditDark;
-    }
-
-    case WM_CTLCOLORSCROLLBAR:
-    {
-        HDC hdc = (HDC)wParam;
-        SetBkColor(hdc, PoolTheme::GutterBackground);
-        static HBRUSH hbrGutterDark = CreateSolidBrush(PoolTheme::GutterBackground);
-        return (LRESULT)hbrGutterDark;
-    }
-
-    case WM_ERASEBKGND:
-        return TRUE;
-
-    case WM_PAINT:
-    {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
-        RECT rc;
-        GetClientRect(hWnd, &rc);
-        int w = rc.right;
-        int h = rc.bottom;
-
-        HDC hdcMem = CreateCompatibleDC(hdc);
-        HBITMAP hbm = CreateCompatibleBitmap(hdc, w, h);
-        HBITMAP holdBmp = (HBITMAP)SelectObject(hdcMem, hbm);
-
-        // 1. Background Fill
-        COLORREF bgCol = RGB(20, 20, 20);
-        HBRUSH hbrBg = CreateSolidBrush(bgCol);
-        FillRect(hdcMem, &rc, hbrBg);
-        DeleteObject(hbrBg);
-
-        SetBkMode(hdcMem, TRANSPARENT);
-
-        // 2. Header Icon & Title
-        if (pState->hFontIcon)
-        {
-            SelectObject(hdcMem, pState->hFontIcon);
-            SetTextColor(hdcMem, RGB(96, 205, 255));
-            RECT rcIcon = { 20, 16, 44, 42 };
-            DrawTextW(hdcMem, L"\xE70F", -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        }
-
-        SelectObject(hdcMem, pState->hFontTitle);
-        SetTextColor(hdcMem, RGB(255, 255, 255));
-        RECT rcTitle = { 46, 15, w - 50, 42 };
-        DrawTextW(hdcMem, pState->title.c_str(), -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-        // Close Button [✕] at top right
-        pState->rcCloseBtn = { w - 38, 14, w - 14, 38 };
-        if (pState->isHoverClose)
-        {
-            HBRUSH hbrCloseHover = CreateSolidBrush(RGB(55, 55, 55));
-            FillRect(hdcMem, &pState->rcCloseBtn, hbrCloseHover);
-            DeleteObject(hbrCloseHover);
-        }
-        SelectObject(hdcMem, pState->hFontMain);
-        SetTextColor(hdcMem, pState->isHoverClose ? RGB(255, 100, 100) : RGB(160, 160, 160));
-        DrawTextW(hdcMem, L"✕", -1, &pState->rcCloseBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-        // 3. Prompt Subtitle Label
-        SelectObject(hdcMem, pState->hFontPrompt);
-        SetTextColor(hdcMem, RGB(170, 170, 170));
-        RECT rcPrompt = { 24, 48, w - 24, 70 };
-        DrawTextW(hdcMem, pState->prompt.c_str(), -1, &rcPrompt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-        // 4. Custom Rounded Edit Box Container
-        RECT rcEditBox = { 24, 74, w - 24, 110 };
-        COLORREF editBoxBg = RGB(28, 28, 28);
-        COLORREF editBoxBorder = RGB(60, 60, 60);
-
-        HBRUSH hbrBox = CreateSolidBrush(editBoxBg);
-        HPEN hPenBox = CreatePen(PS_SOLID, 1, editBoxBorder);
-        HBRUSH holdB = (HBRUSH)SelectObject(hdcMem, hbrBox);
-        HPEN holdP = (HPEN)SelectObject(hdcMem, hPenBox);
-        RoundRect(hdcMem, rcEditBox.left, rcEditBox.top, rcEditBox.right, rcEditBox.bottom, 6, 6);
-        SelectObject(hdcMem, holdB);
-        SelectObject(hdcMem, holdP);
-        DeleteObject(hbrBox);
-        DeleteObject(hPenBox);
-
-        // 5. Buttons Row
-        int btnW = 90;
-        int btnH = 32;
-        int btnY = h - 48;
-        int btnOkX = w - 24 - btnW;
-        int btnCancelX = btnOkX - 10 - btnW;
-
-        pState->rcOkBtn = { btnOkX, btnY, btnOkX + btnW, btnY + btnH };
-        pState->rcCancelBtn = { btnCancelX, btnY, btnCancelX + btnW, btnY + btnH };
-
-        DrawModernButton(hdcMem, pState->rcCancelBtn, L"Cancel", pState->isHoverCancel, false, false, pState->hFontMain);
-        DrawModernButton(hdcMem, pState->rcOkBtn, L"OK", pState->isHoverOk, false, true, pState->hFontBold);
-
-        // 6. 1px Outer Border
-        COLORREF winBorderCol = RGB(50, 50, 50);
-        HPEN hPenWin = CreatePen(PS_SOLID, 1, winBorderCol);
-        HBRUSH hNullB = (HBRUSH)GetStockObject(NULL_BRUSH);
-        SelectObject(hdcMem, hPenWin);
-        SelectObject(hdcMem, hNullB);
-        RoundRect(hdcMem, 0, 0, w, h, 12, 12);
-        DeleteObject(hPenWin);
-
-        BitBlt(hdc, 0, 0, w, h, hdcMem, 0, 0, SRCCOPY);
-        SelectObject(hdcMem, holdBmp);
-        DeleteObject(hbm);
-        DeleteDC(hdcMem);
-
-        EndPaint(hWnd, &ps);
-        return 0;
-    }
-
-    case WM_MOUSEMOVE:
-    {
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        bool hOk = PtInRect(&pState->rcOkBtn, pt) != FALSE;
-        bool hCancel = PtInRect(&pState->rcCancelBtn, pt) != FALSE;
-        bool hClose = PtInRect(&pState->rcCloseBtn, pt) != FALSE;
-
-        if (hOk != pState->isHoverOk || hCancel != pState->isHoverCancel || hClose != pState->isHoverClose)
-        {
-            pState->isHoverOk = hOk;
-            pState->isHoverCancel = hCancel;
-            pState->isHoverClose = hClose;
-            InvalidateRect(hWnd, NULL, FALSE);
-
-            TRACKMOUSEEVENT tme = { 0 };
-            tme.cbSize = sizeof(TRACKMOUSEEVENT);
-            tme.dwFlags = TME_LEAVE;
-            tme.hwndTrack = hWnd;
-            TrackMouseEvent(&tme);
-        }
-        return 0;
-    }
-
-    case WM_MOUSELEAVE:
-    {
-        pState->isHoverOk = false;
-        pState->isHoverCancel = false;
-        pState->isHoverClose = false;
-        InvalidateRect(hWnd, NULL, FALSE);
-        return 0;
-    }
-
-    case WM_LBUTTONUP:
-    {
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        if (PtInRect(&pState->rcOkBtn, pt))
-        {
-            wchar_t buf[256] = { 0 };
-            GetWindowTextW(pState->hEdit, buf, 256);
-            pState->resultText = buf;
-            pState->isConfirmed = true;
-            if (pState->hParent && IsWindow(pState->hParent))
-            {
-                EnableWindow(pState->hParent, TRUE);
-                SetForegroundWindow(pState->hParent);
-                SetActiveWindow(pState->hParent);
-            }
-            DestroyWindow(hWnd);
-            return 0;
-        }
-        else if (PtInRect(&pState->rcCancelBtn, pt) || PtInRect(&pState->rcCloseBtn, pt))
-        {
-            if (pState->hParent && IsWindow(pState->hParent))
-            {
-                EnableWindow(pState->hParent, TRUE);
-                SetForegroundWindow(pState->hParent);
-                SetActiveWindow(pState->hParent);
-            }
-            DestroyWindow(hWnd);
-            return 0;
-        }
-        return 0;
-    }
-
-    case WM_COMMAND:
-    {
-        if (HIWORD(wParam) == EN_UPDATE)
-        {
-            // Edit changed
-        }
-        return 0;
-    }
-
-    case WM_DESTROY:
-    {
-        if (pState)
-        {
-            if (pState->hFontTitle)  DeleteObject(pState->hFontTitle);
-            if (pState->hFontPrompt) DeleteObject(pState->hFontPrompt);
-            if (pState->hFontMain)   DeleteObject(pState->hFontMain);
-            if (pState->hFontBold)   DeleteObject(pState->hFontBold);
-            if (pState->hFontIcon)   DeleteObject(pState->hFontIcon);
-        }
-        return 0;
-    }
-    }
-    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
-}
-
-static bool ShowModernInputPrompt(HWND hWndParent, const std::wstring& title, const std::wstring& prompt, const std::wstring& defaultText, std::wstring& outText)
-{
-    static bool s_PromptRegistered = false;
-    const wchar_t* szClassName = L"ModernInputPromptDialogClass";
-
-    if (!s_PromptRegistered)
-    {
-        WNDCLASSEXW wcex = { 0 };
-        wcex.cbSize = sizeof(WNDCLASSEXW);
-        wcex.style = CS_HREDRAW | CS_VREDRAW;
-        wcex.lpfnWndProc = InputPromptProc;
-        wcex.hInstance = GetModuleHandleW(NULL);
-        wcex.hCursor = LoadCursorW(NULL, IDC_ARROW);
-        wcex.hbrBackground = CreateSolidBrush(RGB(20, 20, 20));
-        wcex.lpszClassName = szClassName;
-        RegisterClassExW(&wcex);
-        s_PromptRegistered = true;
-    }
-
-    InputPromptState state;
-    state.hParent = hWndParent;
-    state.title = title;
-    state.prompt = prompt;
-    state.resultText = defaultText;
-
-    int dlgW = 460;
-    int dlgH = 180;
-
-    RECT rcParent;
-    if (hWndParent && IsWindow(hWndParent))
-    {
-        GetWindowRect(hWndParent, &rcParent);
-    }
-    else
-    {
-        SystemParametersInfoW(SPI_GETWORKAREA, 0, &rcParent, 0);
-    }
-
-    int x = rcParent.left + (rcParent.right - rcParent.left - dlgW) / 2;
-    int y = rcParent.top + (rcParent.bottom - rcParent.top - dlgH) / 2;
-
-    HWND hDlg = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW, szClassName, title.c_str(),
-        WS_POPUP | WS_VISIBLE,
-        x, y, dlgW, dlgH,
-        hWndParent, NULL, GetModuleHandleW(NULL), &state
-    );
-
-    if (!hDlg) return false;
-
-    if (hWndParent && IsWindow(hWndParent))
-    {
-        EnableWindow(hWndParent, FALSE);
-    }
-
-    MSG msg;
-    while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0))
-    {
-        if (msg.message == WM_KEYDOWN)
-        {
-            if (msg.wParam == VK_RETURN)
-            {
-                wchar_t buf[256] = { 0 };
-                GetWindowTextW(state.hEdit, buf, 256);
-                state.resultText = buf;
-                state.isConfirmed = true;
-                DestroyWindow(hDlg);
-                break;
-            }
-            else if (msg.wParam == VK_ESCAPE)
-            {
-                DestroyWindow(hDlg);
-                break;
-            }
-        }
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
-
-    if (hWndParent && IsWindow(hWndParent))
-    {
-        EnableWindow(hWndParent, TRUE);
-        SetForegroundWindow(hWndParent);
-        SetActiveWindow(hWndParent);
-    }
-
-    if (state.isConfirmed)
-    {
-        outText = state.resultText;
-        return true;
-    }
-    return false;
-}
 
 // -------------------------------------------------------------
 // Main Pool Manager Dialog Implementation
@@ -1335,6 +950,16 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
     case WM_TIMER:
     {
+        if (wParam == CustomScrollBar::TIMER_ANIM_ID && pState)
+        {
+            if (pState->m_vScroll.OnTimer(hWnd))
+            {
+                pState->scrollY = pState->m_vScroll.GetPos();
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            return 0;
+        }
+
         if (wParam == TIMER_REPEAT_ID && pState && pState->repeatAction != ClickableControl::NONE)
         {
             pState->repeatHoldCount++;
@@ -1559,7 +1184,7 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             }
             totalContentH += 10;
 
-            RECT rcScroll = { w - 12, contentY + 2, w - 2, contentY + contentH - 2 };
+            RECT rcScroll = { w - 14, contentY + 2, w - 2, contentY + contentH - 2 };
             pState->m_vScroll.SetBounds(rcScroll);
             pState->m_vScroll.SetRange(0, totalContentH - 1, contentH);
             pState->scrollY = pState->m_vScroll.GetPos();
@@ -2132,7 +1757,7 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             }
             totalContentH += 10;
 
-            RECT rcScroll = { w - 12, contentY + 2, w - 2, contentY + contentH - 2 };
+            RECT rcScroll = { w - 14, contentY + 2, w - 2, contentY + contentH - 2 };
             pState->m_vScroll.SetBounds(rcScroll);
             pState->m_vScroll.SetRange(0, totalContentH - 1, contentH);
             pState->scrollY = pState->m_vScroll.GetPos();
@@ -2581,10 +2206,21 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
         if (!pState) break;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-        if (pState->m_vScroll.OnMouseMove(pt, hWnd))
+        TRACKMOUSEEVENT tme = { 0 };
+        tme.cbSize = sizeof(TRACKMOUSEEVENT);
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hWnd;
+        TrackMouseEvent(&tme);
+
+        bool scrollChanged = pState->m_vScroll.OnMouseMove(pt, hWnd);
+        if (scrollChanged)
         {
             pState->scrollY = pState->m_vScroll.GetPos();
             InvalidateRect(hWnd, NULL, FALSE);
+        }
+
+        if (pState->m_vScroll.IsDragging())
+        {
             return 0;
         }
 
@@ -2866,8 +2502,14 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
     {
         if (pState)
         {
-            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
-            pState->m_vScroll.OnMouseWheel((short)delta, 3, hWnd);
+            short delta = (short)GET_WHEEL_DELTA_WPARAM(wParam);
+            UINT lines = 3;
+            SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+            if (lines == 0) lines = 3;
+            if (lines == WHEEL_PAGESCROLL) lines = 10;
+            int scrollStep = (int)lines * 16; // Typically 48px per standard wheel notch
+
+            pState->m_vScroll.OnMouseWheel(delta, scrollStep, hWnd);
             pState->scrollY = pState->m_vScroll.GetPos();
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
@@ -3011,6 +2653,7 @@ static LRESULT CALLBACK WizardDlgProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 
         if (pState && pState->m_vScroll.OnLButtonUp(pt, hWnd))
         {
+            pState->scrollY = pState->m_vScroll.GetPos();
             InvalidateRect(hWnd, NULL, FALSE);
             return 0;
         }

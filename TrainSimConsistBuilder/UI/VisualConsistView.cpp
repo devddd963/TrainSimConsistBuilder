@@ -191,7 +191,9 @@ struct Visual3DUnit {
     std::wstring stockFilePath;
     bool isMissing = false;
     bool isMissingStock = false;
+    bool isCorruptedStock = false;
     bool isMissingShape = false;
+    bool isCorruptedShape = false;
     bool isEngine = false;
     bool isFlipped = false;
     bool isPhantom = false; // Zero physical length / sound car / AI horn
@@ -1529,12 +1531,26 @@ static void PaintUnitNumbersBar(HWND hWnd, HDC hdc, VisualConsistState* pState)
                 borderCol = isSel ? RGB(255, 90, 100) : (isHov ? RGB(230, 60, 70) : RGB(180, 40, 45));
                 textCol = RGB(255, 235, 235);
             }
+            else if (u.isCorruptedStock)
+            {
+                // Coral / Red-Orange (Corrupted .eng / .wag stock file)
+                bgCol = isSel ? RGB(210, 60, 30) : (isHov ? RGB(160, 45, 20) : RGB(115, 30, 15));
+                borderCol = isSel ? RGB(255, 120, 60) : (isHov ? RGB(230, 95, 40) : RGB(180, 70, 30));
+                textCol = RGB(255, 240, 230);
+            }
             else if (u.isMissingShape)
             {
                 // Warning Amber / Orange (Missing .s shape file)
                 bgCol = isSel ? RGB(215, 120, 20) : (isHov ? RGB(170, 95, 15) : RGB(125, 68, 10));
                 borderCol = isSel ? RGB(255, 175, 50) : (isHov ? RGB(235, 150, 35) : RGB(185, 115, 25));
                 textCol = RGB(255, 245, 230);
+            }
+            else if (u.isCorruptedShape)
+            {
+                // Warning Pink / Purple Magenta (Corrupted .s shape file)
+                bgCol = isSel ? RGB(190, 25, 110) : (isHov ? RGB(145, 18, 85) : RGB(105, 12, 60));
+                borderCol = isSel ? RGB(255, 70, 175) : (isHov ? RGB(225, 50, 150) : RGB(175, 35, 115));
+                textCol = RGB(255, 235, 250);
             }
             else if (isSel)
             {
@@ -1691,10 +1707,14 @@ static void PaintHeader(HWND hWnd, HDC hdc, VisualConsistState* pState)
         COLORREF textPill = RGB(160, 175, 195);
 
         int missingStockCount = 0;
+        int corruptedStockCount = 0;
         int missingShapeCount = 0;
+        int corruptedShapeCount = 0;
         for (const auto& u : pState->units)
         {
             if (u.isMissingStock) missingStockCount++;
+            else if (u.isCorruptedStock) corruptedStockCount++;
+            else if (u.isCorruptedShape) corruptedShapeCount++;
             else if (u.isMissingShape) missingShapeCount++;
         }
 
@@ -1716,9 +1736,27 @@ static void PaintHeader(HWND hWnd, HDC hdc, VisualConsistState* pState)
             textPill = RGB(255, 205, 110);
             dotColor = RGB(255, 205, 80);
         }
-        else if (missingStockCount > 0 || missingShapeCount > 0)
+        else if (missingStockCount > 0 || corruptedStockCount > 0 || missingShapeCount > 0 || corruptedShapeCount > 0)
         {
-            if (missingStockCount > 0 && missingShapeCount > 0)
+            if (corruptedStockCount > 0)
+            {
+                swprintf_s(szStatus, 128, L"Ready • %d Units (%.1f m) • %d Corrupted Stock \x26A0", 
+                    (int)pState->units.size(), pState->trainTotalLength, corruptedStockCount);
+                bgPill = RGB(55, 25, 20);
+                borderPill = RGB(170, 70, 40);
+                textPill = RGB(255, 170, 140);
+                dotColor = RGB(255, 128, 64);
+            }
+            else if (corruptedShapeCount > 0)
+            {
+                swprintf_s(szStatus, 128, L"Ready • %d Units (%.1f m) • %d Corrupted Shape \x26A0", 
+                    (int)pState->units.size(), pState->trainTotalLength, corruptedShapeCount);
+                bgPill = RGB(55, 20, 45);
+                borderPill = RGB(160, 40, 120);
+                textPill = RGB(255, 160, 220);
+                dotColor = RGB(255, 90, 180);
+            }
+            else if (missingStockCount > 0 && missingShapeCount > 0)
             {
                 swprintf_s(szStatus, 128, L"Ready • %d Units (%.1f m) • %d Missing Stock • %d Missing Shape \x26A0", 
                     (int)pState->units.size(), pState->trainTotalLength, missingStockCount, missingShapeCount);
@@ -2397,12 +2435,30 @@ static LRESULT CALLBACK VisualConsistWndProc(HWND hWnd, UINT uMsg, WPARAM wParam
                 if (unit.stockFilePath.empty())
                 {
                     unit.isMissingStock = true;
+                    unit.isCorruptedStock = false;
                     unit.isMissingShape = false;
+                    unit.isCorruptedShape = false;
+                }
+                else if (unit.compositeStock.isCorruptedStock || StockSpecReader::IsStockCorrupted(unit.stockFilePath))
+                {
+                    unit.isMissingStock = false;
+                    unit.isCorruptedStock = true;
+                    unit.isMissingShape = false;
+                    unit.isCorruptedShape = false;
+                }
+                else if (unit.compositeStock.isCorrupted || (!unit.compositeStock.spec.fullShapePath.empty() && ShapeReader::IsShapeCorrupted(unit.compositeStock.spec.fullShapePath)))
+                {
+                    unit.isMissingStock = false;
+                    unit.isCorruptedStock = false;
+                    unit.isMissingShape = false;
+                    unit.isCorruptedShape = true;
                 }
                 else
                 {
                     unit.isMissingStock = false;
+                    unit.isCorruptedStock = false;
                     unit.isMissingShape = true;
+                    unit.isCorruptedShape = false;
                 }
                 unit.isGpuFinalized = false;
                 unit.isPhantom = false;
@@ -2837,7 +2893,9 @@ void VisualConsistView_SetUnits(HWND hWnd, const std::vector<ConsistReader::Unit
         unit.isFlipped = u.isFlipped;
         unit.stockFilePath = ResolveStockPath(basePath, u.parentDir, u.uid, u.isEngine);
         unit.isMissingStock = unit.stockFilePath.empty();
+        unit.isCorruptedStock = false;
         unit.isMissingShape = false;
+        unit.isCorruptedShape = false;
         unit.isMissing = unit.isMissingStock;
         unit.length = u.isEngine ? 21.0f : 24.0f;
         unit.isPhantom = false;

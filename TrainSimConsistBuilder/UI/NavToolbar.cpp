@@ -8,6 +8,9 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <shobjidl.h>
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -21,6 +24,7 @@ enum NavIconIndex
     ICON_FORWARD = 1,
     ICON_UP = 2,
     ICON_REFRESH = 3,
+    ICON_BROWSE = 4,
     ICON_ADDR_PILL = 5,
     ICON_ADDR_CLEAR = 6,
     ICON_SEARCH_CLEAR = 7,
@@ -124,7 +128,8 @@ static HFONT CreateSystemUiFont(float pointSize, int weight = FW_NORMAL)
 
 static void CalculatePillLayout(int clientWidth, int& addrPillLeft, int& addrPillRight, int& searchPillLeft, int& searchPillRight)
 {
-    addrPillLeft = 8;
+    // Leave 260px on the left for the "Select MSTS Installation Directory" button (x = 8..264)
+    addrPillLeft = 272;
     int rightEdge = clientWidth - 8;
     int availableWidth = rightEdge - addrPillLeft;
     if (availableWidth < 120) availableWidth = 120;
@@ -362,6 +367,13 @@ static NavIconIndex HitTestIcon(NavToolbarState* pState, int x, int y, int addrP
 {
     if (!pState) return ICON_NONE;
     POINT pt = { x, y };
+
+    // Hit test Browse Folder button (x = 8..264, y = 5..39)
+    RECT rcBrowse = { 8, 5, 264, 39 };
+    if (PtInRect(&rcBrowse, pt))
+    {
+        return ICON_BROWSE;
+    }
 
     if (pState->bEditingAddress)
     {
@@ -693,23 +705,24 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         HINSTANCE hInst = ((LPCREATESTRUCT)lParam)->hInstance;
 
         // 1. Address Edit Control (Hidden initially; shown when user clicks Address Pill)
+        // Positioned inside the 34px pill (y=5..39) leaving 4px bottom clearance for accent line
         pState->hEditAddr = CreateWindowExW(0, L"EDIT", pState->szCurrentPath,
-            WS_CHILD | ES_AUTOHSCROLL,
-            156, 11, 400, 22, hWnd, (HMENU)IDC_NAV_EDIT_ADDR, hInst, NULL);
+            WS_CHILD | ES_AUTOHSCROLL | ES_MULTILINE,
+            156, 8, 400, 26, hWnd, (HMENU)IDC_NAV_EDIT_ADDR, hInst, NULL);
 
         SetWindowSubclass(pState->hEditAddr, NavEditSubclass, IDC_NAV_EDIT_ADDR, 0);
         if (pState->hFontMain) SendMessage(pState->hEditAddr, WM_SETFONT, (WPARAM)pState->hFontMain, MAKELPARAM(FALSE, 0));
-        SendMessage(pState->hEditAddr, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(4, 4));
+        SendMessage(pState->hEditAddr, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(2, 2));
         SendMessageW(pState->hEditAddr, EM_SETCUEBANNER, TRUE, (LPARAM)pState->szAddressPlaceholder);
 
         // 2. Search Edit Control (Inside Search Pill)
         pState->hEditSearch = CreateWindowExW(0, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            600, 11, 190, 22, hWnd, (HMENU)IDC_NAV_EDIT_SEARCH, hInst, NULL);
+            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_MULTILINE,
+            600, 8, 190, 26, hWnd, (HMENU)IDC_NAV_EDIT_SEARCH, hInst, NULL);
 
         SetWindowSubclass(pState->hEditSearch, NavEditSubclass, IDC_NAV_EDIT_SEARCH, 0);
         if (pState->hFontMain) SendMessage(pState->hEditSearch, WM_SETFONT, (WPARAM)pState->hFontMain, MAKELPARAM(FALSE, 0));
-        SendMessage(pState->hEditSearch, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(4, 4));
+        SendMessage(pState->hEditSearch, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(2, 2));
         SendMessageW(pState->hEditSearch, EM_SETCUEBANNER, TRUE, (LPARAM)pState->szSearchPlaceholder);
     }
     break;
@@ -836,6 +849,40 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
             case ICON_REFRESH:
                 SendMessage(hMainWnd, WM_NAVTOOLBAR_ACTION, NAV_ACTION_REFRESH, 0);
                 break;
+            case ICON_BROWSE:
+            {
+                // Modern Windows Folder Picker (strictly folder directories only)
+                IFileOpenDialog* pFileOpen = nullptr;
+                HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_ALL, IID_IFileOpenDialog, reinterpret_cast<void**>(&pFileOpen));
+                if (SUCCEEDED(hr))
+                {
+                    DWORD dwOptions = 0;
+                    pFileOpen->GetOptions(&dwOptions);
+                    pFileOpen->SetOptions(dwOptions | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+                    pFileOpen->SetTitle(L"Select Train Simulator Installation Directory");
+
+                    hr = pFileOpen->Show(hWnd);
+                    if (SUCCEEDED(hr))
+                    {
+                        IShellItem* pItem = nullptr;
+                        hr = pFileOpen->GetResult(&pItem);
+                        if (SUCCEEDED(hr))
+                        {
+                            PWSTR pszFilePath = nullptr;
+                            hr = pItem->GetDisplayName(SIGDN_FILESYSPATH, &pszFilePath);
+                            if (SUCCEEDED(hr))
+                            {
+                                NavToolbar_SetPath(hWnd, pszFilePath);
+                                SendMessage(hMainWnd, WM_NAVTOOLBAR_NAVIGATE, 0, (LPARAM)hWnd);
+                                CoTaskMemFree(pszFilePath);
+                            }
+                            pItem->Release();
+                        }
+                    }
+                    pFileOpen->Release();
+                }
+            }
+            break;
             case ICON_ADDR_CLEAR:
                 if (pState->hEditAddr)
                 {
@@ -861,6 +908,7 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
                     ShowWindow(pState->hEditAddr, SW_SHOW);
                     SetFocus(pState->hEditAddr);
                     SendMessage(pState->hEditAddr, EM_SETSEL, 0, -1);
+                    SendMessage(pState->hEditAddr, EM_SCROLLCARET, 0, 0);
                     InvalidateRect(hWnd, NULL, FALSE);
                 }
             }
@@ -951,9 +999,40 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         int addrPillLeft, addrPillRight, searchPillLeft, searchPillRight;
         CalculatePillLayout(rcClient.right, addrPillLeft, addrPillRight, searchPillLeft, searchPillRight);
 
+        // 1b. Draw Browse Folder Button (left of Address Pill: x=8..264, y=5..39)
+        RECT rcBrowseBtn = { 8, 5, 264, 39 };
+        bool bBrowseHover = (pState->hoverIndex == ICON_BROWSE);
+        bool bBrowsePress = (pState->pressedIndex == ICON_BROWSE);
+
+        COLORREF browseBg = bBrowsePress ? RGB(90, 38, 45) : (bBrowseHover ? RGB(78, 32, 38) : pillBg);
+        COLORREF browseBorder = bBrowseHover ? RGB(110, 50, 58) : pillBorder;
+
+        HBRUSH hbrBrowse = CreateSolidBrush(browseBg);
+        HPEN hPenBrowse = CreatePen(PS_SOLID, 1, browseBorder);
+        HBRUSH hOldBrBrowse = (HBRUSH)SelectObject(hmemDC, hbrBrowse);
+        HPEN hOldPenBrowse = (HPEN)SelectObject(hmemDC, hPenBrowse);
+
+        RoundRect(hmemDC, rcBrowseBtn.left, rcBrowseBtn.top, rcBrowseBtn.right, rcBrowseBtn.bottom, 8, 8);
+
+        SelectObject(hmemDC, hOldBrBrowse);
+        SelectObject(hmemDC, hOldPenBrowse);
+        DeleteObject(hbrBrowse);
+        DeleteObject(hPenBrowse);
+
+        // Draw Folder Glyph (\xE838) on left and Title Text inside Browse Button
+        SetBkMode(hmemDC, TRANSPARENT);
+        RECT rcIcon = { rcBrowseBtn.left + 8, rcBrowseBtn.top, rcBrowseBtn.left + 28, rcBrowseBtn.bottom };
+        SetTextColor(hmemDC, bBrowseHover ? RGB(255, 255, 255) : RGB(220, 200, 205));
+        SelectObject(hmemDC, pState->hFontIcons ? pState->hFontIcons : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+        DrawTextW(hmemDC, L"\xE838", -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        RECT rcText = { rcBrowseBtn.left + 30, rcBrowseBtn.top, rcBrowseBtn.right - 8, rcBrowseBtn.bottom };
+        SelectObject(hmemDC, pState->hFontMain ? pState->hFontMain : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+        DrawTextW(hmemDC, L"Select MSTS Installation Directory", -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
         // 2. Draw Pill Shape for Address Bar
         COLORREF curAddrPillBg = pState->bEditingAddress ? RGB(42, 18, 22) : pillBg;
-        COLORREF curAddrBorder = pState->bEditingAddress ? accentBlue : pillBorder;
+        COLORREF curAddrBorder = pillBorder;
 
         HBRUSH hbrAddrPill = CreateSolidBrush(curAddrPillBg);
         HPEN hPenAddrBorder = CreatePen(PS_SOLID, 1, curAddrBorder);
@@ -968,17 +1047,29 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         DeleteObject(hbrAddrPill);
         DeleteObject(hPenAddrBorder);
 
-        // Active Editing Underline Highlight Line for Address Bar
+        // Active Editing 3px Windows 11 Fluent Smooth-Cut Accent Highlight Line for Address Bar
         if (pState->bEditingAddress)
         {
-            HPEN hPenBlue = CreatePen(PS_SOLID, 2, accentBlue);
-            HPEN hPrevPen = (HPEN)SelectObject(hmemDC, hPenBlue);
+            Gdiplus::Graphics g(hmemDC);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
 
-            MoveToEx(hmemDC, addrPillLeft + 8, 38, NULL);
-            LineTo(hmemDC, addrPillRight - 8, 38);
+            Gdiplus::RectF rcPill((Gdiplus::REAL)addrPillLeft, 5.0f, (Gdiplus::REAL)(addrPillRight - addrPillLeft), 34.0f);
+            Gdiplus::GraphicsPath pillPath;
+            Gdiplus::REAL d = 8.0f;
+            pillPath.AddArc(rcPill.X, rcPill.Y, d, d, 180.0f, 90.0f);
+            pillPath.AddArc(rcPill.X + rcPill.Width - d, rcPill.Y, d, d, 270.0f, 90.0f);
+            pillPath.AddArc(rcPill.X + rcPill.Width - d, rcPill.Y + rcPill.Height - d, d, d, 0.0f, 90.0f);
+            pillPath.AddArc(rcPill.X, rcPill.Y + rcPill.Height - d, d, d, 90.0f, 90.0f);
+            pillPath.CloseFigure();
 
-            SelectObject(hmemDC, hPrevPen);
-            DeleteObject(hPenBlue);
+            g.SetClip(&pillPath);
+            Gdiplus::SolidBrush accentBrush(Gdiplus::Color(255, 96, 205, 255));
+            g.FillRectangle(&accentBrush, (Gdiplus::REAL)addrPillLeft, 35.0f, (Gdiplus::REAL)(addrPillRight - addrPillLeft), 3.0f);
+            g.ResetClip();
+
+            Gdiplus::Pen penBorder(Gdiplus::Color(255, GetRValue(pillBorder), GetGValue(pillBorder), GetBValue(pillBorder)), 1.0f);
+            g.DrawPath(&penBorder, &pillPath);
 
             // Draw Clear 'X' (\xE711) button on right of Address Pill during editing
             RECT rcClearBtn = { addrPillRight - 26, 5, addrPillRight - 6, 39 };
@@ -989,7 +1080,7 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         }
 
         // 3. Draw Pill Shape for Search Bar
-        COLORREF curSearchBorder = pState->bSearchFocused ? accentBlue : pillBorder;
+        COLORREF curSearchBorder = pillBorder;
         HBRUSH hbrSearchPill = CreateSolidBrush(pillBg);
         HPEN hPenSearchBorder = CreatePen(PS_SOLID, 1, curSearchBorder);
 
@@ -1003,16 +1094,29 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         DeleteObject(hbrSearchPill);
         DeleteObject(hPenSearchBorder);
 
+        // Active 3px Windows 11 Fluent Smooth-Cut Accent Highlight Line for Search Bar
         if (pState->bSearchFocused)
         {
-            HPEN hPenBlue = CreatePen(PS_SOLID, 2, accentBlue);
-            HPEN hPrevPen = (HPEN)SelectObject(hmemDC, hPenBlue);
+            Gdiplus::Graphics g(hmemDC);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
 
-            MoveToEx(hmemDC, searchPillLeft + 8, 38, NULL);
-            LineTo(hmemDC, searchPillRight - 8, 38);
+            Gdiplus::RectF rcPill((Gdiplus::REAL)searchPillLeft, 5.0f, (Gdiplus::REAL)(searchPillRight - searchPillLeft), 34.0f);
+            Gdiplus::GraphicsPath pillPath;
+            Gdiplus::REAL d = 8.0f;
+            pillPath.AddArc(rcPill.X, rcPill.Y, d, d, 180.0f, 90.0f);
+            pillPath.AddArc(rcPill.X + rcPill.Width - d, rcPill.Y, d, d, 270.0f, 90.0f);
+            pillPath.AddArc(rcPill.X + rcPill.Width - d, rcPill.Y + rcPill.Height - d, d, d, 0.0f, 90.0f);
+            pillPath.AddArc(rcPill.X, rcPill.Y + rcPill.Height - d, d, d, 90.0f, 90.0f);
+            pillPath.CloseFigure();
 
-            SelectObject(hmemDC, hPrevPen);
-            DeleteObject(hPenBlue);
+            g.SetClip(&pillPath);
+            Gdiplus::SolidBrush accentBrush(Gdiplus::Color(255, 96, 205, 255));
+            g.FillRectangle(&accentBrush, (Gdiplus::REAL)searchPillLeft, 35.0f, (Gdiplus::REAL)(searchPillRight - searchPillLeft), 3.0f);
+            g.ResetClip();
+
+            Gdiplus::Pen penBorder(Gdiplus::Color(255, GetRValue(pillBorder), GetGValue(pillBorder), GetBValue(pillBorder)), 1.0f);
+            g.DrawPath(&penBorder, &pillPath);
         }
 
         // Draw Search Icon or Clear 'X' button inside Search Pill
@@ -1247,16 +1351,22 @@ static LRESULT CALLBACK NavToolbarProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
         int addrEditWidth = addrPillRight - 34 - addrEditLeft;
         if (addrEditWidth < 40) addrEditWidth = 40;
 
+        // Positioned inside the 34px pill (y=5..39), height=26 (y=8..34), leaving y=35..39 clean for accent line
+        RECT rcEditFmt = { 2, 3, addrEditWidth - 2, 25 };
+
         if (pState->hEditAddr)
         {
-            SetWindowPos(pState->hEditAddr, NULL, addrEditLeft, 11, addrEditWidth, 22, SWP_NOZORDER);
+            SetWindowPos(pState->hEditAddr, NULL, addrEditLeft, 8, addrEditWidth, 26, SWP_NOZORDER);
+            SendMessage(pState->hEditAddr, EM_SETRECT, 0, (LPARAM)&rcEditFmt);
         }
 
         if (pState->hEditSearch)
         {
             int searchEditW = (searchPillRight - searchPillLeft) - 40;
             if (searchEditW < 40) searchEditW = 40;
-            SetWindowPos(pState->hEditSearch, NULL, searchPillLeft + 12, 11, searchEditW, 22, SWP_NOZORDER);
+            RECT rcSearchFmt = { 2, 3, searchEditW - 2, 25 };
+            SetWindowPos(pState->hEditSearch, NULL, searchPillLeft + 12, 8, searchEditW, 26, SWP_NOZORDER);
+            SendMessage(pState->hEditSearch, EM_SETRECT, 0, (LPARAM)&rcSearchFmt);
         }
 
         InvalidateRect(hWnd, NULL, TRUE);

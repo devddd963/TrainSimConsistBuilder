@@ -131,6 +131,7 @@ struct ParsedShape {
     ID3D11Buffer* pIndexBuffer = nullptr;
 
     bool isValid = false;
+    bool isCorrupted = false;
 
     void ReleaseGPUBuffers() {
         if (pVertexBuffer) { pVertexBuffer->Release(); pVertexBuffer = nullptr; }
@@ -188,6 +189,11 @@ public:
         const std::wstring& shapeFilePath,
         std::vector<std::wstring>& outImageNames
     );
+
+    // Fast file validation to detect corrupted/truncated shape files without full mesh decompression
+    static bool IsShapeCorrupted(const std::wstring& shapeFilePath);
+    static void ClearShapeCacheForPath(const std::wstring& shapeFilePath);
+    static void ClearAllShapeCaches();
 
     // Automatic classification of animation node by name
     static AnimNodeType CategorizeNodeName(const std::string& rawName);

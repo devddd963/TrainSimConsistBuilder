@@ -268,7 +268,15 @@ struct UnitPreviewState
     RECT rcBtnAutoRot = { 0 };
     RECT rcBtnFlip = { 0 };
     RECT rcBtnStudio = { 0 };
-    int hoveredBtn = 0; // 1 = Reset, 2 = AutoRot, 3 = Flip, 4 = Studio
+    RECT rcBtnHud = { 0 };
+    int hoveredBtn = 0; // 1 = Reset, 2 = AutoRot, 3 = Flip, 4 = Studio, 5 = Hud
+
+    // HUD Specs Overlay (enabled specifically in Classic View)
+    HWND hHudWnd = NULL;
+    bool bHudAllowed = false;
+    bool bShowHud = true;
+    HFONT hFontHudLabel = NULL;
+    HFONT hFontHudVal = NULL;
 };
 
 extern int g_wUnitPreviewWidth;
@@ -1030,6 +1038,175 @@ static LRESULT CALLBACK PreviewViewportProc(HWND hWnd, UINT uMsg, WPARAM wParam,
     return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
+// -------------------------------------------------------------
+// Live Unit Specs HUD Overlay Window Procedure
+// -------------------------------------------------------------
+static LRESULT CALLBACK PreviewHudProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    UnitPreviewState* pState = (UnitPreviewState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+
+    switch (uMsg)
+    {
+    case WM_NCCREATE:
+    {
+        LPCREATESTRUCT lpcs = (LPCREATESTRUCT)lParam;
+        SetWindowLongPtrW(hWnd, GWLP_USERDATA, (LONG_PTR)lpcs->lpCreateParams);
+        return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+    }
+
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        if (!pState) { EndPaint(hWnd, &ps); return 0; }
+
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        int w = rc.right;
+        int h = rc.bottom;
+        if (w <= 0 || h <= 0) { EndPaint(hWnd, &ps); return 0; }
+
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBM = CreateCompatibleBitmap(hdc, w, h);
+        HBITMAP oldBM = (HBITMAP)SelectObject(memDC, memBM);
+
+        // Background: Studio Slate Translucent Horizon
+        HBRUSH hbrBg = CreateSolidBrush(RGB(16, 18, 25));
+        FillRect(memDC, &rc, hbrBg);
+        DeleteObject(hbrBg);
+
+        // Top hairline border
+        HPEN hpBorder = CreatePen(PS_SOLID, 1, RGB(48, 54, 68));
+        HPEN oldP = (HPEN)SelectObject(memDC, hpBorder);
+        MoveToEx(memDC, 0, 0, NULL);
+        LineTo(memDC, w, 0);
+
+        SetBkMode(memDC, TRANSPARENT);
+
+        if (pState->hasModel && pState->compositeStock.isValid)
+        {
+            const auto& spec = pState->compositeStock.spec;
+
+            std::wstring valName = spec.displayName.empty() ? (pState->displayName.empty() ? spec.fileName : pState->displayName) : spec.displayName;
+            std::wstring valFile = spec.fileName.empty() ? pState->currentUnitPath : spec.fileName;
+            std::wstring valDir = spec.folderName.empty() ? pState->currentBasePath : spec.folderName;
+            std::wstring valShape = spec.mainShapeFile.empty() ? L"N/A" : spec.mainShapeFile;
+
+            std::wstring valType;
+            if (!spec.category.empty()) valType = L"Engine (" + spec.category + L")";
+            else if (!spec.rawType.empty()) valType = spec.rawType;
+            else valType = pState->typeName.empty() ? L"Rolling Stock" : pState->typeName;
+
+            std::wstring valBrakes = spec.brakeSystemType.empty() ? L"Air_single_pipe" : spec.brakeSystemType;
+            std::wstring valCouplings = spec.couplers.empty() ? L"Automatic" : spec.couplers[0].type;
+
+            wchar_t szSize[128];
+            if (spec.size.widthM > 0.0f || spec.size.lengthM > 0.0f)
+                swprintf_s(szSize, 128, L"%.2f m x %.2f m x %.2f m", spec.size.widthM, spec.size.heightM, spec.size.lengthM);
+            else
+                wcscpy_s(szSize, 128, L"N/A");
+
+            wchar_t szMass[64];
+            double unitMassT = (spec.massKg > 0.0f) ? (spec.massKg / 1000.0) : 0.0;
+            if (unitMassT > 0.0)
+                swprintf_s(szMass, 64, L"%.3f T (%.1f US t)", unitMassT, unitMassT * 1.10231);
+            else
+                wcscpy_s(szMass, 64, L"N/A");
+
+            wchar_t szSpeed[64];
+            if (spec.maxVelocityKmh > 0.0f)
+                swprintf_s(szSpeed, 64, L"%.1f km/h (%.1f mph)", spec.maxVelocityKmh, spec.maxVelocityKmh * 0.621371);
+            else
+                wcscpy_s(szSpeed, 64, L"N/A");
+
+            wchar_t szForce[64];
+            if (spec.maxForceKn > 0.0f)
+                swprintf_s(szForce, 64, L"%.0f kN", spec.maxForceKn);
+            else
+                wcscpy_s(szForce, 64, L"N/A");
+
+            wchar_t szPower[64];
+            if (spec.maxPowerKw > 0.0f)
+                swprintf_s(szPower, 64, L"%.0f kW (%.0f HP)", spec.maxPowerKw, spec.maxPowerKw * 1.34102);
+            else
+                wcscpy_s(szPower, 64, L"N/A");
+
+            int innerW = w - 24;
+            int colW = innerW / 3;
+            int col1X = 12;
+            int col2X = col1X + colW + 8;
+            int col3X = col2X + colW + 8;
+
+            int rowH = 17;
+            int row0 = 5;
+            int row1 = row0 + rowH;
+            int row2 = row1 + rowH;
+            int row3 = row2 + rowH;
+
+            auto drawField = [&](int x, int y, int totalW, int labelW, const wchar_t* label, const std::wstring& value) {
+                SelectObject(memDC, pState->hFontHudLabel ? pState->hFontHudLabel : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+                SetTextColor(memDC, RGB(140, 145, 160));
+                RECT rcL = { x, y, x + labelW, y + rowH };
+                DrawTextW(memDC, label, -1, &rcL, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                SelectObject(memDC, pState->hFontHudVal ? pState->hFontHudVal : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+                SetTextColor(memDC, RGB(235, 238, 245));
+                RECT rcV = { x + labelW, y, x + totalW, y + rowH };
+                DrawTextW(memDC, value.c_str(), -1, &rcV, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            };
+
+            // Column 1
+            drawField(col1X, row0, colW, 64, L"Name:", valName);
+            drawField(col1X, row1, colW, 64, L"File Name:", valFile);
+            drawField(col1X, row2, colW, 64, L"Dir Name:", valDir);
+            drawField(col1X, row3, colW, 64, L"Shape:", valShape);
+
+            // Column 2
+            drawField(col2X, row0, colW, 64, L"Type:", valType);
+            drawField(col2X, row1, colW, 64, L"Brakes:", valBrakes);
+            drawField(col2X, row2, colW, 64, L"Couplings:", valCouplings);
+            drawField(col2X, row3, colW, 64, L"Size:", szSize);
+
+            // Column 3
+            drawField(col3X, row0, colW, 72, L"Mass:", szMass);
+            drawField(col3X, row1, colW, 72, L"Max. Speed:", szSpeed);
+            drawField(col3X, row2, colW, 72, L"Max. Force:", szForce);
+            drawField(col3X, row3, colW, 72, L"Max. Power:", szPower);
+
+            // Subtle vertical column dividers
+            HPEN hpDiv = CreatePen(PS_SOLID, 1, RGB(38, 42, 54));
+            HGDIOBJ oldDivPen = SelectObject(memDC, hpDiv);
+            MoveToEx(memDC, col1X + colW + 4, 4, NULL);
+            LineTo(memDC, col1X + colW + 4, h - 4);
+            MoveToEx(memDC, col2X + colW + 4, 4, NULL);
+            LineTo(memDC, col2X + colW + 4, h - 4);
+            SelectObject(memDC, oldDivPen);
+            DeleteObject(hpDiv);
+        }
+        else
+        {
+            SelectObject(memDC, pState->hFontHudLabel ? pState->hFontHudLabel : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+            SetTextColor(memDC, RGB(120, 125, 140));
+            RECT rcMsg = { 12, 0, w - 12, h };
+            DrawTextW(memDC, L"Select rolling stock unit from consist list to inspect technical specifications.", -1, &rcMsg, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+        SelectObject(memDC, oldP);
+        DeleteObject(hpBorder);
+        SelectObject(memDC, oldBM);
+        DeleteObject(memBM);
+        DeleteDC(memDC);
+        EndPaint(hWnd, &ps);
+        return 0;
+    }
+    }
+    return DefWindowProcW(hWnd, uMsg, wParam, lParam);
+}
+
 static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     UnitPreviewState* pState = (UnitPreviewState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
@@ -1062,15 +1239,38 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             vwc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
             RegisterClassExW(&vwc);
 
+            // Register HUD overlay child window class
+            WNDCLASSEXW hwc = { sizeof(WNDCLASSEXW) };
+            hwc.lpfnWndProc = PreviewHudProc;
+            hwc.hInstance = lpcs->hInstance;
+            hwc.lpszClassName = L"TSCBPreviewHudOverlay";
+            hwc.hCursor = LoadCursor(NULL, IDC_ARROW);
+            hwc.style = CS_HREDRAW | CS_VREDRAW;
+            RegisterClassExW(&hwc);
+
+            pState->hFontHudLabel = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            pState->hFontHudVal = CreateFontW(-12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
             RECT rc;
             GetClientRect(hWnd, &rc);
-            int vpH = (rc.bottom > 30) ? (rc.bottom - 30) : 10;
+            int hudH = (pState->bHudAllowed && pState->bShowHud && rc.bottom >= 200) ? 76 : 0;
+            int vpH = (rc.bottom > 30 + hudH) ? (rc.bottom - 30 - hudH) : 10;
+            int vpW = (rc.right > 2) ? (rc.right - 2) : 20;
 
             pState->hViewportWnd = CreateWindowExW(
                 0, L"TSCBPreviewViewport", L"",
                 WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                1, 29, (rc.right > 2) ? (rc.right - 2) : 20, vpH,
+                1, 29, vpW, vpH,
                 hWnd, (HMENU)9001, lpcs->hInstance, pState
+            );
+
+            pState->hHudWnd = CreateWindowExW(
+                0, L"TSCBPreviewHudOverlay", L"",
+                WS_CHILD | (hudH > 0 ? WS_VISIBLE : 0) | WS_CLIPSIBLINGS,
+                1, 29 + vpH, vpW, (hudH > 0 ? hudH : 10),
+                hWnd, (HMENU)9002, lpcs->hInstance, pState
             );
 
             InitD3D11(pState, pState->hViewportWnd, rc.right - 2, vpH);
@@ -1079,6 +1279,16 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             SetTimer(hWnd, TIMER_PREVIEW_AUTOROT, 33, NULL);
         }
         return 0;
+    }
+
+    case WM_DESTROY:
+    {
+        if (pState)
+        {
+            if (pState->hFontHudLabel) { DeleteObject(pState->hFontHudLabel); pState->hFontHudLabel = NULL; }
+            if (pState->hFontHudVal) { DeleteObject(pState->hFontHudVal); pState->hFontHudVal = NULL; }
+        }
+        break;
     }
 
     case WM_TIMER:
@@ -1112,11 +1322,24 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
         if (pState)
         {
             int vpW = (w > 2) ? (w - 2) : 20;
-            int vpH = (h > 30) ? (h - 30) : 10;
+            int hudH = (pState->bHudAllowed && pState->bShowHud && h >= 200) ? 76 : 0;
+            int vpH = (h > 30 + hudH) ? (h - 30 - hudH) : 10;
 
             if (pState->hViewportWnd)
             {
                 SetWindowPos(pState->hViewportWnd, NULL, 1, 29, vpW, vpH, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            if (pState->hHudWnd)
+            {
+                if (hudH > 0)
+                {
+                    SetWindowPos(pState->hHudWnd, NULL, 1, 29 + vpH, vpW, hudH, SWP_NOZORDER | SWP_SHOWWINDOW);
+                    InvalidateRect(pState->hHudWnd, NULL, FALSE);
+                }
+                else
+                {
+                    ShowWindow(pState->hHudWnd, SW_HIDE);
+                }
             }
             ResizeD3D11(pState, vpW, vpH);
             if (pState->compositeStock.isValid)
@@ -1198,6 +1421,15 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             }
             return 0;
         }
+        else if (pState->bHudAllowed && PtInRect(&pState->rcBtnHud, pt))
+        {
+            pState->bShowHud = !pState->bShowHud;
+            RECT rc;
+            GetClientRect(hWnd, &rc);
+            SendMessage(hWnd, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
+            InvalidateRect(hWnd, NULL, FALSE);
+            return 0;
+        }
         return 0;
     }
 
@@ -1242,6 +1474,7 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
         else if (PtInRect(&pState->rcBtnAutoRot, pt)) newHover = 2;
         else if (PtInRect(&pState->rcBtnFlip, pt)) newHover = 3;
         else if (PtInRect(&pState->rcBtnStudio, pt)) newHover = 4;
+        else if (pState->bHudAllowed && PtInRect(&pState->rcBtnHud, pt)) newHover = 5;
 
         if (newHover != pState->hoveredBtn)
         {
@@ -1365,6 +1598,10 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
         {
             InvalidateRect(pState->hViewportWnd, NULL, FALSE);
         }
+        if (pState && pState->hHudWnd)
+        {
+            InvalidateRect(pState->hHudWnd, NULL, FALSE);
+        }
         InvalidateRect(hWnd, NULL, TRUE);
         return 0;
     }
@@ -1416,11 +1653,23 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             SelectObject(hMemDC, hOldB);
             DeleteObject(hPenBorder);
 
-            // Header Quick Action Buttons (Reset, AutoRot, Flip, 3D Studio)
+            // Header Quick Action Buttons (Reset, AutoRot, Flip, 3D Studio, Specs HUD)
             int btnW = 24;
             int btnH = 20;
             int btnY = 4;
             int rightX = width - 8;
+
+            if (pState->bHudAllowed)
+            {
+                // Button 5: Unit Specs HUD Toggle [ ℹ ]
+                rightX -= btnW;
+                pState->rcBtnHud = { rightX, btnY, rightX + btnW, btnY + btnH };
+                rightX -= 4;
+            }
+            else
+            {
+                pState->rcBtnHud = { 0, 0, 0, 0 };
+            }
 
             // Button 4: 3D Studio Launch [ ⤢ ]
             rightX -= btnW;
@@ -1457,6 +1706,15 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
                 SetTextColor(hMemDC, RGB(245, 248, 255));
                 DrawTextW(hMemDC, titleText.c_str(), -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
             }
+            else if (!pState->displayName.empty())
+            {
+                std::wstring titleText = pState->displayName;
+                if (pState->compositeStock.isCorruptedStock) titleText += L" [⚠ Corrupted Stock]";
+                else if (pState->compositeStock.isCorrupted) titleText += L" [⚠ Corrupted Shape]";
+                else titleText += L" [⚠ Missing Shape / Stock]";
+                SetTextColor(hMemDC, RGB(255, 120, 140));
+                DrawTextW(hMemDC, titleText.c_str(), -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            }
             else
             {
                 SetTextColor(hMemDC, RGB(180, 185, 195));
@@ -1482,6 +1740,10 @@ static LRESULT CALLBACK UnitPreviewCardProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             DrawIconButton(pState->rcBtnAutoRot, L"\xE77A", 2, pState->autoRotate); // Turntable / Play
             DrawIconButton(pState->rcBtnFlip,    L"\xE745", 3); // Flip
             DrawIconButton(pState->rcBtnStudio,  L"\xE7F4", 4); // 3D Studio Launch
+            if (pState->bHudAllowed)
+            {
+                DrawIconButton(pState->rcBtnHud, L"\xE946", 5, pState->bShowHud); // Unit Specs HUD Toggle
+            }
 
             // Exclude the 3D viewport child region from parent Blt
             RECT rcVp = { 1, 29, width - 1, height - 1 };
@@ -1552,6 +1814,7 @@ void UnitPreviewCard_SetUnit(
     {
         pState->displayName = displayName;
         pState->typeName = typeName;
+        if (pState->hHudWnd) InvalidateRect(pState->hHudWnd, NULL, FALSE);
         InvalidateRect(hWnd, NULL, TRUE);
         return;
     }
@@ -1597,6 +1860,7 @@ void UnitPreviewCard_SetUnit(
         }
     }).detach();
 
+    if (pState->hHudWnd) InvalidateRect(pState->hHudWnd, NULL, FALSE);
     InvalidateRect(hWnd, NULL, TRUE);
 }
 
@@ -1620,6 +1884,7 @@ void UnitPreviewCard_Clear(HWND hWnd)
     pState->displayName = L"";
     pState->typeName = L"";
     if (pState->hViewportWnd) InvalidateRect(pState->hViewportWnd, NULL, FALSE);
+    if (pState->hHudWnd) InvalidateRect(pState->hHudWnd, NULL, FALSE);
     InvalidateRect(hWnd, NULL, TRUE);
 }
 
@@ -1629,6 +1894,20 @@ void UnitPreviewCard_SetDarkMode(HWND hWnd, BOOL bDark)
     if (!pState) return;
     pState->bDarkMode = bDark;
     InvalidateRect(hWnd, NULL, TRUE);
+}
+
+void UnitPreviewCard_SetHudAllowed(HWND hWnd, bool allowed)
+{
+    UnitPreviewState* pState = (UnitPreviewState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+    if (!pState) return;
+    if (pState->bHudAllowed != allowed)
+    {
+        pState->bHudAllowed = allowed;
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        SendMessage(hWnd, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
+        InvalidateRect(hWnd, NULL, TRUE);
+    }
 }
 
 bool UnitPreviewCard_HasModel(HWND hWnd)

@@ -17,6 +17,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <unordered_set>
 
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -1343,6 +1344,7 @@ static std::wstring GetTrackTypeLabel(int trackType)
 
 struct ClickableRegion {
     enum Type {
+        None = 0,
         SgTab,
         FixCountBtn,
         NewSmsBtn,
@@ -1442,7 +1444,7 @@ struct SmsEditorViewState {
 
     // Layout metrics
     int sidebarWidth = 260;
-    int headerHeight = 96;
+    int headerHeight = 126;
 
     // Scrollbar for streams canvas
     CustomScrollBar vScrollBar;
@@ -1493,12 +1495,25 @@ static void RebuildContextTree(SmsEditorViewState* pState, const std::vector<RSS
     {
         pState->treeItems.push_back({ ContextTreeItem::Header, L"CONSIST SOUNDSETS", L"", L"", true, false, true });
 
+        std::unordered_set<std::wstring> seenKeys;
+        int distinctUnitNo = 1;
+
         for (size_t u = 0; u < units.size(); ++u)
         {
             const auto& unit = units[u];
+
+            // Consolidate duplicates: only list distinct vehicles in the SMS Editor tree
+            std::wstring key = unit.folder + L"\\" + unit.name + unit.ext;
+            std::transform(key.begin(), key.end(), key.begin(), ::towlower);
+            if (seenKeys.find(key) != seenKeys.end())
+            {
+                continue;
+            }
+            seenKeys.insert(key);
+
             ContextTreeItem unitNode;
             unitNode.type = ContextTreeItem::Unit;
-            unitNode.label = L"#" + std::to_wstring(u + 1) + L" " + unit.name;
+            unitNode.label = L"#" + std::to_wstring(distinctUnitNo++) + L" " + unit.name;
             unitNode.subLabel = unit.type;
             unitNode.isExpanded = true;
             pState->treeItems.push_back(unitNode);
@@ -1616,7 +1631,12 @@ static void CopySelectedStreams(SmsEditorViewState* pState)
                 cItem.resolvedWavPaths[t].resize(st.triggers[t].files.size());
                 for (size_t f = 0; f < st.triggers[t].files.size(); ++f)
                 {
-                    cItem.resolvedWavPaths[t][f] = st.triggers[t].files[f].resolvedDiskPath;
+                    std::wstring dPath = st.triggers[t].files[f].resolvedDiskPath;
+                    if (dPath.empty() && !st.triggers[t].files[f].fileName.empty())
+                    {
+                        dPath = SmsParser_ResolveWavPath(pState->doc.filePath, st.triggers[t].files[f].fileName, pState->basePath);
+                    }
+                    cItem.resolvedWavPaths[t][f] = dPath;
                 }
             }
             s_streamClipboard.streams.push_back(cItem);
@@ -1652,6 +1672,10 @@ static void PasteClipboardStreams(SmsEditorViewState* pState)
                 if (t < cItem.resolvedWavPaths.size() && f < cItem.resolvedWavPaths[t].size())
                 {
                     resolvedPath = cItem.resolvedWavPaths[t][f];
+                }
+                if (resolvedPath.empty() && !fileRef.fileName.empty() && !s_streamClipboard.sourceSmsPath.empty())
+                {
+                    resolvedPath = SmsParser_ResolveWavPath(s_streamClipboard.sourceSmsPath, fileRef.fileName, pState->basePath);
                 }
 
                 if (!resolvedPath.empty())
@@ -4569,7 +4593,9 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             else
             {
                 // Also support double-clicking the top bar title area to open the active SMS file
-                RECT rcTitleArea = { pState->sidebarWidth + 16, 0, pState->sidebarWidth + 360, pState->headerHeight };
+                RECT rcCl;
+                GetClientRect(hWnd, &rcCl);
+                RECT rcTitleArea = { pState->sidebarWidth + 16, 0, rcCl.right, 48 };
                 if (PtInRect(&rcTitleArea, pt) && !pState->doc.filePath.empty())
                 {
                     OpenFileInDefaultEditor(hWnd, pState->doc.filePath);
@@ -4917,7 +4943,7 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         pState->treeScrollBar.SetRange(0, pState->totalTreeHeight, rcClient.bottom);
         pState->treeScrollBar.Paint(memDC, true);
 
-        // 3. Render Canvas Header (Top bar)
+        // 3. Render Canvas Header (Top bar: 3-Row Dedicated Layout)
         RECT rcTopBar = { pState->sidebarWidth + 1, 0, rcClient.right, pState->headerHeight };
         HBRUSH topBr = CreateSolidBrush(RGB(28, 30, 36));
         FillRect(memDC, &rcTopBar, topBr);
@@ -4931,7 +4957,39 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         SelectObject(memDC, oldPen);
         DeleteObject(hTopPen);
 
-        // Calculate selected count and clipboard count
+        // =========================================================================
+        // ROW 1: FILE IDENTITY & FULL PATH (Full Width: Y = 6 to 44)
+        // =========================================================================
+        size_t slashIdx = pState->doc.filePath.find_last_of(L"\\/");
+        std::wstring fileName = (slashIdx != std::wstring::npos) ? pState->doc.filePath.substr(slashIdx + 1) : (pState->doc.filePath.empty() ? L"No SMS File Open" : pState->doc.filePath);
+        if (pState->doc.isModified) fileName += L" ●";
+
+        RECT rcTitle = { rcTopBar.left + 16, 6, rcTopBar.right - 16, 26 };
+        SelectObject(memDC, pState->hFontTitle);
+        SetTextColor(memDC, RGB(255, 255, 255));
+        DrawTextW(memDC, fileName.c_str(), -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+        RECT rcPathSub = { rcTopBar.left + 16, 26, rcTopBar.right - 16, 44 };
+        bool hovPath = PtInRect(&rcPathSub, pState->ptMouse);
+        SelectObject(memDC, pState->hFontSubtitle);
+        SetTextColor(memDC, hovPath ? RGB(100, 180, 255) : RGB(130, 140, 160));
+        DrawTextW(memDC, pState->doc.filePath.c_str(), -1, &rcPathSub, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        if (!pState->doc.filePath.empty())
+        {
+            pState->hitRegions.push_back({ ClickableRegion::OpenFolderBtn, rcPathSub, 0, 0, pState->doc.filePath });
+        }
+
+        // Row 1 subtle divider
+        HPEN hRow1Pen = CreatePen(PS_SOLID, 1, RGB(38, 41, 50));
+        oldPen = SelectObject(memDC, hRow1Pen);
+        MoveToEx(memDC, rcTopBar.left + 16, 47, NULL);
+        LineTo(memDC, rcTopBar.right - 16, 47);
+        SelectObject(memDC, oldPen);
+        DeleteObject(hRow1Pen);
+
+        // =========================================================================
+        // ROW 2: ACTION TOOLBAR (Dedicated Buttons Row: Y = 51 to 81)
+        // =========================================================================
         int selCount = 0;
         int totalStreamsInGroup = 0;
         if (pState->doc.activeGroupIndex >= 0 && pState->doc.activeGroupIndex < (int)pState->doc.groups.size())
@@ -4945,22 +5003,14 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
         }
         int clipCount = (int)s_streamClipboard.streams.size();
 
-        // Action Buttons: Save, Open, Folder, Select All, Copy, Paste, Expand All, Collapse All (drawn right-to-left)
-        int btnRight = rcTopBar.right - 20;
-
-        auto drawBtn = [&](const std::wstring& txt, ClickableRegion::Type cType, int minW,
+        auto drawToolBtn = [&](const RECT& rcB, const std::wstring& txt, ClickableRegion::Type cType,
             COLORREF bgNormal = RGB(38, 40, 50),
             COLORREF borderNormal = RGB(56, 60, 75),
-            COLORREF textNormal = RGB(220, 225, 235)) -> RECT {
-            SelectObject(memDC, pState->hFontBold);
-            SIZE szText = { 0 };
-            GetTextExtentPoint32W(memDC, txt.c_str(), (int)txt.length(), &szText);
-            int w = (std::max)(minW, (int)szText.cx + 26);
-            RECT rcB = { btnRight - w, 12, btnRight, 40 };
-            btnRight -= (w + 8);
-            bool hov = PtInRect(&rcB, pState->ptMouse);
-            HBRUSH bBr = CreateSolidBrush(hov ? RGB(48, 52, 66) : bgNormal);
-            HPEN bPen = CreatePen(PS_SOLID, 1, hov ? RGB(80, 140, 220) : borderNormal);
+            COLORREF textNormal = RGB(220, 225, 235),
+            bool enabled = true) {
+            bool hov = enabled && PtInRect(&rcB, pState->ptMouse);
+            HBRUSH bBr = CreateSolidBrush(!enabled ? RGB(28, 30, 38) : (hov ? RGB(48, 52, 66) : bgNormal));
+            HPEN bPen = CreatePen(PS_SOLID, 1, !enabled ? RGB(40, 44, 54) : (hov ? RGB(80, 140, 220) : borderNormal));
             HGDIOBJ oB = SelectObject(memDC, bBr);
             HGDIOBJ oP = SelectObject(memDC, bPen);
             RoundRect(memDC, rcB.left, rcB.top, rcB.right, rcB.bottom, 4, 4);
@@ -4970,67 +5020,98 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             DeleteObject(bPen);
 
             SelectObject(memDC, pState->hFontBold);
-            SetTextColor(memDC, hov ? RGB(255, 255, 255) : textNormal);
-            DrawTextW(memDC, txt.c_str(), -1, &rcB, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            pState->hitRegions.push_back({ cType, rcB, 0, 0, L"" });
-            return rcB;
+            SetTextColor(memDC, !enabled ? RGB(105, 112, 128) : (hov ? RGB(255, 255, 255) : textNormal));
+            DrawTextW(memDC, txt.c_str(), -1, const_cast<RECT*>(&rcB), DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            if (enabled && cType != ClickableRegion::None)
+            {
+                pState->hitRegions.push_back({ cType, rcB, 0, 0, L"" });
+            }
         };
 
-        // Draw buttons from right to left so they appear left-to-right as:
-        // [💾 Save SMS] [📂 Open...] [📁 Open Folder] [✓ Select All] [📋 Copy (N)] [📋 Paste (M)] [▾ Expand All] [▸ Collapse All]
-        drawBtn(L"▸ Collapse All", ClickableRegion::CollapseAllBtn, 105);
-        drawBtn(L"▾ Expand All", ClickableRegion::ExpandAllBtn, 95);
+        // Right-anchored File Operations: Save SMS, Consolidate WAVs, Open Folder, Open..., New SMS
+        int rBtnX = rcTopBar.right - 16;
+        auto drawFileBtn = [&](const std::wstring& txt, ClickableRegion::Type cType, int minW,
+            COLORREF bgNormal = RGB(38, 40, 50),
+            COLORREF borderNormal = RGB(56, 60, 75),
+            COLORREF textNormal = RGB(220, 225, 235)) -> int {
+            SelectObject(memDC, pState->hFontBold);
+            SIZE szText = { 0 };
+            GetTextExtentPoint32W(memDC, txt.c_str(), (int)txt.length(), &szText);
+            int w = (std::max)(minW, (int)szText.cx + 22);
+            RECT rcB = { rBtnX - w, 51, rBtnX, 81 };
+            rBtnX -= (w + 7);
+            drawToolBtn(rcB, txt, cType, bgNormal, borderNormal, textNormal, true);
+            return rcB.left;
+        };
 
-        if (clipCount > 0)
-        {
-            std::wstring pasteTxt = L"📋 Paste (" + std::to_wstring(clipCount) + L")";
-            drawBtn(pasteTxt, ClickableRegion::PasteStreamsBtn, 105, RGB(26, 42, 60), RGB(40, 130, 220), RGB(130, 200, 255));
-        }
+        drawFileBtn(L"💾 Save SMS", ClickableRegion::SaveBtn, 100,
+            pState->doc.isModified ? RGB(52, 38, 18) : RGB(38, 40, 50),
+            pState->doc.isModified ? RGB(220, 150, 30) : RGB(56, 60, 75),
+            pState->doc.isModified ? RGB(255, 210, 120) : RGB(220, 225, 235));
+        drawFileBtn(L"📦 Consolidate WAVs...", ClickableRegion::ConsolidateWavsBtn, 155,
+            RGB(35, 30, 55), RGB(130, 80, 220), RGB(215, 185, 255));
+        drawFileBtn(L"📁 Open Folder", ClickableRegion::OpenFolderBtn, 110);
+        drawFileBtn(L"📂 Open...", ClickableRegion::OpenFileBtn, 85);
+        drawFileBtn(L"➕ New SMS", ClickableRegion::NewSmsBtn, 95, RGB(22, 52, 85), RGB(40, 130, 220), RGB(160, 220, 255));
 
-        if (selCount > 0)
-        {
-            std::wstring copyTxt = L"📋 Copy (" + std::to_wstring(selCount) + L")";
-            drawBtn(copyTxt, ClickableRegion::CopyStreamsBtn, 100, RGB(26, 50, 36), RGB(45, 160, 85), RGB(130, 240, 165));
-        }
+        // Left-anchored Stream Deck Operations: Select All, Copy, Paste, Expand All, Collapse All
+        int lBtnX = rcTopBar.left + 16;
+        auto drawStreamBtn = [&](const std::wstring& txt, ClickableRegion::Type cType, int minW,
+            COLORREF bgNormal = RGB(38, 40, 50),
+            COLORREF borderNormal = RGB(56, 60, 75),
+            COLORREF textNormal = RGB(220, 225, 235),
+            bool enabled = true) {
+            SelectObject(memDC, pState->hFontBold);
+            SIZE szText = { 0 };
+            GetTextExtentPoint32W(memDC, txt.c_str(), (int)txt.length(), &szText);
+            int w = (std::max)(minW, (int)szText.cx + 20);
+            if (lBtnX + w > rBtnX - 8) return; // Prevent collision on very narrow displays
+            RECT rcB = { lBtnX, 51, lBtnX + w, 81 };
+            lBtnX += (w + 7);
+            drawToolBtn(rcB, txt, cType, bgNormal, borderNormal, textNormal, enabled);
+        };
 
+        // 1. Select All / Deselect All (Always visible)
         if (totalStreamsInGroup > 0)
         {
             bool allSel = (selCount == totalStreamsInGroup);
             std::wstring selTxt = allSel ? L"✕ Deselect All" : L"✓ Select All";
-            drawBtn(selTxt, ClickableRegion::SelectAllStreamsBtn, 110);
+            drawStreamBtn(selTxt, ClickableRegion::SelectAllStreamsBtn, 105);
         }
-
-        drawBtn(L"📁 Open Folder", ClickableRegion::OpenFolderBtn, 115);
-        drawBtn(L"📂 Open...", ClickableRegion::OpenFileBtn, 90);
-        drawBtn(L"➕ New SMS", ClickableRegion::NewSmsBtn, 100, RGB(22, 52, 85), RGB(40, 130, 220), RGB(160, 220, 255));
-        drawBtn(L"💾 Save SMS", ClickableRegion::SaveBtn, 105,
-            pState->doc.isModified ? RGB(52, 38, 18) : RGB(38, 40, 50),
-            pState->doc.isModified ? RGB(220, 150, 30) : RGB(56, 60, 75),
-            pState->doc.isModified ? RGB(255, 210, 120) : RGB(220, 225, 235));
-        drawBtn(L"📦 Consolidate WAVs...", ClickableRegion::ConsolidateWavsBtn, 160,
-            RGB(35, 30, 55), RGB(130, 80, 220), RGB(215, 185, 255));
-
-        // Top bar line 1: File name & Action buttons
-        size_t slashIdx = pState->doc.filePath.find_last_of(L"\\/");
-        std::wstring fileName = (slashIdx != std::wstring::npos) ? pState->doc.filePath.substr(slashIdx + 1) : (pState->doc.filePath.empty() ? L"No SMS File Open" : pState->doc.filePath);
-        if (pState->doc.isModified) fileName += L" ●";
-
-        RECT rcTitle = { rcTopBar.left + 16, 8, btnRight - 12, 32 };
-        SelectObject(memDC, pState->hFontTitle);
-        SetTextColor(memDC, RGB(255, 255, 255));
-        DrawTextW(memDC, fileName.c_str(), -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-        RECT rcPathSub = { rcTopBar.left + 16, 30, btnRight - 12, 48 };
-        bool hovPath = PtInRect(&rcPathSub, pState->ptMouse);
-        SelectObject(memDC, pState->hFontSubtitle);
-        SetTextColor(memDC, hovPath ? RGB(100, 180, 255) : RGB(130, 140, 160));
-        DrawTextW(memDC, pState->doc.filePath.c_str(), -1, &rcPathSub, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-        if (!pState->doc.filePath.empty())
+        else
         {
-            pState->hitRegions.push_back({ ClickableRegion::OpenFolderBtn, rcPathSub, 0, 0, pState->doc.filePath });
+            drawStreamBtn(L"✓ Select All", ClickableRegion::None, 105, RGB(38, 40, 50), RGB(56, 60, 75), RGB(105, 112, 128), false);
         }
 
-        // Top bar line 2: Scalability Group Tabs
+        // 2. Copy Streams (Always visible)
+        if (selCount > 0)
+        {
+            std::wstring copyTxt = L"📋 Copy (" + std::to_wstring(selCount) + L")";
+            drawStreamBtn(copyTxt, ClickableRegion::CopyStreamsBtn, 95, RGB(26, 50, 36), RGB(45, 160, 85), RGB(130, 240, 165), true);
+        }
+        else
+        {
+            drawStreamBtn(L"📋 Copy", ClickableRegion::None, 90, RGB(28, 30, 38), RGB(40, 44, 54), RGB(105, 112, 128), false);
+        }
+
+        // 3. Paste Streams (Always visible)
+        if (clipCount > 0)
+        {
+            std::wstring pasteTxt = L"📋 Paste (" + std::to_wstring(clipCount) + L")";
+            drawStreamBtn(pasteTxt, ClickableRegion::PasteStreamsBtn, 100, RGB(26, 42, 60), RGB(40, 130, 220), RGB(130, 200, 255), true);
+        }
+        else
+        {
+            drawStreamBtn(L"📋 Paste", ClickableRegion::None, 95, RGB(28, 30, 38), RGB(40, 44, 54), RGB(105, 112, 128), false);
+        }
+
+        // 4. Expand All / Collapse All (Always visible)
+        drawStreamBtn(L"▾ Expand All", ClickableRegion::ExpandAllBtn, 95, RGB(38, 40, 50), RGB(56, 60, 75), RGB(220, 225, 235), totalStreamsInGroup > 0);
+        drawStreamBtn(L"▸ Collapse All", ClickableRegion::CollapseAllBtn, 100, RGB(38, 40, 50), RGB(56, 60, 75), RGB(220, 225, 235), totalStreamsInGroup > 0);
+
+        // =========================================================================
+        // ROW 3: SCALABILITY GROUP TABS & STREAMS DECLARATION DECK (Y = 88 to 118)
+        // =========================================================================
         int tabX = rcTopBar.left + 16;
         for (int g = 0; g < (int)pState->doc.groups.size(); ++g)
         {
@@ -5047,7 +5128,7 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             GetTextExtentPoint32W(memDC, tabText.c_str(), (int)tabText.size(), &szTab);
             int tabW = (std::max)(110, (int)szTab.cx + 24);
 
-            RECT rcTab = { tabX, 54, tabX + tabW, 84 };
+            RECT rcTab = { tabX, 88, tabX + tabW, 118 };
             tabX += tabW + 7;
             bool isHov = PtInRect(&rcTab, pState->ptMouse);
 
@@ -5089,7 +5170,7 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             SIZE szBadge;
             GetTextExtentPoint32W(memDC, stBadgeText.c_str(), (int)stBadgeText.size(), &szBadge);
             int badgeW = szBadge.cx + 20;
-            RECT rcStBadge = { tabX + 12, 54, tabX + 12 + badgeW, 84 };
+            RECT rcStBadge = { tabX + 12, 88, tabX + 12 + badgeW, 118 };
 
             COLORREF bgCol = isMismatch ? RGB(55, 36, 16) : RGB(20, 48, 26);
             COLORREF borderCol = isMismatch ? RGB(220, 150, 30) : RGB(45, 125, 55);
@@ -5131,14 +5212,13 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             }
             if (curGrp.isStereo) sgInfo += L"  Stereo: Yes";
 
-            RECT rcSgInfo = { rcStBadge.right + 12, 54, rcTopBar.right - 20, 84 };
+            RECT rcSgInfo = { rcStBadge.right + 12, 88, rcTopBar.right - 20, 118 };
             bool hovSgInfo = PtInRect(&rcSgInfo, pState->ptMouse);
             SelectObject(memDC, pState->hFontBody);
             SetTextColor(memDC, hovSgInfo ? RGB(110, 190, 255) : RGB(140, 160, 185));
             DrawTextW(memDC, sgInfo.c_str(), -1, &rcSgInfo, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
             pState->hitRegions.push_back({ ClickableRegion::SgPropsCardToggle, rcSgInfo, 0, 0, L"" });
         }
-
         // 4. Render Canvas Body (Scalability Group Properties & Encapsulated Streams Deck)
         RECT rcCanvas = { pState->sidebarWidth + 1, pState->headerHeight, rcClient.right, rcClient.bottom };
         int curY = rcCanvas.top + 10;
@@ -5252,7 +5332,7 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
             int sgCardLeft = rcCanvas.left + 16;
             int sgCardRight = rcCanvas.right - 20;
             int sgCardW = sgCardRight - sgCardLeft;
-            int sgCardH = grp.isSgPropsCollapsed ? 42 : 288;
+            int sgCardH = grp.isSgPropsCollapsed ? 42 : 324;
 
             RECT rcSgCard = { sgCardLeft, curY, sgCardRight, curY + sgCardH };
 
@@ -5333,10 +5413,10 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                 LineTo(memDC, rcSgCard.right, rcSgHdr.bottom);
 
                 // ========================================================
-                // ROW 1: Group Level & Master Audio
+                // ROW 1: Group Level Selection
                 // ========================================================
                 int r1Y = rcSgHdr.bottom + 8;
-                int r1H = 34;
+                int r1H = 30;
 
                 // Label: Group Level:
                 RECT rcLblLevel = { rcSgCard.left + 16, r1Y, rcSgCard.left + 105, r1Y + r1H };
@@ -5374,14 +5454,15 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                     pState->hitRegions.push_back({ ClickableRegion::SgLevelBtn, rcLvl, lb.lvl, 0, L"" });
                 }
 
-                // Vertical separator in Row 1
-                int sep1X = lvlX + 12;
-                MoveToEx(memDC, sep1X, r1Y + 4, NULL);
-                LineTo(memDC, sep1X, r1Y + r1H - 4);
+                // ========================================================
+                // ROW 2: Master Audio Output & Volume Controls
+                // ========================================================
+                int r2Y = r1Y + r1H + 6;
+                int r2H = 30;
 
                 // Master Volume Checkbox & Label
-                int volX = sep1X + 16;
-                RECT rcVolChk = { volX, r1Y + 7, volX + 20, r1Y + 27 };
+                int volX = rcSgCard.left + 16;
+                RECT rcVolChk = { volX, r2Y + 5, volX + 20, r2Y + 25 };
                 bool hovVolChk = PtInRect(&rcVolChk, pState->ptMouse);
                 HBRUSH vChkBr = CreateSolidBrush(grp.hasGroupVolume ? RGB(0, 120, 215) : (hovVolChk ? RGB(45, 50, 65) : RGB(30, 34, 46)));
                 HPEN vChkPen = CreatePen(PS_SOLID, 1, grp.hasGroupVolume ? RGB(60, 160, 255) : RGB(60, 68, 88));
@@ -5396,16 +5477,16 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                 }
                 pState->hitRegions.push_back({ ClickableRegion::SgMasterVolToggle, rcVolChk, 0, 0, L"" });
 
-                RECT rcLblVol = { rcVolChk.right + 8, r1Y, rcVolChk.right + 95, r1Y + r1H };
+                RECT rcLblVol = { rcVolChk.right + 8, r2Y, rcVolChk.right + 95, r2Y + r2H };
                 SelectObject(memDC, pState->hFontBold);
                 SetTextColor(memDC, grp.hasGroupVolume ? RGB(210, 225, 245) : RGB(130, 140, 155));
                 DrawTextW(memDC, L"Master Vol:", -1, &rcLblVol, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                 // Volume [-] [ 1.00 ] [+]
                 int vbX = rcLblVol.right + 4;
-                RECT rcVolDown = { vbX, r1Y + 3, vbX + 26, r1Y + r1H - 3 };
-                RECT rcVolVal = { rcVolDown.right + 4, r1Y + 3, rcVolDown.right + 65, r1Y + r1H - 3 };
-                RECT rcVolUp = { rcVolVal.right + 4, r1Y + 3, rcVolVal.right + 30, r1Y + r1H - 3 };
+                RECT rcVolDown = { vbX, r2Y + 2, vbX + 28, r2Y + r2H - 2 };
+                RECT rcVolVal = { rcVolDown.right + 4, r2Y + 2, rcVolDown.right + 75, r2Y + r2H - 2 };
+                RECT rcVolUp = { rcVolVal.right + 4, r2Y + 2, rcVolVal.right + 30, r2Y + r2H - 2 };
 
                 bool hovVd = PtInRect(&rcVolDown, pState->ptMouse);
                 HBRUSH vdB = CreateSolidBrush(hovVd ? RGB(50, 56, 75) : RGB(36, 40, 54));
@@ -5441,9 +5522,14 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                 DrawTextW(memDC, L"+", -1, &rcVolUp, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
                 pState->hitRegions.push_back({ ClickableRegion::SgMasterVolBtn, rcVolUp, 1, 0, L"" });
 
+                // Vertical separator between Volume and Stereo
+                int sep2X = rcVolUp.right + 16;
+                MoveToEx(memDC, sep2X, r2Y + 3, NULL);
+                LineTo(memDC, sep2X, r2Y + r2H - 3);
+
                 // Stereo Toggle Pill
-                int stX = rcVolUp.right + 20;
-                RECT rcStereo = { stX, r1Y + 3, stX + 125, r1Y + r1H - 3 };
+                int stX = sep2X + 16;
+                RECT rcStereo = { stX, r2Y + 2, stX + 135, r2Y + r2H - 2 };
                 bool hovSt = PtInRect(&rcStereo, pState->ptMouse);
                 HBRUSH stB = CreateSolidBrush(grp.isStereo ? RGB(22, 54, 34) : (hovSt ? RGB(45, 50, 65) : RGB(34, 38, 50)));
                 HPEN stP = CreatePen(PS_SOLID, 1, grp.isStereo ? RGB(45, 160, 85) : (hovSt ? RGB(80, 100, 130) : RGB(52, 58, 76)));
@@ -5460,7 +5546,7 @@ static LRESULT CALLBACK SmsEditorViewProc(HWND hWnd, UINT msg, WPARAM wParam, LP
                 // ========================================================
                 // SECTION 2: ACTIVATION RULES (Two Spacious Sub-Rows)
                 // ========================================================
-                int actY = r1Y + r1H + 10;
+                int actY = r2Y + r2H + 10;
                 MoveToEx(memDC, rcSgCard.left + 14, actY - 5, NULL);
                 LineTo(memDC, rcSgCard.right - 14, actY - 5);
 
@@ -6986,5 +7072,18 @@ bool SmsEditorView_SaveCurrentFile(HWND hWnd)
     {
         ShowModernMessageBox(hWnd, L"Failed to save SMS file to disk. Check file permissions.", L"Save Error", MB_OK | MB_ICONERROR);
         return false;
+    }
+}
+
+void SmsEditorView_ReloadIfPathMatches(HWND hWnd, const std::wstring& mutatedFilePath)
+{
+    SmsEditorViewState* pState = (SmsEditorViewState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+    if (!pState || pState->doc.filePath.empty() || mutatedFilePath.empty()) return;
+
+    if (_wcsicmp(pState->doc.filePath.c_str(), mutatedFilePath.c_str()) == 0)
+    {
+        std::wstring curPath = pState->doc.filePath;
+        LoadFileIntoEditor(pState, curPath);
+        InvalidateRect(hWnd, NULL, FALSE);
     }
 }

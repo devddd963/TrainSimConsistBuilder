@@ -130,19 +130,9 @@ private:
     std::wstring m_typeAheadBuffer;
     DWORD m_lastTypeAheadTime;
 
-    // Find-As-You-Type (FAYT) / DOpus-style Quick Search
-    bool m_bFaytActive;
-    std::wstring m_faytQuery;
-    std::vector<int> m_faytMatches;
-    int m_faytMatchIndex;
-    RECT m_rcFaytPill;
-    RECT m_rcFaytPrevBtn;
-    RECT m_rcFaytNextBtn;
-    RECT m_rcFaytCloseBtn;
-    int m_faytHoverBtn; // 0=none, 1=prev, 2=next, 3=close
-    HFONT m_hFontFaytIcon;
-    HFONT m_hFontFaytText;
-    static constexpr UINT_PTR TIMER_FAYT_TIMEOUT_ID = 0x5C03;
+    // Explorer-style prefix jump navigation (Consist Manager & Stock Manager decks)
+    bool m_bExplorerJumpNavigation;
+    void JumpToNextByPrefix(wchar_t ch);
 
     // Inline Column Hover Copy Button & Feedback State
     int m_inlineCopyCol;
@@ -153,12 +143,7 @@ private:
     HFONT m_hFontCopyIcon;
     static constexpr UINT_PTR TIMER_COPY_FEEDBACK_ID = 0x5C04;
 
-    void StartFayt(wchar_t initialChar);
-    void UpdateFaytMatches();
-    void FaytNext();
-    void FaytPrev();
-    void CloseFayt();
-    void ResetFaytTimer();
+
 
 public:
     CustomListControl();
@@ -257,7 +242,34 @@ public:
     bool IsAutoFitPrimary() const { return m_bAutoFitPrimary; }
     void AutoFitLastColumn();
     void SetAutoFitLastColumn(bool autoFit) { m_bAutoFitLastColumn = autoFit; UpdateScrollbars(); Invalidate(); }
+    void SetExplorerJumpNavigation(bool enable) { m_bExplorerJumpNavigation = enable; }
+    bool IsExplorerJumpNavigation() const { return m_bExplorerJumpNavigation; }
     bool IsAutoFitLastColumn() const { return m_bAutoFitLastColumn; }
+    int  GetMinimumHeaderFitWidth() const
+    {
+        if (m_columns.empty()) return GetGutterWidth();
+        int w = GetGutterWidth();
+        for (size_t c = 0; c < m_columns.size() - 1; ++c)
+        {
+            w += m_columns[c].defaultWidth;
+        }
+        int minHeaderW = 105;
+        if (!m_columns.empty() && !m_columns.back().title.empty())
+        {
+            minHeaderW = (std::max)(minHeaderW, (int)m_columns.back().title.length() * 9 + 45);
+        }
+        w += minHeaderW;
+        return w;
+    }
+    int  GetDesiredWidth() const
+    {
+        int w = GetGutterWidth() + V_SCROLLBAR_WIDTH;
+        for (const auto& col : m_columns)
+        {
+            w += col.defaultWidth;
+        }
+        return w;
+    }
 
     // Drop Target & Drag Auto-Scroll Math Helpers
     int  GetHeaderHeight() const { return m_headerHeight; }

@@ -4,6 +4,11 @@
 #include <shlwapi.h>
 #include <mutex>
 #include <sstream>
+#include <filesystem>
+#include <fstream>
+#include <algorithm>
+
+namespace fs = std::filesystem;
 
 #pragma comment(lib, "shlwapi.lib")
 
@@ -167,17 +172,8 @@ namespace DatabaseManager
             "CREATE INDEX IF NOT EXISTS idx_sms_pool_cat ON SmsPoolPresets(category);";
         sqlite3_exec(g_db, sqlSmsPools, NULL, NULL, &err);
 
-        // 8. SmsStreamPresets table (stores user-created stream preset cards)
-        const char* sqlStreamPresets =
-            "CREATE TABLE IF NOT EXISTS SmsStreamPresets ("
-            "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "    name TEXT NOT NULL,"
-            "    category TEXT DEFAULT 'Custom',"
-            "    payload TEXT NOT NULL,"
-            "    created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
-            ");"
-            "CREATE INDEX IF NOT EXISTS idx_stream_preset_name ON SmsStreamPresets(name);";
-        sqlite3_exec(g_db, sqlStreamPresets, NULL, NULL, &err);
+        // Presets now operate purely as physical files in SoundStudio\SMS_Stream_Presets (drop legacy table if present)
+        sqlite3_exec(g_db, "DROP TABLE IF EXISTS SmsStreamPresets;", NULL, NULL, &err);
 
         g_isInitialized = true;
         LOG_INFO("DatabaseManager: Successfully opened master database '%ls'", dbPath.c_str());
@@ -1408,66 +1404,299 @@ namespace DatabaseManager
         return true;
     }
 
+    std::wstring GetSmsPresetsRootDir()
+    {
+        return GetAppDirectory() + L"SoundStudio\\SMS_Stream_Presets";
+    }
+
+    std::wstring SanitizePresetFileName(const std::wstring& name)
+    {
+        std::wstring result = name;
+        for (auto& ch : result)
+        {
+            if (ch == L'/' || ch == L'\\' || ch == L':' || ch == L'*' || ch == L'?' || ch == L'\"' || ch == L'<' || ch == L'>' || ch == L'|')
+            {
+                ch = L'_';
+            }
+        }
+        return result;
+    }
+
+    static bool SaveStreamPresetCardToFile(const StreamPresetCard& card, const std::wstring& filePath)
+    {
+        try
+        {
+            fs::path p(filePath);
+            if (!fs::exists(p.parent_path()))
+            {
+                fs::create_directories(p.parent_path());
+            }
+
+            std::ofstream ofs(filePath, std::ios::out | std::ios::binary | std::ios::trunc);
+            if (!ofs.is_open()) return false;
+
+            std::wstringstream ss;
+            ss << L"[Preset]\n";
+            ss << L"Name=" << card.name << L"\n";
+            ss << L"Category=" << card.category << L"\n";
+            ss << L"IsCollapsed=" << (card.isCollapsed ? 1 : 0) << L"\n";
+            ss << L"\n[StreamsPayload]\n";
+            ss << SerializeStreamPresetCard(card);
+
+            std::string u8 = WideToUtf8(ss.str());
+            ofs.write(u8.data(), u8.size());
+            ofs.close();
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    static bool LoadStreamPresetCardFromFile(const std::wstring& filePath, StreamPresetCard& outCard, const std::wstring& rootDir)
+    {
+        try
+        {
+            std::ifstream ifs(filePath, std::ios::in | std::ios::binary);
+            if (!ifs.is_open()) return false;
+
+            std::string u8((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+            ifs.close();
+
+            std::wstring wContent = Utf8ToWide(u8.c_str());
+            if (wContent.empty()) return false;
+
+            outCard = StreamPresetCard();
+            outCard.filePath = filePath;
+            try
+            {
+                outCard.relativePath = fs::relative(filePath, rootDir).wstring();
+            }
+            catch (...)
+            {
+                outCard.relativePath = fs::path(filePath).filename().wstring();
+            }
+
+            // Determine category from folder structure
+            try
+            {
+                fs::path parentRel = fs::relative(fs::path(filePath).parent_path(), rootDir);
+                std::wstring catRel = parentRel.wstring();
+                if (!catRel.empty() && catRel != L".")
+                {
+                    outCard.category = catRel;
+                }
+                else
+                {
+                    outCard.category = L"AI_HORNS";
+                }
+            }
+            catch (...)
+            {
+                outCard.category = L"AI_HORNS";
+            }
+
+            std::wstringstream ss(wContent);
+            std::wstring line;
+            bool inPayload = false;
+            std::wstringstream payloadSs;
+
+            while (std::getline(ss, line))
+            {
+                if (!line.empty() && line.back() == L'\r') line.pop_back();
+
+                if (line == L"[StreamsPayload]")
+                {
+                    inPayload = true;
+                    continue;
+                }
+
+                if (!inPayload)
+                {
+                    if (line.rfind(L"Name=", 0) == 0)
+                    {
+                        outCard.name = line.substr(5);
+                    }
+                    else if (line.rfind(L"Category=", 0) == 0)
+                    {
+                        if (outCard.category.empty() || outCard.category == L"Custom")
+                        {
+                            outCard.category = line.substr(9);
+                        }
+                    }
+                    else if (line.rfind(L"IsCollapsed=", 0) == 0)
+                    {
+                        outCard.isCollapsed = (_wtoi(line.substr(12).c_str()) != 0);
+                    }
+                }
+                else
+                {
+                    payloadSs << line << L"\n";
+                }
+            }
+
+            if (outCard.name.empty())
+            {
+                outCard.name = fs::path(filePath).stem().wstring();
+            }
+
+            std::wstring pStr = payloadSs.str();
+            if (!pStr.empty())
+            {
+                DeserializeStreamPresetCard(pStr, outCard);
+            }
+            else
+            {
+                DeserializeStreamPresetCard(wContent, outCard);
+            }
+
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    std::vector<std::wstring> GetSmsPresetCategories()
+    {
+        std::vector<std::wstring> cats;
+        std::wstring root = GetSmsPresetsRootDir();
+        try
+        {
+            if (fs::exists(root))
+            {
+                for (const auto& entry : fs::directory_iterator(root))
+                {
+                    if (entry.is_directory())
+                    {
+                        std::wstring catName = entry.path().filename().wstring();
+                        if (!catName.empty() && std::find(cats.begin(), cats.end(), catName) == cats.end())
+                        {
+                            cats.push_back(catName);
+                        }
+                    }
+                }
+            }
+        }
+        catch (...) {}
+
+        if (std::find(cats.begin(), cats.end(), L"AI_HORNS") == cats.end())
+        {
+            cats.insert(cats.begin(), L"AI_HORNS");
+        }
+        std::sort(cats.begin(), cats.end());
+        return cats;
+    }
+
+    bool DeleteStreamPresetFile(const StreamPresetCard& card)
+    {
+        try
+        {
+            if (!card.filePath.empty() && fs::exists(card.filePath))
+            {
+                fs::remove(card.filePath);
+                return true;
+            }
+            std::wstring root = GetSmsPresetsRootDir();
+            std::wstring cat = !card.category.empty() ? SanitizePresetFileName(card.category) : L"AI_HORNS";
+            std::wstring fName = !card.name.empty() ? SanitizePresetFileName(card.name) : L"Preset";
+            std::wstring targetPath = root + L"\\" + cat + L"\\" + fName + L".smspreset";
+            if (fs::exists(targetPath))
+            {
+                fs::remove(targetPath);
+                return true;
+            }
+        }
+        catch (...) {}
+        return false;
+    }
+
     bool LoadStreamPresets(std::vector<StreamPresetCard>& outCards)
     {
-        if (!g_isInitialized && !Initialize()) return false;
-        std::lock_guard<std::recursive_mutex> lock(g_dbMutex);
+        std::wstring root = GetSmsPresetsRootDir();
+        try
+        {
+            if (!fs::exists(root))
+            {
+                std::wstring legacyRoot = GetAppDirectory() + L"SoundData\\SMS_Presets";
+                if (fs::exists(legacyRoot))
+                {
+                    try { fs::copy(legacyRoot, root, fs::copy_options::recursive | fs::copy_options::overwrite_existing); } catch (...) {}
+                }
+                if (!fs::exists(root))
+                {
+                    fs::create_directories(root);
+                }
+            }
+        }
+        catch (...) {}
 
         outCards.clear();
-        const char* sql = "SELECT id, name, category, payload FROM SmsStreamPresets ORDER BY id ASC;";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
-
-        while (sqlite3_step(stmt) == SQLITE_ROW)
+        try
         {
-            StreamPresetCard card;
-            card.id = sqlite3_column_int(stmt, 0);
-            const char* name = (const char*)sqlite3_column_text(stmt, 1);
-            const char* cat = (const char*)sqlite3_column_text(stmt, 2);
-            const char* payload = (const char*)sqlite3_column_text(stmt, 3);
-
-            if (name) card.name = Utf8ToWide(name);
-            if (cat) card.category = Utf8ToWide(cat);
-            if (payload)
+            if (fs::exists(root))
             {
-                DeserializeStreamPresetCard(Utf8ToWide(payload), card);
+                for (const auto& entry : fs::recursive_directory_iterator(root))
+                {
+                    if (entry.is_regular_file())
+                    {
+                        std::wstring ext = entry.path().extension().wstring();
+                        std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+                        if (ext == L".smspreset" || ext == L".preset")
+                        {
+                            StreamPresetCard card;
+                            if (LoadStreamPresetCardFromFile(entry.path().wstring(), card, root))
+                            {
+                                outCards.push_back(std::move(card));
+                            }
+                        }
+                    }
+                }
             }
-            outCards.push_back(std::move(card));
         }
-        sqlite3_finalize(stmt);
+        catch (...) {}
+
+        // Sort by category then by name
+        std::sort(outCards.begin(), outCards.end(), [](const StreamPresetCard& a, const StreamPresetCard& b) {
+            if (a.category != b.category) return a.category < b.category;
+            return a.name < b.name;
+        });
+
+        for (size_t i = 0; i < outCards.size(); ++i)
+        {
+            outCards[i].id = (int)i + 1;
+        }
+
         return true;
     }
 
-    bool SaveStreamPresets(const std::vector<StreamPresetCard>& cards)
+    bool SaveStreamPresets(std::vector<StreamPresetCard>& cards)
     {
-        if (!g_isInitialized && !Initialize()) return false;
-        std::lock_guard<std::recursive_mutex> lock(g_dbMutex);
+        std::wstring root = GetSmsPresetsRootDir();
+        try { if (!fs::exists(root)) fs::create_directories(root); } catch (...) {}
 
-        char* err = nullptr;
-        sqlite3_exec(g_db, "BEGIN TRANSACTION;", NULL, NULL, &err);
-        sqlite3_exec(g_db, "DELETE FROM SmsStreamPresets;", NULL, NULL, &err);
-
-        const char* insSql = "INSERT INTO SmsStreamPresets (name, category, payload) VALUES (?, ?, ?);";
-        sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(g_db, insSql, -1, &stmt, NULL) == SQLITE_OK)
+        for (auto& card : cards)
         {
-            for (const auto& card : cards)
+            if (card.category.empty()) card.category = L"AI_HORNS";
+            std::wstring catClean = SanitizePresetFileName(card.category);
+            std::wstring nameClean = SanitizePresetFileName(card.name.empty() ? L"Preset" : card.name);
+
+            std::wstring catDir = root + L"\\" + catClean;
+            std::wstring targetPath = catDir + L"\\" + nameClean + L".smspreset";
+
+            // If path changed (e.g. renamed or category changed), remove old file
+            if (!card.filePath.empty() && _wcsicmp(card.filePath.c_str(), targetPath.c_str()) != 0)
             {
-                std::string uName = WideToUtf8(card.name);
-                std::string uCat = WideToUtf8(card.category);
-                std::string uPayload = WideToUtf8(SerializeStreamPresetCard(card));
-
-                sqlite3_bind_text(stmt, 1, uName.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 2, uCat.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(stmt, 3, uPayload.c_str(), -1, SQLITE_TRANSIENT);
-
-                sqlite3_step(stmt);
-                sqlite3_reset(stmt);
+                try { if (fs::exists(card.filePath)) fs::remove(card.filePath); } catch (...) {}
             }
-            sqlite3_finalize(stmt);
+
+            SaveStreamPresetCardToFile(card, targetPath);
+            card.filePath = targetPath;
+            card.relativePath = catClean + L"\\" + nameClean + L".smspreset";
         }
 
-        sqlite3_exec(g_db, "COMMIT;", NULL, NULL, &err);
         return true;
     }
 }

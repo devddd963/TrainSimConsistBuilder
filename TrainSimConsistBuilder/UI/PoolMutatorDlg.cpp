@@ -22,6 +22,7 @@
 #include "CustomDropDownMenu.h"
 
 #include "CustomScrollBar.h"
+#include "ModernEditControl.h"
 
 #include "CustomListControl.h"
 
@@ -797,7 +798,7 @@ namespace
 
             {
 
-                SetWindowPos(g_State.hEditCustomCount, NULL, 238, 301, 54, 18, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
+                SetWindowPos(g_State.hEditCustomCount, NULL, 235, 297, 60, 26, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
 
             }
 
@@ -823,7 +824,7 @@ namespace
 
             {
 
-                SetWindowPos(g_State.hEditInsertCount, NULL, 148, 222, 54, 18, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
+                SetWindowPos(g_State.hEditInsertCount, NULL, 145, 218, 60, 26, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
 
             }
 
@@ -851,7 +852,7 @@ namespace
 
                 int posX = (std::max)(colSplitX + 10 + 205, 472);
 
-                SetWindowPos(g_State.hEditPositionIndex, NULL, posX, 332, 110, 18, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
+                SetWindowPos(g_State.hEditPositionIndex, NULL, posX - 3, 328, 118, 26, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
 
             }
 
@@ -885,7 +886,7 @@ namespace
 
             {
 
-                SetWindowPos(g_State.hEditCloneSuffix, NULL, 128, h - 89, 154, 18, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
+                SetWindowPos(g_State.hEditCloneSuffix, NULL, 124, h - 91, 162, 26, SWP_NOZORDER | SWP_SHOWWINDOW | SWP_NOCOPYBITS);
 
             }
 
@@ -2161,53 +2162,7 @@ namespace
 
 
 
-                COLORREF chkBg = (isAllChecked || isIndeterminate) ? accentCol : RGB(36, 40, 48);
-
-                COLORREF chkBdr = (isAllChecked || isIndeterminate) ? accentCol : RGB(70, 78, 92);
-
-                HBRUSH hbrChk = CreateSolidBrush(chkBg);
-
-                HPEN hpChk = CreatePen(PS_SOLID, 1, chkBdr);
-
-                HGDIOBJ oB = SelectObject(hdc, hbrChk);
-
-                HGDIOBJ oP = SelectObject(hdc, hpChk);
-
-                RoundRect(hdc, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
-
-                SelectObject(hdc, oB); SelectObject(hdc, oP);
-
-                DeleteObject(hbrChk); DeleteObject(hpChk);
-
-
-
-                if (isAllChecked)
-
-                {
-
-                    SelectObject(hdc, g_State.hFontIcon ? g_State.hFontIcon : g_State.hFontMain);
-
-                    SetTextColor(hdc, RGB(255, 255, 255));
-
-                    RECT rcGlyph = { rcChk.left, rcChk.top - 1, rcChk.right, rcChk.bottom };
-
-                    DrawTextW(hdc, L"\xE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                }
-
-                else if (isIndeterminate)
-
-                {
-
-                    HBRUSH hbrInd = CreateSolidBrush(RGB(255, 255, 255));
-
-                    RECT rcInd = { rcChk.left + 3, rcChk.top + 6, rcChk.right - 3, rcChk.top + 8 };
-
-                    FillRect(hdc, &rcInd, hbrInd);
-
-                    DeleteObject(hbrInd);
-
-                }
+                UITheme::DrawCheckbox(hdc, rcChk, isAllChecked, false, isIndeterminate, accentCol, g_State.hFontIcon);
 
 
 
@@ -2253,35 +2208,7 @@ namespace
 
 
 
-                HBRUSH hbrChk = CreateSolidBrush(bu.isSelected ? accentCol : RGB(32, 36, 44));
-
-                HPEN hpChk = CreatePen(PS_SOLID, 1, bu.isSelected ? accentCol : RGB(65, 72, 85));
-
-                HGDIOBJ oB = SelectObject(hdc, hbrChk);
-
-                HGDIOBJ oP = SelectObject(hdc, hpChk);
-
-                RoundRect(hdc, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
-
-                SelectObject(hdc, oB); SelectObject(hdc, oP);
-
-                DeleteObject(hbrChk); DeleteObject(hpChk);
-
-
-
-                if (bu.isSelected)
-
-                {
-
-                    SelectObject(hdc, g_State.hFontIcon ? g_State.hFontIcon : g_State.hFontMain);
-
-                    SetTextColor(hdc, RGB(255, 255, 255));
-
-                    RECT rcGlyph = { rcChk.left, rcChk.top - 1, rcChk.right, rcChk.bottom };
-
-                    DrawTextW(hdc, L"\xE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                }
+                UITheme::DrawCheckbox(hdc, rcChk, bu.isSelected, false, false, accentCol, g_State.hFontIcon);
 
 
 
@@ -5778,66 +5705,37 @@ namespace
 
 
             // Custom Count Edit Box (Tab 0)
-
             std::wstring customCntStr = std::to_wstring(g_State.customCount > 0 ? g_State.customCount : 20);
-
             g_State.hEditCustomCount = CreateWindowExW(0, L"EDIT", customCntStr.c_str(),
-
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER | ES_CENTER | WS_TABSTOP,
-
-                238, 301, 54, 18, hWnd, (HMENU)201, GetModuleHandle(NULL), NULL);
-
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_MULTILINE | ES_CENTER | WS_TABSTOP,
+                235, 297, 60, 26, hWnd, (HMENU)201, GetModuleHandle(NULL), NULL);
             SendMessage(g_State.hEditCustomCount, WM_SETFONT, (WPARAM)g_State.hFontMain, TRUE);
-
-            SendMessage(g_State.hEditCustomCount, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(0, 0));
-
-
+            ModernEdit_Attach(g_State.hEditCustomCount, true, true, false, false);
 
             // Insert Count Edit Box (Tab 1: Common to both sources)
-
             std::wstring insertCntStr = std::to_wstring(g_State.insertCount > 0 ? g_State.insertCount : 2);
-
             g_State.hEditInsertCount = CreateWindowExW(0, L"EDIT", insertCntStr.c_str(),
-
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER | ES_CENTER | WS_TABSTOP,
-
-                148, 222, 54, 18, hWnd, (HMENU)202, GetModuleHandle(NULL), NULL);
-
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_MULTILINE | ES_CENTER | WS_TABSTOP,
+                145, 218, 60, 26, hWnd, (HMENU)202, GetModuleHandle(NULL), NULL);
             SendMessage(g_State.hEditInsertCount, WM_SETFONT, (WPARAM)g_State.hFontMain, TRUE);
-
-            SendMessage(g_State.hEditInsertCount, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(0, 0));
-
-
+            ModernEdit_Attach(g_State.hEditInsertCount, true, true, false, false);
 
             // Position Index Edit Box (Tab 1: Specific Index)
-
             std::wstring posIndexStr = g_State.positionIndexStr.empty() ? L"1" : g_State.positionIndexStr;
-
             g_State.hEditPositionIndex = CreateWindowExW(0, L"EDIT", posIndexStr.c_str(),
-
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_CENTER | WS_TABSTOP,
-
-                472, 332, 120, 18, hWnd, (HMENU)203, GetModuleHandle(NULL), NULL);
-
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_MULTILINE | ES_LEFT | WS_TABSTOP,
+                472, 328, 118, 26, hWnd, (HMENU)203, GetModuleHandle(NULL), NULL);
             SendMessage(g_State.hEditPositionIndex, WM_SETFONT, (WPARAM)g_State.hFontMain, TRUE);
-
-            SendMessage(g_State.hEditPositionIndex, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(4, 4));
-
-
+            SendMessage(g_State.hEditPositionIndex, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(9, 9));
+            ModernEdit_Attach(g_State.hEditPositionIndex, false, true, false, false);
 
             // Clone Suffix Edit Box
-
             std::wstring cloneSufStr = g_State.cloneSuffix.empty() ? L"_PoolVar" : g_State.cloneSuffix;
-
             g_State.hEditCloneSuffix = CreateWindowExW(0, L"EDIT", cloneSufStr.c_str(),
-
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
-
-                128, 411, 154, 18, hWnd, (HMENU)204, GetModuleHandle(NULL), NULL);
-
+                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_MULTILINE | WS_TABSTOP,
+                124, 411, 162, 26, hWnd, (HMENU)204, GetModuleHandle(NULL), NULL);
             SendMessage(g_State.hEditCloneSuffix, WM_SETFONT, (WPARAM)g_State.hFontMain, TRUE);
-
-            SendMessage(g_State.hEditCloneSuffix, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(4, 4));
+            ModernEdit_Attach(g_State.hEditCloneSuffix, false, true, false, false);
 
 
 
@@ -5980,6 +5878,9 @@ namespace
 
 
         case WM_CTLCOLOREDIT:
+        {
+            return ModernEdit_OnCtlColor((HDC)wParam, (HWND)lParam);
+        }
 
         case WM_CTLCOLORSTATIC:
 
@@ -6288,9 +6189,8 @@ namespace
 
 
         case WM_LBUTTONDOWN:
-
         {
-
+            SetFocus(hWnd);
             int x = GET_X_LPARAM(lParam);
 
             int y = GET_Y_LPARAM(lParam);
@@ -7564,51 +7464,7 @@ namespace
 
                 RECT rcMChkBox = { chkBoxX, chkBoxY, chkBoxX + chkSz, chkBoxY + chkSz };
 
-                COLORREF chkBg = (isAllMaster || isIndeterminateMaster) ? accentCol : RGB(30, 16, 20);
-
-                COLORREF chkBdr = (isAllMaster || isIndeterminateMaster) ? accentCol : RGB(100, 48, 58);
-
-                HBRUSH hbrMChk = CreateSolidBrush(chkBg);
-
-                HPEN hpenMChk = CreatePen(PS_SOLID, 1, chkBdr);
-
-                hOldB = (HBRUSH)SelectObject(hmemDC, hbrMChk);
-
-                hOldP = (HPEN)SelectObject(hmemDC, hpenMChk);
-
-                RoundRect(hmemDC, rcMChkBox.left, rcMChkBox.top, rcMChkBox.right, rcMChkBox.bottom, 3, 3);
-
-                if (isAllMaster)
-
-                {
-
-                    SelectObject(hmemDC, g_State.hFontIcon ? g_State.hFontIcon : g_State.hFontSmall);
-
-                    SetTextColor(hmemDC, RGB(255, 255, 255));
-
-                    RECT rcGlyph = { rcMChkBox.left, rcMChkBox.top - 1, rcMChkBox.right, rcMChkBox.bottom };
-
-                    DrawTextW(hmemDC, L"\uE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                }
-
-                else if (isIndeterminateMaster)
-
-                {
-
-                    HBRUSH hbrInd = CreateSolidBrush(RGB(255, 255, 255));
-
-                    RECT rcInd = { rcMChkBox.left + 3, rcMChkBox.top + 6, rcMChkBox.right - 3, rcMChkBox.top + 8 };
-
-                    FillRect(hmemDC, &rcInd, hbrInd);
-
-                    DeleteObject(hbrInd);
-
-                }
-
-                SelectObject(hmemDC, hOldB); SelectObject(hmemDC, hOldP);
-
-                DeleteObject(hbrMChk); DeleteObject(hpenMChk);
+                UITheme::DrawCheckbox(hmemDC, rcMChkBox, isAllMaster, false, isIndeterminateMaster, accentCol, g_State.hFontIcon);
 
 
 
@@ -8044,32 +7900,6 @@ namespace
                 RECT rcCText2 = { 56, 296, 230, 324 };
 
                 DrawTextW(hmemDC, L"Custom Exact Unit Count:", -1, &rcCText2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-
-
-                if (isC2)
-
-                {
-
-                    HBRUSH hCntBg = CreateSolidBrush(RGB(32, 32, 34));
-
-                    HPEN hCntPen = CreatePen(PS_SOLID, 1, borderCol);
-
-                    HBRUSH holdBCnt = (HBRUSH)SelectObject(hmemDC, hCntBg);
-
-                    HPEN holdCntP = (HPEN)SelectObject(hmemDC, hCntPen);
-
-                    RoundRect(hmemDC, 235, 297, 295, 323, 4, 4);
-
-                    SelectObject(hmemDC, holdBCnt);
-
-                    SelectObject(hmemDC, holdCntP);
-
-                    DeleteObject(hCntBg);
-
-                    DeleteObject(hCntPen);
-
-                }
 
             }
 
@@ -8643,23 +8473,6 @@ namespace
 
 
 
-                HBRUSH hInsBg = CreateSolidBrush(RGB(32, 32, 34));
-
-                HPEN hInsPen = CreatePen(PS_SOLID, 1, borderCol);
-
-                HBRUSH holdBIns = (HBRUSH)SelectObject(hmemDC, hInsBg);
-
-                HPEN holdInsP = (HPEN)SelectObject(hmemDC, hInsPen);
-
-                RoundRect(hmemDC, 145, 218, 205, 244, 4, 4);
-
-                SelectObject(hmemDC, holdBIns);
-
-                SelectObject(hmemDC, holdInsP);
-
-                DeleteObject(hInsBg);
-
-                DeleteObject(hInsPen);
 
 
 
@@ -8819,23 +8632,6 @@ namespace
 
                 {
 
-                    HBRUSH hPosBg = CreateSolidBrush(RGB(32, 32, 34));
-
-                    HPEN hPosPen = CreatePen(PS_SOLID, 1, borderCol);
-
-                    HBRUSH holdBPos = (HBRUSH)SelectObject(hmemDC, hPosBg);
-
-                    HPEN holdPosP = (HPEN)SelectObject(hmemDC, hPosPen);
-
-                    RoundRect(hmemDC, posBoxX - 3, 328, posBoxX + 115, 354, 4, 4);
-
-                    SelectObject(hmemDC, holdBPos);
-
-                    SelectObject(hmemDC, holdPosP);
-
-                    DeleteObject(hPosBg);
-
-                    DeleteObject(hPosPen);
 
 
 
@@ -9578,39 +9374,7 @@ namespace
 
                 RECT rcChkBox = { 34, bottomY + 4, 50, bottomY + 20 };
 
-                HBRUSH hbrChk = CreateSolidBrush(g_State.createClones ? accentCol : cardBgCol);
-
-                HPEN hpenChk = CreatePen(PS_SOLID, 1, g_State.createClones ? accentCol : borderCol);
-
-                hOldB = (HBRUSH)SelectObject(hmemDC, hbrChk);
-
-                hOldP = (HPEN)SelectObject(hmemDC, hpenChk);
-
-                RoundRect(hmemDC, rcChkBox.left, rcChkBox.top, rcChkBox.right, rcChkBox.bottom, 4, 4);
-
-                SelectObject(hmemDC, hOldB);
-
-                SelectObject(hmemDC, hOldP);
-
-                DeleteObject(hbrChk);
-
-                DeleteObject(hpenChk);
-
-
-
-                if (g_State.createClones)
-
-                {
-
-                    SelectObject(hmemDC, g_State.hFontIcon);
-
-                    SetTextColor(hmemDC, RGB(255, 255, 255));
-
-                    RECT rcChkGlyph = { rcChkBox.left, rcChkBox.top - 1, rcChkBox.right, rcChkBox.bottom };
-
-                    DrawTextW(hmemDC, L"\xE73E", -1, &rcChkGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-                }
+                UITheme::DrawCheckbox(hmemDC, rcChkBox, g_State.createClones, false, false, accentCol, g_State.hFontIcon);
 
 
 
@@ -9634,23 +9398,6 @@ namespace
 
 
 
-                HBRUSH hSufBg = CreateSolidBrush(RGB(32, 32, 34));
-
-                HPEN hSufPen = CreatePen(PS_SOLID, 1, borderCol);
-
-                HBRUSH holdBSuf = (HBRUSH)SelectObject(hmemDC, hSufBg);
-
-                HPEN holdSufP = (HPEN)SelectObject(hmemDC, hSufPen);
-
-                RoundRect(hmemDC, 124, bottomY + 29, 286, bottomY + 55, 4, 4);
-
-                SelectObject(hmemDC, holdBSuf);
-
-                SelectObject(hmemDC, holdSufP);
-
-                DeleteObject(hSufBg);
-
-                DeleteObject(hSufPen);
 
             }
 

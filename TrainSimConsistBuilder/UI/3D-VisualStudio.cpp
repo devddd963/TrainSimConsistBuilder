@@ -3390,6 +3390,7 @@ static LRESULT CALLBACK Visual3DStudioProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
             pState->dragSplitterStartX = pt.x;
             pState->dragSidebarStartW = pState->sidebarWidth;
             SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+            InvalidateRect(hWnd, &pState->rcSplitter, FALSE);
             return 0;
         }
 
@@ -3844,27 +3845,19 @@ static LRESULT CALLBACK Visual3DStudioProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
         SelectObject(hdcMem, hOldSepP);
         DeleteObject(hPenSep);
 
-        // 2. Splitter Bar & Sidebar Border
+        // 2. Splitter Bar & Sidebar Border (clean double-line splitter)
         HBRUSH hbrSplitter = CreateSolidBrush(VisualStudioTheme::SidebarBg);
         FillRect(hdcMem, &pState->rcSplitter, hbrSplitter);
         DeleteObject(hbrSplitter);
 
-        HPEN hPenSplitter = CreatePen(PS_SOLID, 1, VisualStudioTheme::BorderLine);
+        COLORREF clrSplitter = pState->isDraggingSplitter ? RGB(0, 160, 255) : VisualStudioTheme::BorderLine;
+        HPEN hPenSplitter = CreatePen(PS_SOLID, 1, clrSplitter);
         HPEN hOldP3 = (HPEN)SelectObject(hdcMem, hPenSplitter);
         MoveToEx(hdcMem, pState->rcSplitter.left, pState->rcSplitter.top, NULL);
         LineTo(hdcMem, pState->rcSplitter.left, pState->rcSplitter.bottom);
         MoveToEx(hdcMem, pState->rcSplitter.right - 1, pState->rcSplitter.top, NULL);
         LineTo(hdcMem, pState->rcSplitter.right - 1, pState->rcSplitter.bottom);
-
-        // Subtle centered grip handle
-        int midX = (pState->rcSplitter.left + pState->rcSplitter.right) / 2;
-        int midY = (pState->rcSplitter.top + pState->rcSplitter.bottom) / 2;
-        HPEN hPenGrip = CreatePen(PS_SOLID, 1, VisualStudioTheme::CardBorder);
-        SelectObject(hdcMem, hPenGrip);
-        MoveToEx(hdcMem, midX, midY - 14, NULL);
-        LineTo(hdcMem, midX, midY + 14);
         SelectObject(hdcMem, hOldP3);
-        DeleteObject(hPenGrip);
         DeleteObject(hPenSplitter);
 
         // Draw dedicated FAYT search dock bar if active

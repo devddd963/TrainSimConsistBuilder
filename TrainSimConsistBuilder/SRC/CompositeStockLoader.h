@@ -35,6 +35,7 @@ struct SubShapeInstance
     bool isAddedBoiler = false;
     bool isMSTS = false;
     bool isLoaded = false;
+    bool isCorrupted = false;
 };
 
 // Represents a fully assembled rolling stock unit (.wag or .eng) with all attached sub-shapes
@@ -53,6 +54,8 @@ struct CompositeStockUnit
     DirectX::XMFLOAT3 boundsMax = { 2.0f, 4.5f, 10.0f };
 
     bool isValid = false;
+    bool isCorrupted = false;
+    bool isCorruptedStock = false;
     uint64_t totalVertices = 0;
     uint64_t totalTriangles = 0;
     uint64_t totalSubMeshes = 0;

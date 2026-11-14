@@ -1,3 +1,4 @@
+#include "ModernEditControl.h"
 #include "BatchSoundMutatorDlg.h"
 #include "SoundStudio.h"
 #include "UITheme.h"
@@ -12,6 +13,7 @@
 #include "../SRC/AppLogging.h"
 #include "../SRC/StockSpecReader.h"
 #include "../SRC/SoundScanner.h"
+#include "../SRC/TrainSimConsistBuilder.h"
 #include <windowsx.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -173,55 +175,7 @@ namespace
 
     static void DrawCustomCheckbox(HDC hdc, const RECT& rcBox, bool isChecked, bool isHovered, HFONT hIconFont = NULL)
     {
-        COLORREF bg = isChecked ? RGB(0, 120, 215) : (isHovered ? RGB(45, 48, 58) : RGB(28, 30, 38));
-        COLORREF border = isChecked ? RGB(0, 150, 255) : (isHovered ? RGB(90, 95, 110) : RGB(60, 65, 75));
-
-        HBRUSH hbr = CreateSolidBrush(bg);
-        HPEN hpen = CreatePen(PS_SOLID, 1, border);
-        HBRUSH holdBr = (HBRUSH)SelectObject(hdc, hbr);
-        HPEN holdPen = (HPEN)SelectObject(hdc, hpen);
-        RoundRect(hdc, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
-        SelectObject(hdc, holdBr);
-        SelectObject(hdc, holdPen);
-        DeleteObject(hbr);
-        DeleteObject(hpen);
-
-        if (isChecked)
-        {
-            static HFONT s_hFontChk = NULL;
-            if (!s_hFontChk)
-            {
-                s_hFontChk = CreateCustomFont(10, FW_SEMIBOLD, L"Segoe Fluent Icons");
-                if (!s_hFontChk)
-                    s_hFontChk = CreateCustomFont(10, FW_SEMIBOLD, L"Segoe MDL2 Assets");
-            }
-
-            HFONT fontToUse = hIconFont ? hIconFont : s_hFontChk;
-            if (fontToUse)
-            {
-                HGDIOBJ oldF = SelectObject(hdc, fontToUse);
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, RGB(255, 255, 255));
-                RECT rcGlyph = { rcBox.left, rcBox.top - 1, rcBox.right, rcBox.bottom };
-                DrawTextW(hdc, L"\xE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                SelectObject(hdc, oldF);
-            }
-            else
-            {
-                HPEN hpTick = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-                HGDIOBJ oldTick = SelectObject(hdc, hpTick);
-                int l = rcBox.left;
-                int t = rcBox.top;
-                POINT pts[3] = {
-                    { l + 4,  t + 9  },
-                    { l + 7,  t + 13 },
-                    { l + 14, t + 5  }
-                };
-                Polyline(hdc, pts, 3);
-                SelectObject(hdc, oldTick);
-                DeleteObject(hpTick);
-            }
-        }
+        UITheme::DrawCheckbox(hdc, rcBox, isChecked, isHovered, false, UITheme::ChkAccentBlue, hIconFont);
     }
 
     static void DrawCustomRadioButton(HDC hdc, const RECT& rcCircle, bool isSelected, bool isHovered)
@@ -607,105 +561,25 @@ static LRESULT CALLBACK InputModalProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPAR
 
 static bool PromptModalText(HWND hParent, const std::wstring& title, const std::wstring& prompt, const std::wstring& defaultVal, std::wstring& outVal)
 {
-    static bool s_reg = false;
-    const wchar_t* szClassName = L"TSCB_SimpleInputModal";
-    if (!s_reg)
-    {
-        WNDCLASSEXW wc = { 0 };
-        wc.cbSize = sizeof(wc);
-        wc.style = CS_HREDRAW | CS_VREDRAW | CS_DROPSHADOW;
-        wc.lpfnWndProc = InputModalProc;
-        wc.hInstance = GetModuleHandleW(NULL);
-        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-        wc.hbrBackground = NULL;
-        wc.lpszClassName = szClassName;
-        RegisterClassExW(&wc);
-        s_reg = true;
-    }
+    outVal = defaultVal;
+    return ShowModernInputPrompt(hParent, title.c_str(), prompt.c_str(), outVal, false, false, L"");
+}
 
-    InputModalState state;
-    state.hParent = hParent;
-    state.title = title;
-    state.prompt = prompt;
-    state.resultText = defaultVal;
-
-    int dlgW = 460;
-    int dlgH = 195;
-    RECT rcParent;
+static void RestoreParentWindowFocus(HWND hParent)
+{
     if (hParent && IsWindow(hParent))
     {
-        GetWindowRect(hParent, &rcParent);
-    }
-    else
-    {
-        SystemParametersInfoW(SPI_GETWORKAREA, 0, &rcParent, 0);
-    }
-    int x = rcParent.left + (rcParent.right - rcParent.left - dlgW) / 2;
-    int y = rcParent.top + (rcParent.bottom - rcParent.top - dlgH) / 2;
-
-    HWND hDlg = CreateWindowExW(
-        WS_EX_DLGMODALFRAME, szClassName, title.c_str(),
-        WS_POPUP | WS_CLIPCHILDREN, x, y, dlgW, dlgH,
-        hParent, NULL, GetModuleHandleW(NULL), &state);
-
-    if (!hDlg) return false;
-
-    BOOL bDark = TRUE;
-    DwmSetWindowAttribute(hDlg, DWMWA_USE_IMMERSIVE_DARK_MODE, &bDark, sizeof(bDark));
-    DWM_WINDOW_CORNER_PREFERENCE corner = DWMWCP_ROUND;
-    DwmSetWindowAttribute(hDlg, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-
-    EnableWindow(hParent, FALSE);
-    ShowWindow(hDlg, SW_SHOW);
-    UpdateWindow(hDlg);
-    SetForegroundWindow(hDlg);
-    SetFocus(state.hEdit);
-
-    MSG msg;
-    while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0))
-    {
-        if (msg.message == WM_KEYDOWN)
+        EnableWindow(hParent, TRUE);
+        if (IsIconic(hParent))
         {
-            if (msg.wParam == VK_RETURN)
-            {
-                wchar_t buf[256] = { 0 };
-                GetWindowTextW(state.hEdit, buf, 256);
-                state.resultText = buf;
-                state.isConfirmed = true;
-                if (hParent && IsWindow(hParent))
-                {
-                    EnableWindow(hParent, TRUE);
-                    SetForegroundWindow(hParent);
-                    SetActiveWindow(hParent);
-                }
-                DestroyWindow(hDlg);
-                break;
-            }
-            else if (msg.wParam == VK_ESCAPE)
-            {
-                if (hParent && IsWindow(hParent))
-                {
-                    EnableWindow(hParent, TRUE);
-                    SetForegroundWindow(hParent);
-                    SetActiveWindow(hParent);
-                }
-                DestroyWindow(hDlg);
-                break;
-            }
+            ShowWindow(hParent, SW_RESTORE);
         }
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        SetWindowPos(hParent, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        SetForegroundWindow(hParent);
+        SetActiveWindow(hParent);
+        BringWindowToTop(hParent);
+        SetFocus(hParent);
     }
-
-    EnableWindow(hParent, TRUE);
-    SetForegroundWindow(hParent);
-
-    if (state.isConfirmed)
-    {
-        outVal = state.resultText;
-        return true;
-    }
-    return false;
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -741,6 +615,7 @@ struct BatchStockUnit
     std::wstring fullPath;
     RSSUnitSoundInfo soundInfo;
     std::unordered_set<std::wstring> referencingConsists;
+    int totalCount = 1;
 };
 
 enum class StockDisplayFilter
@@ -848,6 +723,7 @@ struct BatchSoundMutatorState
     bool assignFromPreset = true;
     int selectedPresetForAssign = 0;
     std::wstring customSmsPath;
+    RSSSoundEntry customSmsEntry; // Rich SMS entry from dropped sound item
     bool appendStreamMode = false; // false = Replace / Overwrite, true = Append / Add stream
 
     // Child edit controls (clean text inputs with parent-drawn borders)
@@ -883,8 +759,9 @@ struct BatchSoundMutatorState
     RECT rcRadioAssignPreset = { 0 };
     RECT rcPickerPreset = { 0 };
     RECT rcRadioAssignCustom = { 0 };
-    RECT rcEditCustomSmsBox = { 0 };
-    RECT rcBtnBrowseCustom = { 0 };
+    RECT rcCustomSmsDropBox = { 0 };
+    RECT rcBtnClearCustomSms = { 0 };
+    bool isCustomSmsDragHover = false;
 
     // Tab 1 Bottom Actions
     RECT rcBtnPreview = { 0 };
@@ -1012,12 +889,12 @@ static void ResizeStockListColumns(BatchSoundMutatorState* pState, int listW)
     }
 
     // Utility columns with clean, comfortable fixed sizes (Col 0, Col 2, Col 3, Col 8)
-    int col0 = 55;  // # + chevron + checkbox
+    int col0 = 70;  // # + checkbox + index + chevron (aligned with SoundStudio Grid View)
     int col2 = 70;  // Type badge (Engine / Wagon)
     int col3 = 130; // Folder
     int col8 = 115; // Status badge
     int col1 = (usableW * 18) / 100;
-    if (col1 < 210) col1 = 210; // Name / Stream
+    if (col1 < 220) col1 = 220; // Name / Stream
 
     int fixedW = col0 + col1 + col2 + col3 + col8;
     int remAudio = usableW - fixedW;
@@ -1208,27 +1085,16 @@ static bool Batch_DrawCellCallback(HDC hdc, int itemIndex, int subItemIndex, con
         rc.bottom -= 2;
     }
 
-    // Column 0: Chevron / Checkbox / Number #
+    // Column 0: Checkbox / Number # / Chevron Expander
     if (subItemIndex == 0)
     {
         if (dRow.rowType == BatchSoundMutatorState::BATCH_ROW_UNIT)
         {
-            int totalStreams = (int)(u.soundInfo.wagonSounds.size() + u.soundInfo.engineSounds.size() +
-                                     u.soundInfo.orts3dCabSounds.size() + u.soundInfo.insideSounds.size());
-
-            // Chevron ▾ / ▸
-            if (totalStreams > 0)
-            {
-                SelectObject(hdc, pState->hFontBody);
-                SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(140, 185, 240));
-                RECT rcChevron = { rc.left + 5, rc.top, rc.left + 16, rc.bottom };
-                DrawTextW(hdc, u.isExpanded ? L"▾" : L"▸", -1, &rcChevron, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            }
-
-            // Checkbox (14x14)
+            // 1. Checkbox: safely inset from left accent stripe (stripe is at rc.left + 1..5)
+            // Inset to rc.left + 15, matching SoundStudio Grid View layout
             int chkSz = 14;
             int chkY = rc.top + (rc.bottom - rc.top - chkSz) / 2;
-            RECT rcChk = { rc.left + 18, chkY, rc.left + 18 + chkSz, chkY + chkSz };
+            RECT rcChk = { rc.left + 15, chkY, rc.left + 15 + chkSz, chkY + chkSz };
 
             if (u.hasMissingStock)
             {
@@ -1239,7 +1105,7 @@ static bool Batch_DrawCellCallback(HDC hdc, int itemIndex, int subItemIndex, con
                 SelectObject(hdc, oB); SelectObject(hdc, oP);
                 DeleteObject(hbrChk); DeleteObject(hpChk);
 
-                // Crisp, mathematically centered diagonal cross (equal margins on all 4 sides)
+                // Crisp, mathematically centered diagonal cross
                 HPEN hpCross = CreatePen(PS_SOLID, 1, RGB(255, 120, 120));
                 HGDIOBJ oldPen = SelectObject(hdc, hpCross);
                 MoveToEx(hdc, rcChk.left + 3, rcChk.top + 3, NULL);
@@ -1251,34 +1117,13 @@ static bool Batch_DrawCellCallback(HDC hdc, int itemIndex, int subItemIndex, con
             }
             else
             {
-                COLORREF chkBg = u.isSelected ? RGB(0, 120, 215) : RGB(36, 40, 48);
-                COLORREF chkBdr = u.isSelected ? RGB(0, 120, 215) : RGB(70, 78, 92);
-                HBRUSH hbrChk = CreateSolidBrush(chkBg);
-                HPEN hpChk = CreatePen(PS_SOLID, 1, chkBdr);
-                HGDIOBJ oB = SelectObject(hdc, hbrChk); HGDIOBJ oP = SelectObject(hdc, hpChk);
-                RoundRect(hdc, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
-                SelectObject(hdc, oB); SelectObject(hdc, oP);
-                DeleteObject(hbrChk); DeleteObject(hpChk);
-
-                if (u.isSelected)
-                {
-                    HPEN hpTick = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-                    HGDIOBJ oldTick = SelectObject(hdc, hpTick);
-                    POINT pts[3] = {
-                        { rcChk.left + 3, rcChk.top + 7 },
-                        { rcChk.left + 6, rcChk.top + 10 },
-                        { rcChk.left + 11, rcChk.top + 4 }
-                    };
-                    Polyline(hdc, pts, 3);
-                    SelectObject(hdc, oldTick);
-                    DeleteObject(hpTick);
-                }
+                UITheme::DrawCheckbox(hdc, rcChk, u.isSelected, isHovered, false, UITheme::ChkAccentBlue, pState->hFontIconSmall);
             }
 
-            // Unit Number #
-            SelectObject(hdc, pState->hFontBold);
-            SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(220, 225, 235));
-            RECT rcNum = { rc.left + 36, rc.top, rc.right - 2, rc.bottom };
+            // 2. Unit Number # (left = rc.left + 33..47)
+            SelectObject(hdc, pState->hFontBold ? pState->hFontBold : pState->hFontBody);
+            SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(200, 215, 235));
+            RECT rcNum = { rc.left + 33, rc.top, rc.left + 47, rc.bottom };
             int visibleNum = 1;
             auto itVis = std::find(pState->visibleUnitIndices.begin(), pState->visibleUnitIndices.end(), dRow.unitIndex);
             if (itVis != pState->visibleUnitIndices.end())
@@ -1286,13 +1131,25 @@ static bool Batch_DrawCellCallback(HDC hdc, int itemIndex, int subItemIndex, con
                 visibleNum = (int)(std::distance(pState->visibleUnitIndices.begin(), itVis) + 1);
             }
             DrawTextW(hdc, std::to_wstring(visibleNum).c_str(), -1, &rcNum, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            // 3. Expander arrow on the right, preceding vehicle name (left = rc.left + 48..rc.right)
+            // Rendered larger with hFontTitle / hFontBold for prominent, clear visibility
+            int totalStreams = (int)(u.soundInfo.wagonSounds.size() + u.soundInfo.engineSounds.size() +
+                                     u.soundInfo.orts3dCabSounds.size() + u.soundInfo.insideSounds.size());
+            if (totalStreams > 0)
+            {
+                SelectObject(hdc, pState->hFontTitle ? pState->hFontTitle : (pState->hFontBold ? pState->hFontBold : pState->hFontBody));
+                SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(140, 185, 240));
+                RECT rcTriangle = { rc.left + 48, rc.top, rc.right - 2, rc.bottom };
+                DrawTextW(hdc, u.isExpanded ? L"\x25BE" : L"\x25B8", -1, &rcTriangle, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
         }
         else // BATCH_ROW_STREAM
         {
-            SelectObject(hdc, pState->hFontBody);
-            SetTextColor(hdc, RGB(110, 130, 160));
-            RECT rcBranch = { rc.left + 8, rc.top, rc.right - 2, rc.bottom };
-            DrawTextW(hdc, L"↳", -1, &rcBranch, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            SelectObject(hdc, pState->hFontBody ? pState->hFontBody : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+            SetTextColor(hdc, RGB(90, 115, 145));
+            RECT rcBranch = { rc.left + 28, rc.top, rc.right - 2, rc.bottom };
+            DrawTextW(hdc, L"\x21B3", -1, &rcBranch, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
 
         SelectObject(hdc, hOldFont);
@@ -1307,11 +1164,74 @@ static bool Batch_DrawCellCallback(HDC hdc, int itemIndex, int subItemIndex, con
         rcName.left += 6; rcName.right -= 6;
         if (dRow.rowType == BatchSoundMutatorState::BATCH_ROW_UNIT)
         {
-            SelectObject(hdc, pState->hFontBold);
-            SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : (u.hasMissingStock ? RGB(255, 120, 120) : RGB(245, 245, 245)));
+            SelectObject(hdc, pState->hFontBold ? pState->hFontBold : pState->hFontBody);
+            SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : (u.hasMissingStock ? RGB(255, 120, 120) : RGB(235, 240, 250)));
             std::wstring nameStr = u.uid;
             if (u.hasMissingStock) nameStr += L" [MISSING]";
-            DrawTextW(hdc, nameStr.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+            int unitCount = u.totalCount;
+            if (unitCount > 1)
+            {
+                SIZE szName = { 0 };
+                GetTextExtentPoint32W(hdc, nameStr.c_str(), (int)nameStr.length(), &szName);
+
+                int nameMaxW = rcName.right - rcName.left - 48;
+                RECT rcDrawName = rcName;
+                if (szName.cx > nameMaxW)
+                {
+                    rcDrawName.right = rcDrawName.left + nameMaxW;
+                    szName.cx = nameMaxW;
+                }
+
+                DrawTextW(hdc, nameStr.c_str(), -1, &rcDrawName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                int badgeX = rcDrawName.left + szName.cx + 8;
+                int availBadgeW = rcName.right - badgeX;
+
+                if (availBadgeW >= 24)
+                {
+                    std::wstring badgeText = std::to_wstring(unitCount) + L" UNITS";
+                    SelectObject(hdc, pState->hFontSmall ? pState->hFontSmall : pState->hFontBody);
+                    SIZE szBadge;
+                    GetTextExtentPoint32W(hdc, badgeText.c_str(), (int)badgeText.length(), &szBadge);
+
+                    if (szBadge.cx + 12 > availBadgeW)
+                    {
+                        badgeText = std::to_wstring(unitCount) + L"U";
+                        GetTextExtentPoint32W(hdc, badgeText.c_str(), (int)badgeText.length(), &szBadge);
+                    }
+
+                    int bW = szBadge.cx + 10;
+                    int bH = (rcName.bottom - rcName.top >= 22) ? 18 : 16;
+                    int bY = rcName.top + ((rcName.bottom - rcName.top) - bH) / 2;
+                    RECT rcBadge = { badgeX, bY, badgeX + bW, bY + bH };
+
+                    if (rcBadge.right <= rcName.right)
+                    {
+                        COLORREF bg = isSelected ? RGB(16, 52, 92) : RGB(22, 38, 54);
+                        COLORREF border = isSelected ? RGB(45, 115, 195) : RGB(40, 80, 120);
+                        COLORREF fg = isSelected ? RGB(220, 240, 255) : RGB(105, 185, 255);
+
+                        HBRUSH hbr = CreateSolidBrush(bg);
+                        HPEN hp = CreatePen(PS_SOLID, 1, border);
+                        HGDIOBJ ob = SelectObject(hdc, hbr);
+                        HGDIOBJ op = SelectObject(hdc, hp);
+                        RoundRect(hdc, rcBadge.left, rcBadge.top, rcBadge.right, rcBadge.bottom, 4, 4);
+                        SelectObject(hdc, ob);
+                        SelectObject(hdc, op);
+                        DeleteObject(hbr);
+                        DeleteObject(hp);
+
+                        SetBkMode(hdc, TRANSPARENT);
+                        SetTextColor(hdc, fg);
+                        DrawTextW(hdc, badgeText.c_str(), -1, &rcBadge, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    }
+                }
+            }
+            else
+            {
+                DrawTextW(hdc, nameStr.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            }
         }
         else // BATCH_ROW_STREAM
         {
@@ -1593,6 +1513,7 @@ static bool Batch_DrawCellCallback(HDC hdc, int itemIndex, int subItemIndex, con
 
 static void PopulateStockListControl(BatchSoundMutatorState* pState)
 {
+    int savedScrollY = pState->stockList.GetScrollY();
     pState->stockList.Clear();
     pState->displayRows.clear();
     pState->visibleUnitIndices.clear();
@@ -1763,6 +1684,7 @@ static void PopulateStockListControl(BatchSoundMutatorState* pState)
     RECT rcClient = { 0 };
     GetClientRect(pState->hWnd, &rcClient);
     ResizeStockListColumns(pState, rcClient.right);
+    pState->stockList.SetScrollY(savedScrollY);
 }
 
 static std::vector<std::wstring> GetDetectedSmsList(BatchSoundMutatorState* pState)
@@ -1898,11 +1820,13 @@ static void ScanAndResolveConsists(BatchSoundMutatorState* pState)
                     }
 
                     bu.referencingConsists.insert(conFileName);
+                    bu.totalCount = 1;
                     stockMap[lookupKey] = bu;
                 }
                 else
                 {
                     stockMap[lookupKey].referencingConsists.insert(conFileName);
+                    stockMap[lookupKey].totalCount++;
                 }
             }
         }
@@ -2198,15 +2122,30 @@ static void ExecuteBatchSoundMutation(BatchSoundMutatorState* pState, bool dryRu
                 }
                 else
                 {
-                    priSms = pState->customSmsPath;
+                    if (!pState->customSmsEntry.smsFileName.empty())
+                    {
+                        newEntry = pState->customSmsEntry;
+                        priSms = newEntry.smsFileName;
+                    }
+                    else
+                    {
+                        priSms = pState->customSmsPath;
+                    }
                 }
+
+                // Sanitize custom SMS path: trim quotes and leading/trailing whitespace
+                while (!priSms.empty() && (priSms.front() == L' ' || priSms.front() == L'\t' || priSms.front() == L'"' || priSms.front() == L'\'')) priSms.erase(priSms.begin());
+                while (!priSms.empty() && (priSms.back() == L' ' || priSms.back() == L'\t' || priSms.back() == L'"' || priSms.back() == L'\'')) priSms.pop_back();
 
                 if (!priSms.empty())
                 {
-                    newEntry.rawToken = priSms;
-                    size_t ls = priSms.find_last_of(L"\\/");
-                    newEntry.smsFileName = (ls != std::wstring::npos) ? priSms.substr(ls + 1) : priSms;
-                    newEntry.parentFolder = (ls != std::wstring::npos) ? priSms.substr(0, ls) : L"";
+                    if (newEntry.smsFileName.empty())
+                    {
+                        newEntry.rawToken = priSms;
+                        size_t ls = priSms.find_last_of(L"\\/");
+                        newEntry.smsFileName = (ls != std::wstring::npos) ? priSms.substr(ls + 1) : priSms;
+                        newEntry.parentFolder = (ls != std::wstring::npos) ? priSms.substr(0, ls) : L"";
+                    }
 
                     if (pState->assignTargetSlot == L"Wagon" || (pState->assignTargetSlot == L"All Compatible" && !u.isEngine))
                     {
@@ -2308,6 +2247,9 @@ static void ExecuteBatchSoundMutation(BatchSoundMutatorState* pState, bool dryRu
     }
     else
     {
+        // Invalidate sound cache first so re-reading fetches the modified .wag/.eng from disk
+        SoundStudio_ClearStockSoundCache();
+
         // Re-read mutated files to sync sound info
         std::wstring bp = pState->basePath;
         if (!bp.empty() && bp.back() != L'\\') bp += L'\\';
@@ -2323,6 +2265,19 @@ static void ExecuteBatchSoundMutation(BatchSoundMutatorState* pState, bool dryRu
         }
 
         PopulateStockListControl(pState);
+        InvalidateRect(pState->hWnd, NULL, TRUE);
+
+        // Notify Sound Studio to reload sound matrix and consist soundsets live
+        HWND hStudio = GetSoundStudioWindow();
+        if (hStudio && IsWindow(hStudio))
+        {
+            SoundStudio_ReloadConsistSoundData(hStudio);
+        }
+        else if (pState->hParent && IsWindow(pState->hParent))
+        {
+            SoundStudio_ReloadConsistSoundData(pState->hParent);
+        }
+
         std::wstring title = !isMutationQueued ? L"Sound Path Normalization Complete" : L"Batch Sound Mutation Complete";
         std::wstring actionDone = !isMutationQueued ? L"re-saved and normalized sound paths for " :
                                   (pState->appendStreamMode && !pState->isRemoveMode ? L"appended additional sound streams for " : L"modified sound configurations for ");
@@ -2418,11 +2373,6 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         pState->stockList.AddColumn(L"Inside Sound", 110);
         pState->stockList.AddColumn(L"Status", 110);
         ResizeStockListColumns(pState, w);
-
-        pState->hEditCustomSms = CreateWindowExW(0, L"EDIT", L"",
-            WS_CHILD | ES_AUTOHSCROLL, 10, 10, 10, 10, hWnd, (HMENU)4015, GetModuleHandleW(NULL), NULL);
-        SendMessageW(pState->hEditCustomSms, WM_SETFONT, (WPARAM)pState->hFontBody, TRUE);
-        SendMessageW(pState->hEditCustomSms, EM_SETCUEBANNER, TRUE, (LPARAM)L"Browse or enter .sms relative path...");
 
         SwitchActiveTab(pState, pState->activeTab);
 
@@ -2524,11 +2474,7 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
 
     case WM_CTLCOLOREDIT:
     {
-        HDC hdc = (HDC)wParam;
-        SetBkColor(hdc, RGB(28, 28, 30));
-        SetTextColor(hdc, RGB(245, 245, 245));
-        static HBRUSH hbrEdit = CreateSolidBrush(RGB(28, 28, 30));
-        return (LRESULT)hbrEdit;
+        return ModernEdit_OnCtlColor((HDC)wParam, (HWND)lParam);
     }
 
     case WM_CTLCOLORSTATIC:
@@ -2538,28 +2484,6 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         SetTextColor(hdc, RGB(240, 240, 240));
         static HBRUSH hbrBg = CreateSolidBrush(PoolTheme::CardBackground);
         return (LRESULT)hbrBg;
-    }
-
-    case WM_COMMAND:
-    {
-        WORD id = LOWORD(wParam);
-        WORD code = HIWORD(wParam);
-        if (id == 4015 && code == EN_CHANGE)
-        {
-            if (pState && pState->hEditCustomSms)
-            {
-                wchar_t buf[MAX_PATH] = { 0 };
-                GetWindowTextW(pState->hEditCustomSms, buf, MAX_PATH);
-                pState->customSmsPath = buf;
-                if (!pState->customSmsPath.empty())
-                {
-                    pState->assignFromPreset = false;
-                    pState->isRemoveMode = false;
-                    InvalidateRect(hWnd, NULL, FALSE);
-                }
-            }
-        }
-        break;
     }
 
     case WM_SIZE:
@@ -2604,14 +2528,34 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         int expW1 = (w < 920) ? 80 : 92;
         pState->rcBtnExpandAllTab1 = { curRight1 - expW1, btnY, curRight1, btnY + btnH };
 
+        // Tab 1 Ribbon Left/Middle Buttons (Showcase Filters & Batch Selection)
+        int curRibbonX = 16;
+        int gapRibbon = 6;
+        int fAllW = (w < 920) ? 75 : 84;
+        pState->rcBtnFilterAll = { curRibbonX, btnY, curRibbonX + fAllW, btnY + btnH };
+        curRibbonX += fAllW + gapRibbon;
+
+        int fEngW = (w < 920) ? 90 : 100;
+        pState->rcBtnFilterEngines = { curRibbonX, btnY, curRibbonX + fEngW, btnY + btnH };
+        curRibbonX += fEngW + gapRibbon;
+
+        int fWagW = (w < 920) ? 90 : 100;
+        pState->rcBtnFilterWagons = { curRibbonX, btnY, curRibbonX + fWagW, btnY + btnH };
+        curRibbonX += fWagW + gapRibbon + 14;
+
+        int selW = (w < 920) ? 78 : 86;
+        pState->rcBtnSelectAll = { curRibbonX, btnY, curRibbonX + selW, btnY + btnH };
+        curRibbonX += selW + gapRibbon;
+
+        int clrW = (w < 920) ? 78 : 86;
+        pState->rcBtnSelectNone = { curRibbonX, btnY, curRibbonX + clrW, btnY + btnH };
+
         // Tab 1 Bottom Panels & Stock List Geometry
         int panelH = 140;
         int panelBottom = bottomY - 8;
         int panelTop = panelBottom - panelH;
-        int subBarH = 26;
-        int subBarY = panelTop - subBarH - 8;
         int stockListY = 118;
-        int stockListH = subBarY - 8 - stockListY;
+        int stockListH = panelTop - 8 - stockListY;
         if (stockListH < 80) stockListH = 80;
 
         if (pState->hStockListWnd)
@@ -2619,31 +2563,6 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             SetWindowPos(pState->hStockListWnd, NULL, 0, stockListY, w, stockListH, SWP_NOZORDER);
             ResizeStockListColumns(pState, w);
         }
-
-        int curX = 24;
-        int qH = 26;
-        int gap = 8;
-
-        // Showcase Filter group
-        int fAllW = 88;
-        pState->rcBtnFilterAll = { curX, subBarY, curX + fAllW, subBarY + qH };
-        curX += fAllW + gap;
-
-        int fEngW = 110;
-        pState->rcBtnFilterEngines = { curX, subBarY, curX + fEngW, subBarY + qH };
-        curX += fEngW + gap;
-
-        int fWagW = 110;
-        pState->rcBtnFilterWagons = { curX, subBarY, curX + fWagW, subBarY + qH };
-        curX += fWagW + gap + 16; // extra spacing before batch selection group
-
-        // Batch Selection group
-        int selW = 95;
-        pState->rcBtnSelectAll = { curX, subBarY, curX + selW, subBarY + qH };
-        curX += selW + gap;
-
-        int clrW = 95;
-        pState->rcBtnSelectNone = { curX, subBarY, curX + clrW, subBarY + qH };
 
         // Operation Cards (Bottom)
         int panelMid = w / 2;
@@ -2681,15 +2600,9 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         pState->rcPickerPreset = { pState->rcRightPanel.left + 190, prY + 1, pState->rcRightPanel.right - 14, prY + 25 };
 
         int custY = prY + 30;
-        int browseW = 75;
         pState->rcRadioAssignCustom = { pState->rcRightPanel.left + 14, custY, pState->rcRightPanel.left + 155, custY + 26 };
-        pState->rcBtnBrowseCustom = { pState->rcRightPanel.right - 14 - browseW, custY + 1, pState->rcRightPanel.right - 14, custY + 25 };
-        pState->rcEditCustomSmsBox = { pState->rcRightPanel.left + 160, custY + 1, pState->rcBtnBrowseCustom.left - 6, custY + 25 };
-        if (pState->hEditCustomSms)
-        {
-            SetWindowPos(pState->hEditCustomSms, NULL, pState->rcEditCustomSmsBox.left + 4, pState->rcEditCustomSmsBox.top + 3,
-                pState->rcEditCustomSmsBox.right - pState->rcEditCustomSmsBox.left - 8, 18, SWP_NOZORDER);
-        }
+        pState->rcCustomSmsDropBox = { pState->rcRadioAssignCustom.right + 4, custY, pState->rcRightPanel.right - 14, custY + 28 };
+        pState->rcBtnClearCustomSms = { pState->rcCustomSmsDropBox.right - 24, pState->rcCustomSmsDropBox.top + 3, pState->rcCustomSmsDropBox.right - 4, pState->rcCustomSmsDropBox.bottom - 3 };
 
         // Tab 1 Bottom Actions
         pState->rcBtnCloseTab1 = { w - 110, bottomY + 8, w - 20, bottomY + 38 };
@@ -2743,7 +2656,7 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             else if (PtInRect(&pState->rcBtnSelectAll, pt)) newHover = 17;
             else if (PtInRect(&pState->rcBtnSelectNone, pt)) newHover = 18;
             else if (PtInRect(&pState->rcPickerMatchSms, pt)) newHover = 27;
-            else if (PtInRect(&pState->rcBtnBrowseCustom, pt)) newHover = 19;
+            else if (!pState->customSmsPath.empty() && PtInRect(&pState->rcBtnClearCustomSms, pt)) newHover = 23;
             else if (PtInRect(&pState->rcBtnPreview, pt)) newHover = 20;
             else if (PtInRect(&pState->rcBtnApplyMutations, pt)) newHover = 21;
             else if (PtInRect(&pState->rcBtnCloseTab1, pt)) newHover = 22;
@@ -2840,6 +2753,7 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             }
             else if (PtInRect(&pState->rcBtnCloseTab0, pt))
             {
+                RestoreParentWindowFocus(pState->hParent ? pState->hParent : GetWindow(hWnd, GW_OWNER));
                 DestroyWindow(hWnd);
                 return 0;
             }
@@ -2856,6 +2770,7 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                     if (!card.entries.empty()) item.primarySms = card.entries[0].fullRelative;
                     item.payload = SerializeEntries(card.entries);
                     pState->onApplyCallback(item);
+                    RestoreParentWindowFocus(pState->hParent ? pState->hParent : GetWindow(hWnd, GW_OWNER));
                     DestroyWindow(hWnd);
                 }
                 return 0;
@@ -3248,43 +3163,20 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                 }
                 return 0;
             }
-            else if (PtInRect(&pState->rcRadioAssignCustom, pt))
+            else if (PtInRect(&pState->rcRadioAssignCustom, pt) || PtInRect(&pState->rcCustomSmsDropBox, pt))
             {
-                pState->assignFromPreset = false;
-                pState->isRemoveMode = false;
-                SetFocus(pState->hEditCustomSms);
-                InvalidateRect(hWnd, NULL, FALSE);
-                return 0;
-            }
-            else if (PtInRect(&pState->rcBtnBrowseCustom, pt))
-            {
-                pState->assignFromPreset = false;
-                pState->isRemoveMode = false;
-                wchar_t szFile[MAX_PATH] = { 0 };
-                OPENFILENAMEW ofn = { 0 };
-                ofn.lStructSize = sizeof(ofn);
-                ofn.hwndOwner = hWnd;
-                ofn.lpstrFilter = L"Sound Management System (*.sms)\0*.sms\0All Files (*.*)\0*.*\0";
-                ofn.lpstrFile = szFile;
-                ofn.nMaxFile = MAX_PATH;
-                ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-
-                std::wstring initialDir = pState->basePath + L"TRAINS\\TRAINSET";
-                ofn.lpstrInitialDir = initialDir.c_str();
-
-                if (GetOpenFileNameW(&ofn))
+                if (!pState->customSmsPath.empty() && PtInRect(&pState->rcBtnClearCustomSms, pt))
                 {
-                    std::wstring fullPath = szFile;
-                    std::wstring relativePath = fullPath;
-                    std::wstring trainsetDir = pState->basePath + L"TRAINS\\TRAINSET\\";
-                    if (_wcsnicmp(fullPath.c_str(), trainsetDir.c_str(), trainsetDir.length()) == 0)
-                    {
-                        relativePath = fullPath.substr(trainsetDir.length());
-                    }
-                    pState->customSmsPath = relativePath;
-                    SetWindowTextW(pState->hEditCustomSms, relativePath.c_str());
+                    // Clear custom SMS
+                    pState->customSmsPath.clear();
+                    pState->customSmsEntry = RSSSoundEntry();
                     InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
                 }
+
+                pState->assignFromPreset = false;
+                pState->isRemoveMode = false;
+                InvalidateRect(hWnd, NULL, FALSE);
                 return 0;
             }
             // Tab 1 Bottom Actions
@@ -3300,6 +3192,7 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             }
             else if (PtInRect(&pState->rcBtnCloseTab1, pt))
             {
+                RestoreParentWindowFocus(pState->hParent ? pState->hParent : GetWindow(hWnd, GW_OWNER));
                 DestroyWindow(hWnd);
                 return 0;
             }
@@ -3613,44 +3506,7 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         // =========================================================================
         else
         {
-            // Left cluster inside burgundy toolbar ribbon (Y = 66 to 112)
-            if (pState->hFontIcon)
-            {
-                SelectObject(memDC, pState->hFontIcon);
-                SetTextColor(memDC, RGB(255, 180, 190));
-                RECT rcIcon = { 20, toolbarY, 44, toolbarY + toolbarH };
-                DrawTextW(memDC, L"\xE916", -1, &rcIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            }
-
-            SelectObject(memDC, pState->hFontBold);
-            SetTextColor(memDC, PoolTheme::TextPrimary);
-            RECT rcTitle = { 46, toolbarY, 230, toolbarY + toolbarH };
-            DrawTextW(memDC, L"Consist Sound Queue", -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-
-            SelectObject(memDC, pState->hFontSmall);
-            SetTextColor(memDC, RGB(220, 180, 190));
-            std::wstring qStatus;
-            if (pState->displayFilter == StockDisplayFilter::All)
-            {
-                qStatus = L"(" + std::to_wstring(pState->consistFilePaths.size()) + L" Consists  •  " +
-                          std::to_wstring(pState->resolvedUnits.size()) + L" Unique Units)";
-            }
-            else
-            {
-                qStatus = L"(" + std::to_wstring(pState->visibleUnitIndices.size()) + L" Shown / " +
-                          std::to_wstring(pState->resolvedUnits.size()) + L" Total  •  " +
-                          std::to_wstring(pState->consistFilePaths.size()) + L" Consists)";
-            }
-            int subRight = (pState->rcBtnExpandAllTab1.left > 0) ? pState->rcBtnExpandAllTab1.left - 10 : (w - 420);
-            RECT rcSub = { 235, toolbarY, subRight, toolbarY + toolbarH };
-            DrawTextW(memDC, qStatus.c_str(), -1, &rcSub, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-            // Right cluster inside burgundy toolbar ribbon
-            DrawModernButton(memDC, pState->rcBtnExpandAllTab1, (w < 920) ? L"▾ Expand" : L"▾ Expand All", pState->hoverBtnId == 25, false, false, pState->hFontSmall);
-            DrawModernButton(memDC, pState->rcBtnCollapseAllTab1, (w < 920) ? L"▴ Collapse" : L"▴ Collapse All", pState->hoverBtnId == 26, false, false, pState->hFontSmall);
-            DrawModernButton(memDC, pState->rcBtnClearConsists, L"Clear", pState->hoverBtnId == 13, false, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE74D");
-
-            // Sub-bar buttons below Stock List (Active showcase filters + batch selection)
+            // Left & Middle buttons on burgundy toolbar ribbon: Showcase Filters + Selection
             bool isAllActive = (pState->displayFilter == StockDisplayFilter::All);
             bool isEngActive = (pState->displayFilter == StockDisplayFilter::EnginesOnly);
             bool isWagActive = (pState->displayFilter == StockDisplayFilter::WagonsOnly);
@@ -3661,6 +3517,11 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
 
             DrawModernButton(memDC, pState->rcBtnSelectAll, L"Select All", pState->hoverBtnId == 17, false, false, pState->hFontSmall);
             DrawModernButton(memDC, pState->rcBtnSelectNone, L"Clear All", pState->hoverBtnId == 18, false, false, pState->hFontSmall);
+
+            // Right cluster inside burgundy toolbar ribbon
+            DrawModernButton(memDC, pState->rcBtnExpandAllTab1, (w < 920) ? L"▾ Expand" : L"▾ Expand All", pState->hoverBtnId == 25, false, false, pState->hFontSmall);
+            DrawModernButton(memDC, pState->rcBtnCollapseAllTab1, (w < 920) ? L"▴ Collapse" : L"▴ Collapse All", pState->hoverBtnId == 26, false, false, pState->hFontSmall);
+            DrawModernButton(memDC, pState->rcBtnClearConsists, L"Clear", pState->hoverBtnId == 13, false, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE74D");
 
             // Left & Right Operation Cards
             HBRUSH hPanelB = CreateSolidBrush(PoolTheme::CardBackground);
@@ -3771,22 +3632,79 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
             }
             DrawCustomDropdownPicker(memDC, pState->rcPickerPreset, prDisplayName.c_str(), false, pState->hFontSmall, pState->hFontIconSmall, L"\xE8D6");
 
-            // Row 3: Custom SMS Path (height 26px, 14x14 radio centered at top+6)
-            RECT rcRadCust = { pState->rcRadioAssignCustom.left + 2, pState->rcRadioAssignCustom.top + 6, pState->rcRadioAssignCustom.left + 16, pState->rcRadioAssignCustom.top + 20 };
+            // Row 3: Custom SMS Assignment Slot (height 28px, 14x14 radio centered at top+7)
+            RECT rcRadCust = { pState->rcRadioAssignCustom.left + 2, pState->rcRadioAssignCustom.top + 7, pState->rcRadioAssignCustom.left + 16, pState->rcRadioAssignCustom.top + 21 };
             DrawCustomRadioButton(memDC, rcRadCust, !pState->assignFromPreset, false);
             SelectObject(memDC, pState->hFontSmall);
             SetTextColor(memDC, !pState->assignFromPreset ? PoolTheme::TextPrimary : PoolTheme::TextSecondary);
             RECT rcLblCust = { rcRadCust.right + 8, pState->rcRadioAssignCustom.top, pState->rcRadioAssignCustom.right, pState->rcRadioAssignCustom.bottom };
-            DrawTextW(memDC, L"Custom SMS Path:", -1, &rcLblCust, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(memDC, L"Custom SMS File:", -1, &rcLblCust, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-            // Custom SMS edit box container
-            HBRUSH hCustBg = CreateSolidBrush(RGB(28, 28, 30));
-            HPEN hCustPen = CreatePen(PS_SOLID, 1, RGB(60, 60, 65));
-            SelectObject(memDC, hCustBg); SelectObject(memDC, hCustPen);
-            RoundRect(memDC, pState->rcEditCustomSmsBox.left, pState->rcEditCustomSmsBox.top, pState->rcEditCustomSmsBox.right, pState->rcEditCustomSmsBox.bottom, 4, 4);
-            DeleteObject(hCustBg); DeleteObject(hCustPen);
+            // Custom SMS Drop Box / Sound Chip Card
+            RECT rcBox = pState->rcCustomSmsDropBox;
+            if (pState->customSmsPath.empty())
+            {
+                // Empty state: Dashed rounded drop area with prompt
+                COLORREF dropBg = pState->isCustomSmsDragHover ? RGB(20, 42, 68) : RGB(26, 28, 36);
+                COLORREF dropBorder = pState->isCustomSmsDragHover ? RGB(0, 160, 255) : RGB(56, 62, 75);
+                HBRUSH hbr = CreateSolidBrush(dropBg);
+                HPEN hp = CreatePen(pState->isCustomSmsDragHover ? PS_SOLID : PS_DASH, 1, dropBorder);
+                HGDIOBJ oB = SelectObject(memDC, hbr);
+                HGDIOBJ oP = SelectObject(memDC, hp);
+                RoundRect(memDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 6, 6);
+                SelectObject(memDC, oB);
+                SelectObject(memDC, oP);
+                DeleteObject(hbr);
+                DeleteObject(hp);
 
-            DrawModernButton(memDC, pState->rcBtnBrowseCustom, L"Browse...", pState->hoverBtnId == 19, false, false, pState->hFontSmall);
+                SelectObject(memDC, pState->hFontSmall);
+                SetTextColor(memDC, pState->isCustomSmsDragHover ? RGB(160, 220, 255) : RGB(130, 140, 155));
+                const wchar_t* hint = pState->isCustomSmsDragHover ? L"Release to assign sound file" : L"⇣ Drag & Drop .sms from Sound Library";
+                DrawTextW(memDC, hint, -1, &rcBox, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+            else
+            {
+                // Assigned state: Rich sound chip card
+                COLORREF chipBg = RGB(24, 34, 48);
+                COLORREF chipBorder = RGB(45, 95, 155);
+                HBRUSH hbr = CreateSolidBrush(chipBg);
+                HPEN hp = CreatePen(PS_SOLID, 1, chipBorder);
+                HGDIOBJ oB = SelectObject(memDC, hbr);
+                HGDIOBJ oP = SelectObject(memDC, hp);
+                RoundRect(memDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 6, 6);
+                SelectObject(memDC, oB);
+                SelectObject(memDC, oP);
+                DeleteObject(hbr);
+                DeleteObject(hp);
+
+                // Speaker Icon
+                SelectObject(memDC, pState->hFontSmall);
+                SetTextColor(memDC, RGB(0, 180, 255));
+                RECT rcIcon = { rcBox.left + 8, rcBox.top, rcBox.left + 24, rcBox.bottom };
+                DrawTextW(memDC, L"♪", -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                // File name & folder info
+                std::wstring fName = !pState->customSmsEntry.smsFileName.empty() ? pState->customSmsEntry.smsFileName : pState->customSmsPath;
+                size_t ls = fName.find_last_of(L"\\/");
+                if (ls != std::wstring::npos) fName = fName.substr(ls + 1);
+
+                std::wstring desc = fName;
+                if (!pState->customSmsEntry.parentFolder.empty())
+                {
+                    desc += L"   [" + pState->customSmsEntry.parentFolder + L"]";
+                }
+
+                SelectObject(memDC, pState->hFontBold);
+                SetTextColor(memDC, RGB(240, 245, 255));
+                RECT rcText = { rcBox.left + 26, rcBox.top, pState->rcBtnClearCustomSms.left - 4, rcBox.bottom };
+                DrawTextW(memDC, desc.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                // Clear button [ ✕ ]
+                RECT rcClr = pState->rcBtnClearCustomSms;
+                SelectObject(memDC, pState->hFontSmall);
+                SetTextColor(memDC, (pState->hoverBtnId == 23) ? RGB(255, 120, 120) : RGB(160, 170, 185));
+                DrawTextW(memDC, L"✕", -1, &rcClr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
 
             // Footer Bar (Tab 1)
             int footerH = 46;
@@ -3840,15 +3758,8 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                                 GetCursorPos(&pt);
                                 ScreenToClient(pState->stockList.GetHWND(), &pt);
 
-                                // Col 0 is 60px wide: chevron is at 0..18, checkbox is at 18..38
-                                if (pt.x < 18)
-                                {
-                                    // Chevron clicked -> toggle expansion
-                                    u.isExpanded = !u.isExpanded;
-                                    PopulateStockListControl(pState);
-                                    return 0;
-                                }
-                                else if (pt.x >= 18 && pt.x <= 38)
+                                // Col 0 is 70px wide: Checkbox at 0..31, Number at 31..47, Chevron arrow at 48..70
+                                if (pt.x <= 31)
                                 {
                                     // Checkbox clicked
                                     if (!u.hasMissingStock)
@@ -3860,7 +3771,7 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                                 }
                                 else
                                 {
-                                    // Clicked outside checkbox in col 0 -> toggle expansion
+                                    // Chevron / number clicked -> toggle expansion
                                     u.isExpanded = !u.isExpanded;
                                     PopulateStockListControl(pState);
                                     return 0;
@@ -3912,8 +3823,28 @@ static LRESULT CALLBACK BatchSoundMutatorWndProc(HWND hWnd, UINT uMsg, WPARAM wP
         break;
     }
 
+    case WM_SYSCOMMAND:
+    {
+        if ((wParam & 0xFFF0) == SC_CLOSE)
+        {
+            RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+    {
+        RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
+        DestroyWindow(hWnd);
+        return 0;
+    }
+
     case WM_DESTROY:
     {
+        RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
+
         if (pState->hFontBody) DeleteObject(pState->hFontBody);
         if (pState->hFontBold) DeleteObject(pState->hFontBold);
         if (pState->hFontTitle) DeleteObject(pState->hFontTitle);
@@ -4067,7 +3998,7 @@ bool BatchSoundMutatorDlg_HandleDragHover(POINT ptScreen, const ScannedSoundItem
     }
 
     BatchSoundMutatorState* pState = (BatchSoundMutatorState*)GetWindowLongPtrW(g_hBatchSoundMutatorDlg, GWLP_USERDATA);
-    if (!pState || pState->activeTab != 0)
+    if (!pState)
     {
         BatchSoundMutatorDlg_ClearDragHover();
         return false;
@@ -4076,32 +4007,62 @@ bool BatchSoundMutatorDlg_HandleDragHover(POINT ptScreen, const ScannedSoundItem
     POINT ptClient = ptScreen;
     ScreenToClient(g_hBatchSoundMutatorDlg, &ptClient);
 
-    int hoverCard = -1;
-    for (const auto& ch : pState->cardHits)
+    // Tab 0: SMS Presets Pool drag hover
+    if (pState->activeTab == 0)
     {
-        if (PtInRect(&ch.rcCard, ptClient))
+        int hoverCard = -1;
+        for (const auto& ch : pState->cardHits)
         {
-            hoverCard = ch.cardIdx;
-            break;
+            if (PtInRect(&ch.rcCard, ptClient))
+            {
+                hoverCard = ch.cardIdx;
+                break;
+            }
+        }
+
+        if (hoverCard < 0 || hoverCard >= (int)pState->presetCards.size())
+        {
+            BatchSoundMutatorDlg_ClearDragHover();
+            outActionText = L"";
+            return false;
+        }
+
+        const auto& card = pState->presetCards[hoverCard];
+        outActionText = L"+ Add to Preset: " + card.name;
+
+        if (pState->dragHoverCardIdx != hoverCard)
+        {
+            pState->dragHoverCardIdx = hoverCard;
+            InvalidateRect(g_hBatchSoundMutatorDlg, NULL, FALSE);
+        }
+        return true;
+    }
+    // Tab 1: Batch Sound Mutator drag hover (Custom SMS Drop Box)
+    else if (pState->activeTab == 1)
+    {
+        if (PtInRect(&pState->rcCustomSmsDropBox, ptClient) || PtInRect(&pState->rcRadioAssignCustom, ptClient))
+        {
+            std::wstring smsName = pItem ? pItem->szFileName : L"sound file";
+            outActionText = L"Assign Custom SMS: " + smsName;
+            if (!pState->isCustomSmsDragHover)
+            {
+                pState->isCustomSmsDragHover = true;
+                InvalidateRect(g_hBatchSoundMutatorDlg, &pState->rcCustomSmsDropBox, FALSE);
+            }
+            return true;
+        }
+        else
+        {
+            if (pState->isCustomSmsDragHover)
+            {
+                pState->isCustomSmsDragHover = false;
+                InvalidateRect(g_hBatchSoundMutatorDlg, &pState->rcCustomSmsDropBox, FALSE);
+            }
+            return false;
         }
     }
 
-    if (hoverCard < 0 || hoverCard >= (int)pState->presetCards.size())
-    {
-        BatchSoundMutatorDlg_ClearDragHover();
-        outActionText = L"";
-        return false;
-    }
-
-    const auto& card = pState->presetCards[hoverCard];
-    outActionText = L"+ Add to Preset: " + card.name;
-
-    if (pState->dragHoverCardIdx != hoverCard)
-    {
-        pState->dragHoverCardIdx = hoverCard;
-        InvalidateRect(g_hBatchSoundMutatorDlg, NULL, FALSE);
-    }
-    return true;
+    return false;
 }
 
 void BatchSoundMutatorDlg_ClearDragHover()
@@ -4110,9 +4071,19 @@ void BatchSoundMutatorDlg_ClearDragHover()
     BatchSoundMutatorState* pState = (BatchSoundMutatorState*)GetWindowLongPtrW(g_hBatchSoundMutatorDlg, GWLP_USERDATA);
     if (!pState) return;
 
+    bool needRedraw = false;
     if (pState->dragHoverCardIdx != -1)
     {
         pState->dragHoverCardIdx = -1;
+        needRedraw = true;
+    }
+    if (pState->isCustomSmsDragHover)
+    {
+        pState->isCustomSmsDragHover = false;
+        needRedraw = true;
+    }
+    if (needRedraw)
+    {
         InvalidateRect(g_hBatchSoundMutatorDlg, NULL, FALSE);
     }
 }
@@ -4131,7 +4102,50 @@ bool BatchSoundMutatorDlg_HandleDrop(POINT ptScreen, const ScannedSoundItem& ite
     }
 
     BatchSoundMutatorState* pState = (BatchSoundMutatorState*)GetWindowLongPtrW(g_hBatchSoundMutatorDlg, GWLP_USERDATA);
-    if (!pState || pState->activeTab != 0)
+    if (!pState)
+    {
+        BatchSoundMutatorDlg_ClearDragHover();
+        return false;
+    }
+
+    POINT ptClient = ptScreen;
+    ScreenToClient(g_hBatchSoundMutatorDlg, &ptClient);
+
+    // Tab 1: Drop into Custom SMS Field
+    if (pState->activeTab == 1)
+    {
+        if (PtInRect(&pState->rcCustomSmsDropBox, ptClient) || PtInRect(&pState->rcRadioAssignCustom, ptClient))
+        {
+            pState->isCustomSmsDragHover = false;
+            pState->assignFromPreset = false;
+            pState->isRemoveMode = false;
+
+            std::wstring rel = item.szRelativePath;
+            if (rel.empty())
+            {
+                rel = item.szFullPath;
+                std::wstring trainsetDir = pState->basePath + L"TRAINS\\TRAINSET\\";
+                if (_wcsnicmp(rel.c_str(), trainsetDir.c_str(), trainsetDir.length()) == 0)
+                {
+                    rel = rel.substr(trainsetDir.length());
+                }
+            }
+
+            pState->customSmsPath = rel;
+            pState->customSmsEntry.smsFileName = item.szFileName;
+            pState->customSmsEntry.parentFolder = item.szFolder;
+            pState->customSmsEntry.fullDiskPath = item.szFullPath;
+            pState->customSmsEntry.rawToken = rel;
+            pState->customSmsEntry.existsOnDisk = true;
+
+            InvalidateRect(g_hBatchSoundMutatorDlg, NULL, FALSE);
+            return true;
+        }
+        return false;
+    }
+
+    // Tab 0: Drop into Preset Card
+    if (pState->activeTab != 0)
     {
         BatchSoundMutatorDlg_ClearDragHover();
         return false;

@@ -369,7 +369,7 @@ struct AceChannelDesc {
     int type; // 2=Mask, 3=Red, 4=Green, 5=Blue, 6=Alpha
 };
 
-static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& outData)
+static bool DecodeAceToMemoryInternal(const std::wstring& filePath, DecodedTextureData& outData)
 {
     HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return false;
@@ -403,7 +403,14 @@ static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& 
     // Handle SIMISA Compression Wrappers
     if (dataLen >= 16 && std::memcmp(pData, "SIMISA@F", 8) == 0)
     {
-        if (!FastZlib::DecompressZlib(pData + 16, dataLen - 16, decompBuffer))
+        size_t zlibStart = 16;
+        for (size_t i = 8; i < 32 && i + 1 < dataLen; ++i) {
+            if (pData[i] == 0x78 && (pData[i + 1] == 0x9C || pData[i + 1] == 0xDA || pData[i + 1] == 0x01 || pData[i + 1] == 0x5E)) {
+                zlibStart = i;
+                break;
+            }
+        }
+        if (!FastZlib::DecompressZlib(pData + zlibStart, dataLen - zlibStart, decompBuffer))
         {
             LOG_ERROR_W(L"[TextureLoader] FastZlib decompression failed for ACE texture: %ls", filePath.c_str());
             UnmapViewOfFile(pRaw);
@@ -694,7 +701,31 @@ static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& 
     return outData.isValid;
 }
 
-static bool DecodeDdsToMemory(const std::wstring& filePath, DecodedTextureData& outData)
+static bool SafeExecuteDecodeAce(const std::wstring& filePath, DecodedTextureData& outData)
+{
+    __try {
+        return DecodeAceToMemoryInternal(filePath, outData);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static bool DecodeAceToMemory(const std::wstring& filePath, DecodedTextureData& outData)
+{
+    outData.isValid = false;
+    outData.mips.clear();
+    bool ok = SafeExecuteDecodeAce(filePath, outData);
+    if (!ok) {
+        LOG_WARN_W(L"[TextureLoader] Corrupted or invalid ACE texture skipped safely: %ls", filePath.c_str());
+        outData.isValid = false;
+        outData.mips.clear();
+        return false;
+    }
+    return true;
+}
+
+static bool DecodeDdsToMemoryInternal(const std::wstring& filePath, DecodedTextureData& outData)
 {
     HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return false;
@@ -963,6 +994,30 @@ static bool DecodeDdsToMemory(const std::wstring& filePath, DecodedTextureData& 
     outData.mipLevels = (uint32_t)outData.mips.size();
     outData.isValid = !outData.mips.empty();
     return outData.isValid;
+}
+
+static bool SafeExecuteDecodeDds(const std::wstring& filePath, DecodedTextureData& outData)
+{
+    __try {
+        return DecodeDdsToMemoryInternal(filePath, outData);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static bool DecodeDdsToMemory(const std::wstring& filePath, DecodedTextureData& outData)
+{
+    outData.isValid = false;
+    outData.mips.clear();
+    bool ok = SafeExecuteDecodeDds(filePath, outData);
+    if (!ok) {
+        LOG_WARN_W(L"[TextureLoader] Corrupted or invalid DDS texture skipped safely: %ls", filePath.c_str());
+        outData.isValid = false;
+        outData.mips.clear();
+        return false;
+    }
+    return true;
 }
 
 // =========================================================================

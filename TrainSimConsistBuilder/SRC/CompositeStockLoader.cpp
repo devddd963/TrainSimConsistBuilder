@@ -55,6 +55,14 @@ namespace CompositeStockLoader
             outUnit.spec = StockSpecReader::ReadFullSpec(stockFilePath, trainsetBasePath);
             if (pCancelToken && *pCancelToken) return false;
 
+            if (outUnit.spec.isCorruptedStock)
+            {
+                outUnit.isCorruptedStock = true;
+                outUnit.isValid = false;
+                LOG_STOCK_ERROR_W(L"[CompositeStockLoader] Stock specification file is corrupted: %ls", stockFilePath.c_str());
+                return false;
+            }
+
             if (!outUnit.spec.isValid && outUnit.spec.mainShapeFile.empty() && outUnit.spec.freightAnims.empty())
             {
                 LOG_STOCK_ERROR_W(L"[CompositeStockLoader] Failed to read spec for: %ls", stockFilePath.c_str());
@@ -130,16 +138,46 @@ namespace CompositeStockLoader
             if (pCancelToken && *pCancelToken) return false;
             std::wstring fPath = sub->fullPath;
             ParsedShape* pShape = &sub->shape;
-            parseFutures.push_back(std::async(std::launch::async, [fPath, pShape, pCancelToken]() {
-                return ShapeReader::ParseShapeFile(fPath, *pShape, pCancelToken);
+            parseFutures.push_back(std::async(std::launch::async, [fPath, pShape, pCancelToken]() -> bool {
+                try {
+                    return ShapeReader::ParseShapeFile(fPath, *pShape, pCancelToken);
+                } catch (...) {
+                    if (pShape) {
+                        pShape->isValid = false;
+                        pShape->isCorrupted = true;
+                    }
+                    return false;
+                }
             }));
         }
 
+        bool hasCorruptedPrimary = false;
         for (size_t i = 0; i < parseFutures.size(); ++i)
         {
             if (pCancelToken && *pCancelToken) return false;
-            bool ok = parseFutures[i].get();
+            bool ok = false;
+            try {
+                ok = parseFutures[i].get();
+            } catch (...) {
+                ok = false;
+            }
             outUnit.subShapes[i]->isLoaded = ok && outUnit.subShapes[i]->shape.isValid;
+            if (!ok || outUnit.subShapes[i]->shape.isCorrupted)
+            {
+                outUnit.subShapes[i]->isCorrupted = true;
+                if (outUnit.subShapes[i]->isPrimary)
+                {
+                    hasCorruptedPrimary = true;
+                }
+            }
+        }
+
+        if (hasCorruptedPrimary)
+        {
+            outUnit.isCorrupted = true;
+            outUnit.isValid = false;
+            LOG_STOCK_WARN_W(L"[CompositeStockLoader] Primary shape is corrupted for vehicle: %ls", stockFilePath.c_str());
+            return false;
         }
 
         if (pCancelToken && *pCancelToken) return false;

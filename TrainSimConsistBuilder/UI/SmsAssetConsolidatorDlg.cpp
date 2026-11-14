@@ -1,6 +1,7 @@
 #include "SmsAssetConsolidatorDlg.h"
 #include "CustomScrollBar.h"
 #include "ModernMessageBox.h"
+#include "UITheme.h"
 #include "../SRC/SmsParser.h"
 #include "../SRC/AppLogging.h"
 #include "../SRC/TrainSimConsistBuilder.h"
@@ -458,28 +459,7 @@ namespace
 
     static void DrawCustomCheckbox(HDC hdc, const RECT& rcBox, bool isChecked, bool isHovered, HFONT hFontBold = NULL)
     {
-        COLORREF bg = isChecked ? RGB(0, 120, 215) : (isHovered ? RGB(48, 52, 66) : RGB(28, 30, 38));
-        COLORREF border = isChecked ? RGB(80, 160, 255) : (isHovered ? RGB(100, 140, 200) : RGB(60, 65, 80));
-
-        HBRUSH hbr = CreateSolidBrush(bg);
-        HPEN hpen = CreatePen(PS_SOLID, 1, border);
-        HBRUSH holdBr = (HBRUSH)SelectObject(hdc, hbr);
-        HPEN holdPen = (HPEN)SelectObject(hdc, hpen);
-        RoundRect(hdc, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
-        SelectObject(hdc, holdBr);
-        SelectObject(hdc, holdPen);
-        DeleteObject(hbr);
-        DeleteObject(hpen);
-
-        if (isChecked)
-        {
-            HGDIOBJ oldF = SelectObject(hdc, hFontBold);
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(255, 255, 255));
-            RECT rcGlyph = rcBox;
-            DrawTextW(hdc, L"✓", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            SelectObject(hdc, oldF);
-        }
+        UITheme::DrawCheckbox(hdc, rcBox, isChecked, isHovered, false);
     }
 
     static void DrawCustomRadioButton(HDC hdc, const RECT& rcCircle, bool isSelected, bool isHovered)

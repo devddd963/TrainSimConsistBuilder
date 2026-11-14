@@ -1,4 +1,5 @@
 #include "FluentDragGhost.h"
+#include "UITheme.h"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -63,11 +64,7 @@ CustomListControl::CustomListControl()
     m_pendingClickedRow(-1),
     m_bPendingCtrl(false),
     m_bPendingShift(false),
-    m_bFaytActive(false),
-    m_faytMatchIndex(-1),
-    m_faytHoverBtn(0),
-    m_hFontFaytIcon(NULL),
-    m_hFontFaytText(NULL),
+    m_bExplorerJumpNavigation(false),
     m_inlineCopyCol(-1),
     m_copiedRow(-1),
     m_copiedCol(-1),
@@ -80,10 +77,7 @@ CustomListControl::CustomListControl()
     m_ptDragStart = { 0, 0 };
     m_ptMarqueeStart = { 0, 0 };
     m_rcMarquee = { 0, 0, 0, 0 };
-    m_rcFaytPill = { 0 };
-    m_rcFaytPrevBtn = { 0 };
-    m_rcFaytNextBtn = { 0 };
-    m_rcFaytCloseBtn = { 0 };
+
 
     m_vScroll.SetOrientation(ScrollBarOrientation::Vertical);
     m_hScroll.SetOrientation(ScrollBarOrientation::Horizontal);
@@ -93,8 +87,7 @@ CustomListControl::CustomListControl()
 
 CustomListControl::~CustomListControl()
 {
-    if (m_hFontFaytIcon) { DeleteObject(m_hFontFaytIcon); m_hFontFaytIcon = NULL; }
-    if (m_hFontFaytText) { DeleteObject(m_hFontFaytText); m_hFontFaytText = NULL; }
+
     if (m_hFontCopyIcon) { DeleteObject(m_hFontCopyIcon); m_hFontCopyIcon = NULL; }
 }
 
@@ -205,6 +198,12 @@ void CustomListControl::AutoFitPrimaryColumn()
         targetCol = 1;
     }
 
+    // Reset other columns to their defined defaultWidths
+    for (size_t c = 0; c < m_columns.size(); ++c)
+    {
+        if (c != targetCol) m_columns[c].width = m_columns[c].defaultWidth;
+    }
+
     int totalOther = 0;
     for (size_t c = 0; c < m_columns.size(); ++c)
     {
@@ -225,6 +224,11 @@ void CustomListControl::AutoFitPrimaryColumn()
 
 void CustomListControl::AutoFitLastColumn()
 {
+    if (m_bAutoFitPrimary)
+    {
+        AutoFitPrimaryColumn();
+        return;
+    }
     if (!m_bAutoFitLastColumn || m_columns.size() <= 1 || m_isResizing || !m_hWnd) return;
 
     RECT rcClient;
@@ -232,13 +236,13 @@ void CustomListControl::AutoFitLastColumn()
     int fullW = rcClient.right;
     if (fullW <= 0) return;
 
+    size_t lastCol = m_columns.size() - 1;
+
     // Reset earlier columns to their defined defaultWidths
-    for (size_t c = 0; c < m_columns.size(); ++c)
+    for (size_t c = 0; c < lastCol; ++c)
     {
         m_columns[c].width = m_columns[c].defaultWidth;
     }
-
-    size_t lastCol = m_columns.size() - 1;
 
     int sumEarlier = 0;
     for (size_t c = 0; c < lastCol; ++c)
@@ -247,7 +251,7 @@ void CustomListControl::AutoFitLastColumn()
     }
 
     int avail = fullW - GetGutterWidth();
-    int minLastColW = (std::max)(50, m_columns[lastCol].defaultWidth);
+    int minLastColW = 60;
 
     int newLastW = avail - sumEarlier;
     if (newLastW < minLastColW) newLastW = minLastColW;
@@ -583,12 +587,20 @@ RECT CustomListControl::GetListRect() const
     {
         RECT rcClient;
         GetClientRect(m_hWnd, &rcClient);
-        bool hasV = m_vScroll.IsVisible();
-        bool hasH = m_hScroll.IsVisible();
-        int faytH = m_bFaytActive ? FAYT_BAR_HEIGHT : 0;
-        rc.right  = rcClient.right  - (hasV ? V_SCROLLBAR_WIDTH : 0);
-        rc.bottom = rcClient.bottom - (hasH ? H_SCROLLBAR_HEIGHT : 0) - faytH;
-        if (rc.bottom < m_headerHeight) rc.bottom = m_headerHeight;
+        rc.right  = rcClient.right - (m_vScroll.IsVisible() ? V_SCROLLBAR_WIDTH : 0);
+        int rawBottom = rcClient.bottom - H_SCROLLBAR_HEIGHT;
+        if (rawBottom < m_headerHeight) rawBottom = m_headerHeight;
+
+        int availH = rawBottom - m_headerHeight;
+        int numRows = (m_rowHeight > 0) ? (availH / m_rowHeight) : 0;
+        if (numRows > 0)
+        {
+            rc.bottom = m_headerHeight + numRows * m_rowHeight;
+        }
+        else
+        {
+            rc.bottom = rawBottom;
+        }
     }
     return rc;
 }
@@ -664,8 +676,7 @@ void CustomListControl::LayoutScrollbars()
     GetClientRect(m_hWnd, &rcClient);
     int cw = rcClient.right;
     int ch = rcClient.bottom;
-    int faytH = m_bFaytActive ? FAYT_BAR_HEIGHT : 0;
-    int clientAreaH = ch - faytH;
+    int clientAreaH = ch;
     if (clientAreaH < m_headerHeight) clientAreaH = m_headerHeight;
 
     // Determine which scrollbars should be visible
@@ -673,30 +684,29 @@ void CustomListControl::LayoutScrollbars()
     for (const auto& col : m_columns) totalColsWidth += col.width;
 
     int itemCount = GetItemCount();
-    int innerH    = clientAreaH - H_SCROLLBAR_HEIGHT;  // height when hscroll visible
-    int innerW    = cw - V_SCROLLBAR_WIDTH;            // width  when vscroll visible
+    int innerH    = clientAreaH - H_SCROLLBAR_HEIGHT;  // height above bottom tray
+    int innerW    = cw - V_SCROLLBAR_WIDTH;            // width when vscroll visible
 
-    // Need vertical?
-    const int BOTTOM_MARGIN = 6;
-    int visRows = (std::max)(0, clientAreaH - m_headerHeight - BOTTOM_MARGIN) / m_rowHeight;
+    // Need vertical? (exact integer row capacity above bottom tray)
+    int visRows = (std::max)(0, innerH - m_headerHeight) / m_rowHeight;
     bool needV  = (itemCount > visRows);
-    // Need horizontal?
-    bool needH  = (totalColsWidth > (needV ? innerW : cw));
 
-    // Re-check vertical with hscroll taking space
-    if (needH) visRows = (std::max)(0, innerH - m_headerHeight - BOTTOM_MARGIN) / m_rowHeight;
-    if (!needV && needH) needV = (itemCount > visRows);
+    // Total content width including selection gutter (checkbox column)
+    int availForCols = (needV ? innerW : cw) - GetGutterWidth();
+    // Need horizontal scrolling?
+    bool needH  = (totalColsWidth > availForCols);
 
     m_vScroll.SetVisible(needV);
     m_hScroll.SetVisible(needH);
 
-    int rightEdge  = cw - (needV ? V_SCROLLBAR_WIDTH : 0);
-    int bottomEdge = clientAreaH - (needH ? H_SCROLLBAR_HEIGHT : 0);
+    int rightEdge  = cw - V_SCROLLBAR_WIDTH;
+    int bottomEdge = clientAreaH - H_SCROLLBAR_HEIGHT;
 
-    int vScrollBottom = needH ? bottomEdge : clientAreaH;
-    RECT rcV = { rightEdge, m_headerHeight + 1, cw, vScrollBottom };
+    // Vertical scrollbar occupies the vertical tray
+    RECT rcV = { rightEdge, m_headerHeight + 1, cw, bottomEdge };
     m_vScroll.SetBounds(rcV);
 
+    // Horizontal scrollbar occupies the bottom tray
     RECT rcH = { 0, bottomEdge, cw, clientAreaH };
     m_hScroll.SetBounds(rcH);
 }
@@ -711,12 +721,12 @@ void CustomListControl::UpdateScrollbars()
     AutoFitLastColumn();
     LayoutScrollbars();
     AutoFitLastColumn();
+    LayoutScrollbars();
 
     RECT rc = GetListRect();
     int listW     = rc.right - rc.left;
     int listH     = rc.bottom - rc.top;
-    const int BOTTOM_MARGIN = 6;
-    int visRows   = (std::max)(0, listH - BOTTOM_MARGIN) / m_rowHeight;
+    int visRows   = (m_rowHeight > 0) ? (listH / m_rowHeight) : 1;
     if (visRows < 1) visRows = 1;
     int itemCount = GetItemCount();
 
@@ -731,9 +741,21 @@ void CustomListControl::UpdateScrollbars()
     // --- Horizontal scrollbar ---
     int availW = listW - GetGutterWidth();
     if (availW < 1) availW = 1;
-    m_hScroll.SetRange(0, totalColsWidth, availW);
-    m_hScroll.SetPos(m_scrollX);
-    m_scrollX = m_hScroll.GetPos();
+    bool needH = (totalColsWidth > availW);
+    if (needH)
+    {
+        m_hScroll.SetRange(0, totalColsWidth - 1, availW);
+        m_hScroll.SetPos(m_scrollX);
+        m_scrollX = m_hScroll.GetPos();
+        m_hScroll.SetVisible(true);
+    }
+    else
+    {
+        m_hScroll.SetRange(0, 0, availW);
+        m_hScroll.SetPos(0);
+        m_scrollX = 0;
+        m_hScroll.SetVisible(false);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -784,17 +806,12 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         bool bAlt  = (GetKeyState(VK_MENU) & 0x8000) != 0;
         if (bCtrl || bAlt) break;
 
-        if (!m_bFaytActive)
+        if (m_bExplorerJumpNavigation)
         {
-            StartFayt(ch);
+            JumpToNextByPrefix(ch);
+            return 0;
         }
-        else
-        {
-            m_faytQuery += ch;
-            UpdateFaytMatches();
-            ResetFaytTimer();
-        }
-        return 0;
+        break;
     }
 
     case WM_PAINT:
@@ -831,28 +848,26 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         COLORREF headerBgCol = CustomUITheme::DarkHeaderBackground;
         COLORREF dividerCol  = RGB(65,  65,  65);
 
-        // Background fill (only the list area, not over scrollbars)
-        RECT rcList = GetListRect();
-        RECT rcFill = rcList;
-        rcFill.top  = 0; // include header
+        // Background fill for the entire client area
+        RECT rcClientFill = { 0, 0, width, height };
         HBRUSH hbrBg = CreateSolidBrush(bgCol);
-        FillRect(hMemDC, &rcFill, hbrBg);
+        FillRect(hMemDC, &rcClientFill, hbrBg);
         DeleteObject(hbrBg);
 
+        RECT rcList = GetListRect();
         int listW = rcList.right - rcList.left;
         bool hasV = m_vScroll.IsVisible();
         bool hasH = m_hScroll.IsVisible();
 
         int itemCount  = GetItemCount();
-        const int BOTTOM_MARGIN = 6;
-        int visibleRows = (std::max)(0, (int)(rcList.bottom - rcList.top) - BOTTOM_MARGIN) / m_rowHeight;
+        int visibleRows = (m_rowHeight > 0) ? ((int)(rcList.bottom - rcList.top) / m_rowHeight) : 1;
         int startRow   = m_scrollY;
-        int endRow     = startRow + visibleRows;
+        int endRow     = (std::min)(itemCount, startRow + visibleRows);
         if (endRow > itemCount) endRow = itemCount;
 
         // --- Draw row cells with strict GDI clipping to rcList ---
         int savedDCRows = SaveDC(hMemDC);
-        IntersectClipRect(hMemDC, 0, m_headerHeight, listW, rcList.bottom - BOTTOM_MARGIN);
+        IntersectClipRect(hMemDC, 0, m_headerHeight, listW, rcList.bottom);
 
         int totalColsWidth = 0;
         for (const auto& col : m_columns) totalColsWidth += col.width;
@@ -930,51 +945,14 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             // Draw Checkbox in Selection Gutter
             if (m_bShowSelectionGutter)
             {
-                const int chkSize = 14;
+                const int chkSize = 16;
                 int chkX = (GetGutterWidth() - chkSize) / 2;
                 int chkY = yTop + (m_rowHeight - chkSize) / 2;
                 RECT rcChk = { chkX, chkY, chkX + chkSize, chkY + chkSize };
 
                 bool bChecked = IsItemChecked(r);
-                if (bChecked)
-                {
-                    COLORREF chkBg = RGB(0, 120, 215); // Fluent Accent Blue
-                    HBRUSH hbrChk = CreateSolidBrush(chkBg);
-                    HPEN hpenChk = CreatePen(PS_SOLID, 1, chkBg);
-                    HGDIOBJ oldB = SelectObject(hMemDC, hbrChk);
-                    HGDIOBJ oldP = SelectObject(hMemDC, hpenChk);
-                    RoundRect(hMemDC, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
-                    SelectObject(hMemDC, oldB);
-                    SelectObject(hMemDC, oldP);
-                    DeleteObject(hbrChk);
-                    DeleteObject(hpenChk);
-
-                    HPEN hpenTick = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-                    HGDIOBJ oldTickP = SelectObject(hMemDC, hpenTick);
-                    POINT pts[3] = {
-                        { rcChk.left + 3, rcChk.top + 7 },
-                        { rcChk.left + 6, rcChk.top + 10 },
-                        { rcChk.left + 11, rcChk.top + 4 }
-                    };
-                    Polyline(hMemDC, pts, 3);
-                    SelectObject(hMemDC, oldTickP);
-                    DeleteObject(hpenTick);
-                }
-                else
-                {
-                    bool isHover = (r == m_hoveredRow);
-                    COLORREF boxBorder = isHover ? RGB(160, 160, 160) : RGB(90, 90, 90);
-                    COLORREF boxBg = RGB(36, 36, 36);
-                    HBRUSH hbrBox = CreateSolidBrush(boxBg);
-                    HPEN hpenBox = CreatePen(PS_SOLID, 1, boxBorder);
-                    HGDIOBJ oldB = SelectObject(hMemDC, hbrBox);
-                    HGDIOBJ oldP = SelectObject(hMemDC, hpenBox);
-                    RoundRect(hMemDC, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
-                    SelectObject(hMemDC, oldB);
-                    SelectObject(hMemDC, oldP);
-                    DeleteObject(hbrBox);
-                    DeleteObject(hpenBox);
-                }
+                bool isHover = (r == m_hoveredRow);
+                UITheme::DrawCheckbox(hMemDC, rcChk, bChecked, isHover, false);
             }
 
             COLORREF rowTextCol = isRowSel ? RGB(255, 255, 255) : textCol;
@@ -986,9 +964,19 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                     rowTextCol = RGB(255, 100, 100);
                     break;
                 }
+                else if (chkText == L"Corrupted Stock")
+                {
+                    rowTextCol = RGB(255, 128, 64);
+                    break;
+                }
                 else if (chkText == L"Missing Shape")
                 {
                     rowTextCol = RGB(255, 175, 50);
+                    break;
+                }
+                else if (chkText == L"Corrupted Shape")
+                {
+                    rowTextCol = RGB(255, 110, 180);
                     break;
                 }
                 else if (chkText == L"Fixed")
@@ -1208,26 +1196,35 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
 
         RestoreDC(hMemDC, savedDCRows);
 
-        // Cleanly paint scrollbar gutter backgrounds after row cells
-        int trayBottom = m_bFaytActive ? height - FAYT_BAR_HEIGHT : height;
-        if (hasV)
-        {
-            // Vertical Gutter background (strictly terminates above horizontal tray or FAYT bar)
-            RECT rcGutter = { listW, m_headerHeight, width, hasH ? rcList.bottom : trayBottom };
-            HBRUSH hbrGutter = CreateSolidBrush(bgCol);
-            FillRect(hMemDC, &rcGutter, hbrGutter);
-            DeleteObject(hbrGutter);
-        }
+        // Dedicated right vertical tray bar (always visible for clean grounded frame)
+        COLORREF vTrayBg = RGB(28, 28, 28);
+        RECT rcGutterV = { width - V_SCROLLBAR_WIDTH, m_headerHeight, width, height - H_SCROLLBAR_HEIGHT };
+        HBRUSH hbrGutterV = CreateSolidBrush(vTrayBg);
+        FillRect(hMemDC, &rcGutterV, hbrGutterV);
+        DeleteObject(hbrGutterV);
 
-        if (hasH)
-        {
-            // Dedicated horizontal scrollbar tray with differentiated background
-            COLORREF hTrayBg = RGB(28, 28, 28);
-            RECT rcGutterH = { 0, rcList.bottom, width, trayBottom };
-            HBRUSH hbrGutterH = CreateSolidBrush(hTrayBg);
-            FillRect(hMemDC, &rcGutterH, hbrGutterH);
-            DeleteObject(hbrGutterH);
-        }
+        // Subtle 1px divider line along the left of the vertical tray
+        HPEN hPenVTray = CreatePen(PS_SOLID, 1, RGB(42, 42, 42));
+        HPEN hOldPenVTray = (HPEN)SelectObject(hMemDC, hPenVTray);
+        MoveToEx(hMemDC, width - V_SCROLLBAR_WIDTH, m_headerHeight, NULL);
+        LineTo(hMemDC, width - V_SCROLLBAR_WIDTH, height - H_SCROLLBAR_HEIGHT);
+        SelectObject(hMemDC, hOldPenVTray);
+        DeleteObject(hPenVTray);
+
+        // Dedicated bottom horizontal tray bar (always visible for clean grounded frame)
+        COLORREF hTrayBg = RGB(28, 28, 28);
+        RECT rcGutterH = { 0, height - H_SCROLLBAR_HEIGHT, width, height };
+        HBRUSH hbrGutterH = CreateSolidBrush(hTrayBg);
+        FillRect(hMemDC, &rcGutterH, hbrGutterH);
+        DeleteObject(hbrGutterH);
+
+        // Subtle 1px divider line along the top of the horizontal tray
+        HPEN hPenTray = CreatePen(PS_SOLID, 1, RGB(42, 42, 42));
+        HPEN hOldPenTray = (HPEN)SelectObject(hMemDC, hPenTray);
+        MoveToEx(hMemDC, 0, height - H_SCROLLBAR_HEIGHT, NULL);
+        LineTo(hMemDC, width, height - H_SCROLLBAR_HEIGHT);
+        SelectObject(hMemDC, hOldPenTray);
+        DeleteObject(hPenTray);
 
         // --- Draw header background ---
         RECT rcHeader = { 0, 0, width, m_headerHeight };
@@ -1255,96 +1252,51 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             int totalItems = GetItemCount();
             int checkedCount = GetCheckedCount();
 
-            const int chkSize = 14;
+            const int chkSize = 16;
             int chkX = (GetGutterWidth() - chkSize) / 2;
             int chkY = (m_headerHeight - chkSize) / 2;
             RECT rcChk = { chkX, chkY, chkX + chkSize, chkY + chkSize };
 
-            if (checkedCount == totalItems && totalItems > 0)
-            {
-                // All Checked -> Blue background with white tick
-                COLORREF chkBg = RGB(0, 120, 215);
-                HBRUSH hbrChk = CreateSolidBrush(chkBg);
-                HPEN hpenChk = CreatePen(PS_SOLID, 1, chkBg);
-                HGDIOBJ oldB = SelectObject(hMemDC, hbrChk);
-                HGDIOBJ oldP = SelectObject(hMemDC, hpenChk);
-                RoundRect(hMemDC, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
-                SelectObject(hMemDC, oldB);
-                SelectObject(hMemDC, oldP);
-                DeleteObject(hbrChk);
-                DeleteObject(hpenChk);
-
-                HPEN hpenTick = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-                HGDIOBJ oldTickP = SelectObject(hMemDC, hpenTick);
-                POINT pts[3] = {
-                    { rcChk.left + 3, rcChk.top + 7 },
-                    { rcChk.left + 6, rcChk.top + 10 },
-                    { rcChk.left + 11, rcChk.top + 4 }
-                };
-                Polyline(hMemDC, pts, 3);
-                SelectObject(hMemDC, oldTickP);
-                DeleteObject(hpenTick);
-            }
-            else if (checkedCount > 0)
-            {
-                // Partially Checked -> Blue background with white minus dash
-                COLORREF chkBg = RGB(0, 120, 215);
-                HBRUSH hbrChk = CreateSolidBrush(chkBg);
-                HPEN hpenChk = CreatePen(PS_SOLID, 1, chkBg);
-                HGDIOBJ oldB = SelectObject(hMemDC, hbrChk);
-                HGDIOBJ oldP = SelectObject(hMemDC, hpenChk);
-                RoundRect(hMemDC, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
-                SelectObject(hMemDC, oldB);
-                SelectObject(hMemDC, oldP);
-                DeleteObject(hbrChk);
-                DeleteObject(hpenChk);
-
-                HPEN hpenDash = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-                HGDIOBJ oldDashP = SelectObject(hMemDC, hpenDash);
-                int midY = (rcChk.top + rcChk.bottom) / 2;
-                MoveToEx(hMemDC, rcChk.left + 3, midY, NULL);
-                LineTo(hMemDC, rcChk.right - 3, midY);
-                SelectObject(hMemDC, oldDashP);
-                DeleteObject(hpenDash);
-            }
-            else
-            {
-                // Unchecked -> Subtle outline box
-                COLORREF boxBorder = m_bHoverGutterHeader ? RGB(160, 160, 160) : RGB(90, 90, 90);
-                COLORREF boxBg = RGB(36, 36, 36);
-                HBRUSH hbrBox = CreateSolidBrush(boxBg);
-                HPEN hpenBox = CreatePen(PS_SOLID, 1, boxBorder);
-                HGDIOBJ oldB = SelectObject(hMemDC, hbrBox);
-                HGDIOBJ oldP = SelectObject(hMemDC, hpenBox);
-                RoundRect(hMemDC, rcChk.left, rcChk.top, rcChk.right, rcChk.bottom, 3, 3);
-                SelectObject(hMemDC, oldB);
-                SelectObject(hMemDC, oldP);
-                DeleteObject(hbrBox);
-                DeleteObject(hpenBox);
-            }
+            bool isAllChecked = (checkedCount == totalItems && totalItems > 0);
+            bool isIndeterminate = (checkedCount > 0 && !isAllChecked);
+            UITheme::DrawCheckbox(hMemDC, rcChk, isAllChecked, m_bHoverGutterHeader, isIndeterminate);
         }
  
         SetTextColor(hMemDC, CustomUITheme::TextPrimary);
         int xAccumH = GetGutterWidth() - m_scrollX;
+        int headerRightLimit = width;
         for (size_t c = 0; c < m_columns.size(); ++c)
         {
             int colWidth = m_columns[c].width;
             RECT rcCell  = { xAccumH, 0, xAccumH + colWidth, m_headerHeight };
+            if (c == m_columns.size() - 1 && m_bAutoFitLastColumn && rcCell.right < headerRightLimit)
+            {
+                rcCell.right = headerRightLimit;
+            }
  
             if (rcCell.right > GetGutterWidth() && rcCell.left < width)
             {
+                bool isSeqNoCol = (c == 0 && (m_columns[c].title == L"#" || m_columns[c].title == L"No." || m_columns[c].title == L"No"));
+
                 // Split the cell into Left (Sort) and Right (Dropdown) zones
                 RECT rcLeftHighlight = rcCell;
-                rcLeftHighlight.right -= 20;
                 RECT rcRightHighlight = rcCell;
-                rcRightHighlight.left = rcRightHighlight.right - 20;
+                if (!isSeqNoCol)
+                {
+                    rcLeftHighlight.right -= 20;
+                    rcRightHighlight.left = rcRightHighlight.right - 20;
+                }
+                else
+                {
+                    rcRightHighlight = { 0, 0, 0, 0 };
+                }
  
                 COLORREF leftBgColor = CLR_INVALID;
                 COLORREF rightBgColor = CLR_INVALID;
  
                 if ((int)c == m_pressedHeaderColIndex)
                 {
-                    if (m_pressedHeaderInDropdown)
+                    if (m_pressedHeaderInDropdown && !isSeqNoCol)
                     {
                         leftBgColor = RGB(45, 45, 45);
                         rightBgColor = RGB(60, 60, 60);
@@ -1358,7 +1310,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 else if ((int)c == m_hoverHeaderColIndex)
                 {
                     leftBgColor = RGB(45, 45, 45);
-                    if (m_hoverHeaderInDropdown)
+                    if (m_hoverHeaderInDropdown && !isSeqNoCol)
                     {
                         rightBgColor = RGB(55, 55, 55);
                     }
@@ -1374,7 +1326,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                     FillRect(hMemDC, &rcLeftHighlight, hbrLeft);
                     DeleteObject(hbrLeft);
                 }
-                if (rightBgColor != CLR_INVALID)
+                if (rightBgColor != CLR_INVALID && !isSeqNoCol)
                 {
                     HBRUSH hbrRight = CreateSolidBrush(rightBgColor);
                     FillRect(hMemDC, &rcRightHighlight, hbrRight);
@@ -1382,17 +1334,26 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 }
  
                 RECT rcText = rcCell;
-                rcText.left  += 8;
-                rcText.right -= 22;
-                if (rcText.right < rcText.left) rcText.right = rcCell.right - 4;
-                if (rcText.left < GetGutterWidth() + 8) rcText.left = GetGutterWidth() + 8;
+                if (isSeqNoCol || m_columns[c].align == 1)
+                {
+                    rcText.left  += 2;
+                    rcText.right -= 2;
+                    if (rcText.left < GetGutterWidth() + 2) rcText.left = GetGutterWidth() + 2;
+                }
+                else
+                {
+                    rcText.left  += 8;
+                    rcText.right -= 22;
+                    if (rcText.right < rcText.left) rcText.right = rcCell.right - 4;
+                    if (rcText.left < GetGutterWidth() + 8) rcText.left = GetGutterWidth() + 8;
+                }
 
-                UINT headerFmt = (m_columns[c].align == 1) ? (DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX) :
+                UINT headerFmt = (m_columns[c].align == 1 || isSeqNoCol) ? (DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX) :
                                  ((m_columns[c].align == 2) ? (DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX) :
                                                               (DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX));
                 DrawTextW(hMemDC, m_columns[c].title.c_str(), -1, &rcText, headerFmt);
 
-                if ((int)c == m_hoverHeaderColIndex)
+                if ((int)c == m_hoverHeaderColIndex && !isSeqNoCol)
                 {
                     SIZE size;
                     GetTextExtentPoint32W(hMemDC, m_columns[c].title.c_str(), (int)m_columns[c].title.length(), &size);
@@ -1430,7 +1391,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                     }
                 }
 
-                if ((int)c == m_hoverHeaderColIndex)
+                if ((int)c == m_hoverHeaderColIndex && !isSeqNoCol)
                 {
                     HPEN hDivPen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
                     HPEN hOldDivPen = (HPEN)SelectObject(hMemDC, hDivPen);
@@ -1602,147 +1563,6 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         }
 
         // -------------------------------------------------------------
-        // Draw DOpus-style Find-As-You-Type (FAYT) Bottom Bar & Pill
-        // -------------------------------------------------------------
-        if (m_bFaytActive)
-        {
-            if (!m_hFontFaytIcon)
-            {
-                LOGFONTW lf = { 0 };
-                lf.lfHeight = -MulDiv(10 * 10, GetDpiForSystem(), 720);
-                lf.lfWeight = FW_NORMAL;
-                lf.lfCharSet = DEFAULT_CHARSET;
-                lf.lfQuality = CLEARTYPE_QUALITY;
-                wcscpy_s(lf.lfFaceName, L"Segoe Fluent Icons");
-                m_hFontFaytIcon = CreateFontIndirectW(&lf);
-                if (!m_hFontFaytIcon)
-                {
-                    wcscpy_s(lf.lfFaceName, L"Segoe MDL2 Assets");
-                    m_hFontFaytIcon = CreateFontIndirectW(&lf);
-                }
-            }
-            if (!m_hFontFaytText)
-            {
-                LOGFONTW lf = { 0 };
-                lf.lfHeight = -MulDiv(9 * 10, GetDpiForSystem(), 720);
-                lf.lfWeight = FW_SEMIBOLD;
-                lf.lfCharSet = DEFAULT_CHARSET;
-                lf.lfQuality = CLEARTYPE_QUALITY;
-                wcscpy_s(lf.lfFaceName, L"Segoe UI");
-                m_hFontFaytText = CreateFontIndirectW(&lf);
-            }
-
-            // Bottom bar background strip
-            int barTop = height - FAYT_BAR_HEIGHT;
-            RECT rcFaytBar = { 0, barTop, width, height };
-            COLORREF barBg = RGB(22, 22, 25);
-            HBRUSH hbrBar = CreateSolidBrush(barBg);
-            FillRect(hMemDC, &rcFaytBar, hbrBar);
-            DeleteObject(hbrBar);
-
-            // 1px Top divider for the bottom bar
-            HPEN hPenTopDiv = CreatePen(PS_SOLID, 1, RGB(48, 48, 54));
-            HPEN hOldDivPen = (HPEN)SelectObject(hMemDC, hPenTopDiv);
-            MoveToEx(hMemDC, 0, barTop, NULL);
-            LineTo(hMemDC, width, barTop);
-            SelectObject(hMemDC, hOldDivPen);
-            DeleteObject(hPenTopDiv);
-
-            // Inner floating pill inside bottom bar (stretched to full width till splitter)
-            int pillH = 24;
-            int pillY = barTop + (FAYT_BAR_HEIGHT - pillH) / 2;
-            int pillX = 4;
-            int pillW = width - 8;
-            if (pillW < 100) pillW = 100;
-
-            m_rcFaytPill = { pillX, pillY, pillX + pillW, pillY + pillH };
-
-            COLORREF faytBg = RGB(36, 16, 22);
-            COLORREF faytBorder = RGB(95, 38, 48);
-            if (m_faytMatches.empty() && !m_faytQuery.empty())
-            {
-                faytBg = RGB(46, 18, 20);
-                faytBorder = RGB(160, 45, 45); // Soft red border when no matches
-            }
-
-            HBRUSH hbrFayt = CreateSolidBrush(faytBg);
-            HPEN hPenFayt = CreatePen(PS_SOLID, 1, faytBorder);
-            HBRUSH hOldB = (HBRUSH)SelectObject(hMemDC, hbrFayt);
-            HPEN hOldP = (HPEN)SelectObject(hMemDC, hPenFayt);
-
-            RoundRect(hMemDC, m_rcFaytPill.left, m_rcFaytPill.top, m_rcFaytPill.right, m_rcFaytPill.bottom, 6, 6);
-
-            SelectObject(hMemDC, hOldB);
-            SelectObject(hMemDC, hOldP);
-            DeleteObject(hbrFayt);
-            DeleteObject(hPenFayt);
-
-            // Button rects on right
-            int btnSize = 18;
-            int btnY = m_rcFaytPill.top + (pillH - btnSize) / 2;
-            int curBtnRight = m_rcFaytPill.right - 4;
-
-            m_rcFaytCloseBtn = { curBtnRight - btnSize, btnY, curBtnRight, btnY + btnSize };
-            curBtnRight -= (btnSize + 2);
-
-            m_rcFaytNextBtn = { curBtnRight - btnSize, btnY, curBtnRight, btnY + btnSize };
-            curBtnRight -= (btnSize + 2);
-
-            m_rcFaytPrevBtn = { curBtnRight - btnSize, btnY, curBtnRight, btnY + btnSize };
-            curBtnRight -= (btnSize + 4);
-
-            auto drawPillButton = [&](const RECT& rcBtn, int btnId, const wchar_t* glyph) {
-                if (m_faytHoverBtn == btnId)
-                {
-                    HBRUSH hbrHov = CreateSolidBrush(RGB(65, 26, 34));
-                    HBRUSH hPrev = (HBRUSH)SelectObject(hMemDC, hbrHov);
-                    HPEN hNullPen = CreatePen(PS_NULL, 0, 0);
-                    HPEN hPrevPen = (HPEN)SelectObject(hMemDC, hNullPen);
-                    RoundRect(hMemDC, rcBtn.left, rcBtn.top, rcBtn.right, rcBtn.bottom, 4, 4);
-                    SelectObject(hMemDC, hPrevPen);
-                    DeleteObject(hNullPen);
-                    SelectObject(hMemDC, hPrev);
-                    DeleteObject(hbrHov);
-                }
-                SetBkMode(hMemDC, TRANSPARENT);
-                SetTextColor(hMemDC, m_faytHoverBtn == btnId ? RGB(255, 255, 255) : RGB(200, 190, 195));
-                HFONT hOldF = (HFONT)SelectObject(hMemDC, m_hFontFaytIcon ? m_hFontFaytIcon : GetStockObject(DEFAULT_GUI_FONT));
-                DrawTextW(hMemDC, glyph, -1, (LPRECT)&rcBtn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                SelectObject(hMemDC, hOldF);
-            };
-
-            drawPillButton(m_rcFaytCloseBtn, 3, L"\xE711"); // Close X
-            drawPillButton(m_rcFaytNextBtn, 2, L"\xE70D");  // Chevron Down
-            drawPillButton(m_rcFaytPrevBtn, 1, L"\xE70E");  // Chevron Up
-
-            // Left Search Icon (\xE721)
-            RECT rcSearchIcon = { m_rcFaytPill.left + 6, m_rcFaytPill.top, m_rcFaytPill.left + 22, m_rcFaytPill.bottom };
-            SetBkMode(hMemDC, TRANSPARENT);
-            SetTextColor(hMemDC, RGB(0, 150, 255));
-            HFONT hOldF = (HFONT)SelectObject(hMemDC, m_hFontFaytIcon ? m_hFontFaytIcon : GetStockObject(DEFAULT_GUI_FONT));
-            DrawTextW(hMemDC, L"\xE721", -1, &rcSearchIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-            // Search Query Text and Match Status
-            RECT rcText = { m_rcFaytPill.left + 24, m_rcFaytPill.top, curBtnRight, m_rcFaytPill.bottom };
-            SelectObject(hMemDC, m_hFontFaytText ? m_hFontFaytText : GetStockObject(DEFAULT_GUI_FONT));
-
-            std::wstring matchStatus;
-            if (!m_faytMatches.empty())
-            {
-                matchStatus = L" [" + std::to_wstring(m_faytMatchIndex + 1) + L"/" + std::to_wstring(m_faytMatches.size()) + L"]";
-            }
-            else
-            {
-                matchStatus = L" [No match]";
-            }
-
-            std::wstring fullDisplayText = L"Find: \"" + m_faytQuery + L"\"" + matchStatus;
-            SetTextColor(hMemDC, m_faytMatches.empty() ? RGB(255, 120, 120) : RGB(245, 245, 245));
-            DrawTextW(hMemDC, fullDisplayText.c_str(), -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-
-            SelectObject(hMemDC, hOldF);
-        }
-
         BitBlt(hdc, 0, 0, width, height, hMemDC, 0, 0, SRCCOPY);
 
         SelectObject(hMemDC, hOldBmp);
@@ -1868,11 +1688,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
 
             return 0;
         }
-        else if (wParam == TIMER_FAYT_TIMEOUT_ID)
-        {
-            CloseFayt();
-            return 0;
-        }
+
         else if (wParam == TIMER_COPY_FEEDBACK_ID)
         {
             KillTimer(m_hWnd, TIMER_COPY_FEEDBACK_ID);
@@ -1944,6 +1760,13 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         ScreenToClient(m_hWnd, &pt);
         RECT rcClient;
         GetClientRect(m_hWnd, &rcClient);
+
+        // If inside list row content area, guarantee client hit so clicks are never lost
+        RECT rcList = GetListRect();
+        if (pt.y >= m_headerHeight && pt.y < rcList.bottom && pt.x >= 0 && pt.x < rcList.right)
+        {
+            return HTCLIENT;
+        }
 
         // Outer 6px boundary yields to parent splitters / resize borders
         if (pt.x >= rcClient.right - 6 || pt.y >= rcClient.bottom - 6 || pt.x <= 6)
@@ -2021,34 +1844,12 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         {
             return 0;
         }
-        if ((m_hScroll.IsVisible() && y >= rcList.bottom) || y >= rcList.bottom - 6)
+        if ((m_hScroll.IsVisible() && y >= rcList.bottom) || y >= rcList.bottom)
         {
             return 0;
         }
 
-        if (m_bFaytActive)
-        {
-            if (PtInRect(&m_rcFaytCloseBtn, pt))
-            {
-                CloseFayt();
-                return 0;
-            }
-            if (PtInRect(&m_rcFaytNextBtn, pt))
-            {
-                FaytNext();
-                return 0;
-            }
-            if (PtInRect(&m_rcFaytPrevBtn, pt))
-            {
-                FaytPrev();
-                return 0;
-            }
-            if (PtInRect(&m_rcFaytPill, pt))
-            {
-                ResetFaytTimer();
-                return 0;
-            }
-        }
+
 
         SetFocus();
         {
@@ -2095,15 +1896,21 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             RECT rcClient;
             GetClientRect(m_hWnd, &rcClient);
             int cw = rcClient.right;
+            int rightLimit = cw;
 
             for (size_t c = 0; c < m_columns.size(); ++c)
             {
                 int colWidth = m_columns[c].width;
                 int nextX = xPos + colWidth;
+                if (c == m_columns.size() - 1 && m_bAutoFitLastColumn && nextX < rightLimit)
+                {
+                    nextX = rightLimit;
+                }
                 if (x >= xPos && x < nextX && x >= GetGutterWidth())
                 {
+                    bool isSeqNoCol = (c == 0 && (m_columns[c].title == L"#" || m_columns[c].title == L"No." || m_columns[c].title == L"No"));
                     m_pressedHeaderColIndex = (int)c;
-                    m_pressedHeaderInDropdown = (x >= nextX - 20);
+                    m_pressedHeaderInDropdown = (!isSeqNoCol && (x >= nextX - 20));
                     SetCapture(m_hWnd);
                     RECT rcHeader = { 0, 0, cw, m_headerHeight };
                     InvalidateRect(m_hWnd, &rcHeader, TRUE);
@@ -2369,7 +2176,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
         RECT rcList = GetListRect();
         int listW = rcList.right - rcList.left;
         if (m_vScroll.IsVisible() && x >= listW) return 0;
-        if ((m_hScroll.IsVisible() && y >= rcList.bottom) || y >= rcList.bottom - 6) return 0;
+        if ((m_hScroll.IsVisible() && y >= rcList.bottom) || y >= rcList.bottom) return 0;
 
         if (y > m_headerHeight)
         {
@@ -2404,19 +2211,7 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             Invalidate();
         }
 
-        if (m_bFaytActive)
-        {
-            int newHoverBtn = 0;
-            if (PtInRect(&m_rcFaytPrevBtn, pt)) newHoverBtn = 1;
-            else if (PtInRect(&m_rcFaytNextBtn, pt)) newHoverBtn = 2;
-            else if (PtInRect(&m_rcFaytCloseBtn, pt)) newHoverBtn = 3;
 
-            if (newHoverBtn != m_faytHoverBtn)
-            {
-                m_faytHoverBtn = newHoverBtn;
-                InvalidateRect(m_hWnd, &m_rcFaytPill, FALSE);
-            }
-        }
 
         RECT rcClient;
         GetClientRect(m_hWnd, &rcClient);
@@ -2640,10 +2435,17 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 if (!nearBoundary && x >= GetGutterWidth())
                 {
                     int xPos = GetGutterWidth() - m_scrollX;
+                    RECT rcC; GetClientRect(m_hWnd, &rcC);
+                    int rightLimit = rcC.right;
+
                     for (size_t c = 0; c < m_columns.size(); ++c)
                     {
                         int colWidth = m_columns[c].width;
                         int nextX = xPos + colWidth;
+                        if (c == m_columns.size() - 1 && m_bAutoFitLastColumn && nextX < rightLimit)
+                        {
+                            nextX = rightLimit;
+                        }
                         if (x >= xPos && x < nextX)
                         {
                             newHover = (int)c;
@@ -2745,7 +2547,14 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
                 }
                 int colWidth = m_columns[newHover].width;
                 int colRight = xPos + colWidth;
-                newDropdownHover = (x >= colRight - 20);
+                if (newHover == (int)m_columns.size() - 1 && m_bAutoFitLastColumn)
+                {
+                    RECT rcC; GetClientRect(m_hWnd, &rcC);
+                    int rightLimit = rcC.right;
+                    if (colRight < rightLimit) colRight = rightLimit;
+                }
+                bool isSeqNoCol = (newHover == 0 && (m_columns[0].title == L"#" || m_columns[0].title == L"No." || m_columns[0].title == L"No"));
+                newDropdownHover = (!isSeqNoCol && (x >= colRight - 20));
             }
 
             if (newHover != oldHover || newDropdownHover != oldDropdownHover ||
@@ -3024,12 +2833,17 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             int xPos = GetGutterWidth() - m_scrollX;
             int targetCol = -1;
             bool targetInDropdown = false;
+            int rightLimit = cw;
             if (y <= m_headerHeight)
             {
                 for (size_t c = 0; c < m_columns.size(); ++c)
                 {
                     int colWidth = m_columns[c].width;
                     int nextX = xPos + colWidth;
+                    if (c == m_columns.size() - 1 && m_bAutoFitLastColumn && nextX < rightLimit)
+                    {
+                        nextX = rightLimit;
+                    }
                     if (x >= xPos && x < nextX && x >= GetGutterWidth())
                     {
                         targetCol = (int)c;
@@ -3247,74 +3061,8 @@ LRESULT CustomListControl::HandleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam
             return 0;
         }
 
-        if (m_bFaytActive)
-        {
-            if (wParam == VK_F3)
-            {
-                bool bShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                if (bShift) FaytPrev();
-                else FaytNext();
-                ResetFaytTimer();
-                return 0;
-            }
-            if (wParam == VK_ESCAPE)
-            {
-                CloseFayt();
-                return 0;
-            }
-            if (wParam == VK_BACK)
-            {
-                if (!m_faytQuery.empty())
-                {
-                    m_faytQuery.pop_back();
-                    if (m_faytQuery.empty())
-                    {
-                        CloseFayt();
-                    }
-                    else
-                    {
-                        UpdateFaytMatches();
-                        ResetFaytTimer();
-                    }
-                }
-                return 0;
-            }
-            if (wParam == VK_DOWN)
-            {
-                FaytNext();
-                ResetFaytTimer();
-                return 0;
-            }
-            if (wParam == VK_UP)
-            {
-                FaytPrev();
-                ResetFaytTimer();
-                return 0;
-            }
-            if (wParam == VK_RETURN)
-            {
-                bool bShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                if (bShift) FaytPrev();
-                else FaytNext();
-                ResetFaytTimer();
-                return 0;
-            }
-        }
-        else
-        {
-            if (wParam == VK_F3 && !m_faytMatches.empty())
-            {
-                m_bFaytActive = true;
-                bool bShift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-                if (bShift) FaytPrev();
-                else FaytNext();
-                ResetFaytTimer();
-                return 0;
-            }
-        }
-
-        // Forward shortcuts to parent
-        if (wParam == VK_DELETE || (bCtrl && (wParam == 'Z' || wParam == 'z' || wParam == 'Y' || wParam == 'y' || wParam == 'C' || wParam == 'c' || wParam == 'X' || wParam == 'x' || wParam == 'V' || wParam == 'v' || wParam == 'R' || wParam == 'r' || wParam == 'F' || wParam == 'f')))
+        // Forward shortcuts to parent (including F/f for Flip Unit and Delete)
+        if (wParam == VK_DELETE || wParam == 'F' || wParam == 'f' || (bCtrl && (wParam == 'Z' || wParam == 'z' || wParam == 'Y' || wParam == 'y' || wParam == 'C' || wParam == 'c' || wParam == 'X' || wParam == 'x' || wParam == 'V' || wParam == 'v' || wParam == 'R' || wParam == 'r' || wParam == 'A' || wParam == 'a')))
         {
             SendMessageW(GetParent(m_hWnd), WM_KEYDOWN, wParam, lParam);
             return 0;
@@ -3563,7 +3311,7 @@ int CustomListControl::GetItemIndexFromPoint(POINT ptClient) const
 {
     if (ptClient.y <= m_headerHeight) return -1;
     RECT rcList = GetListRect();
-    if (ptClient.y >= rcList.bottom - 6) return -1;
+    if (ptClient.y >= rcList.bottom) return -1;
     int row = m_scrollY + (ptClient.y - m_headerHeight) / m_rowHeight;
     if (row < 0 || row >= GetItemCount()) return -1;
     return row;
@@ -3683,131 +3431,41 @@ void CustomListControl::StopAutoScroll()
 }
 
 // ---------------------------------------------------------------------------
-// DOpus-Style Find-As-You-Type (FAYT) Quick Search
 // ---------------------------------------------------------------------------
-void CustomListControl::StartFayt(wchar_t initialChar)
+// Native Windows Explorer-Style Prefix Jump Navigation
+// ---------------------------------------------------------------------------
+void CustomListControl::JumpToNextByPrefix(wchar_t ch)
 {
-    m_bFaytActive = true;
-    m_faytQuery = std::wstring(1, initialChar);
-    UpdateScrollbars();
-    UpdateFaytMatches();
-    ResetFaytTimer();
-}
+    int count = GetItemCount();
+    if (count <= 0) return;
 
-void CustomListControl::UpdateFaytMatches()
-{
-    m_faytMatches.clear();
-    m_faytMatchIndex = -1;
-
-    if (m_faytQuery.empty())
+    wchar_t upperCh = (wchar_t)towupper(ch);
+    int targetCol = 0;
+    if (m_columns.size() > 1 && (m_columns[0].title == L"#" || m_columns[0].title == L"No." || m_columns[0].title == L"No"))
     {
-        Invalidate();
-        return;
+        targetCol = 1;
     }
 
-    int count = GetItemCount();
-    int numCols = (int)m_columns.size();
-
+    int startRow = (m_selectedIndex >= 0) ? (m_selectedIndex + 1) : 0;
     for (int i = 0; i < count; ++i)
     {
-        bool bMatched = false;
-        for (int c = 0; c < numCols; ++c)
+        int row = (startRow + i) % count;
+        std::wstring text = GetCellText(row, targetCol);
+        size_t firstChar = text.find_first_not_of(L" \t\r\n");
+        if (firstChar != std::wstring::npos)
         {
-            std::wstring cellText = GetCellText(i, c);
-            if (StrStrIW(cellText.c_str(), m_faytQuery.c_str()) != NULL)
+            if ((wchar_t)towupper(text[firstChar]) == upperCh)
             {
-                bMatched = true;
-                break;
+                SetSelectedIndex(row, true);
+                EnsureVisible(row);
+                NMHDR nmhdr = { 0 };
+                nmhdr.hwndFrom = m_hWnd;
+                nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
+                nmhdr.code     = NM_CLICK;
+                SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
+                Invalidate();
+                return;
             }
         }
-        if (bMatched)
-        {
-            m_faytMatches.push_back(i);
-        }
     }
-
-    if (!m_faytMatches.empty())
-    {
-        // Select the first match at or after current selection, or wrap to 0
-        int targetMatch = 0;
-        for (size_t m = 0; m < m_faytMatches.size(); ++m)
-        {
-            if (m_faytMatches[m] >= m_selectedIndex)
-            {
-                targetMatch = (int)m;
-                break;
-            }
-        }
-        m_faytMatchIndex = targetMatch;
-        int matchedRow = m_faytMatches[m_faytMatchIndex];
-        SetSelectedIndex(matchedRow);
-        EnsureVisible(matchedRow);
-
-        NMHDR nmhdr = { 0 };
-        nmhdr.hwndFrom = m_hWnd;
-        nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
-        nmhdr.code     = NM_CLICK;
-        SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
-    }
-
-    Invalidate();
 }
-
-void CustomListControl::FaytNext()
-{
-    if (m_faytMatches.empty()) return;
-
-    m_faytMatchIndex = (m_faytMatchIndex + 1) % (int)m_faytMatches.size();
-    int matchedRow = m_faytMatches[m_faytMatchIndex];
-    SetSelectedIndex(matchedRow);
-    EnsureVisible(matchedRow);
-
-    NMHDR nmhdr = { 0 };
-    nmhdr.hwndFrom = m_hWnd;
-    nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
-    nmhdr.code     = NM_CLICK;
-    SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
-
-    ResetFaytTimer();
-    Invalidate();
-}
-
-void CustomListControl::FaytPrev()
-{
-    if (m_faytMatches.empty()) return;
-
-    m_faytMatchIndex = (m_faytMatchIndex - 1 + (int)m_faytMatches.size()) % (int)m_faytMatches.size();
-    int matchedRow = m_faytMatches[m_faytMatchIndex];
-    SetSelectedIndex(matchedRow);
-    EnsureVisible(matchedRow);
-
-    NMHDR nmhdr = { 0 };
-    nmhdr.hwndFrom = m_hWnd;
-    nmhdr.idFrom   = (UINT_PTR)GetWindowLongPtrW(m_hWnd, GWLP_ID);
-    nmhdr.code     = NM_CLICK;
-    SendMessageW(GetParent(m_hWnd), WM_NOTIFY, nmhdr.idFrom, (LPARAM)&nmhdr);
-
-    ResetFaytTimer();
-    Invalidate();
-}
-
-void CustomListControl::CloseFayt()
-{
-    if (!m_bFaytActive) return;
-    m_bFaytActive = false;
-    m_faytQuery.clear();
-    m_faytMatches.clear();
-    m_faytMatchIndex = -1;
-    m_faytHoverBtn = 0;
-    KillTimer(m_hWnd, TIMER_FAYT_TIMEOUT_ID);
-    UpdateScrollbars();
-    Invalidate();
-}
-
-void CustomListControl::ResetFaytTimer()
-{
-    SetTimer(m_hWnd, TIMER_FAYT_TIMEOUT_ID, 5000, NULL);
-}
-
-
-

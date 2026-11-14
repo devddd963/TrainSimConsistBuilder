@@ -34,7 +34,8 @@ void ShowSmsStreamMutatorDialog(
     const std::vector<std::wstring>& initialEngineSmsFiles = {},
     const std::vector<std::wstring>& initialWagonSmsFiles = {},
     const std::vector<SmsCategorizedTargetInput>& initialEngineTargetsWithUsage = {},
-    const std::vector<SmsCategorizedTargetInput>& initialWagonTargetsWithUsage = {}
+    const std::vector<SmsCategorizedTargetInput>& initialWagonTargetsWithUsage = {},
+    const std::wstring& initialFocusedSms = L""
 );
 
 bool SmsStreamMutatorDlg_IsOpen();

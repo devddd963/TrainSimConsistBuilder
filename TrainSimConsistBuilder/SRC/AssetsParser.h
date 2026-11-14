@@ -13,6 +13,7 @@ struct StockItem {
     std::wstring szExtension;     // ".eng" or ".wag"
     std::wstring szDetails;       // Category specific details
     uint64_t     lastWriteTime = 0; // NTFS file write time for incremental fast sync
+    std::wstring szStatus = L"Healthy"; // Healthy, Corrupted Stock, Corrupted Shape, Missing Shape
 };
 
 extern std::vector<StockItem> g_StockCache;

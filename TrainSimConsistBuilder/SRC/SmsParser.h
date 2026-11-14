@@ -141,6 +141,8 @@ struct StreamPresetCard {
     std::wstring category = L"Custom";
     bool isCollapsed = false;
     std::vector<StreamPresetItem> streams;
+    std::wstring filePath;
+    std::wstring relativePath;
 };
 
 struct SmsScalabilityGroup {

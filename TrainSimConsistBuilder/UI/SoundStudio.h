@@ -72,6 +72,7 @@ struct RSSUnitSoundInfo {
     std::wstring fullPath;
     bool fileFound = true;
     bool isExpanded = false;
+    bool isSelected = false;
 
     std::vector<RSSSoundEntry> wagonSounds;
     std::vector<RSSSoundEntry> engineSounds;
@@ -96,6 +97,7 @@ struct RSSUnitSoundInfo {
     bool hasInsideBlock = false;
     bool isModified = false;
     StockFileEncoding originalEncoding = StockFileEncoding::Utf16LeBom;
+    FILETIME lastFileWriteTime = { 0, 0 };
 
     bool operator==(const RSSUnitSoundInfo& o) const {
         return wagonSounds == o.wagonSounds &&
@@ -149,6 +151,8 @@ bool SoundStudio_UpdateUnitSoundInStockFile(
     IncludeSoundAction defaultIncAction = IncludeSoundAction::PromptUser,
     IncludeSoundAction* pOutChosenAction = nullptr,
     bool* pOutApplyToAll = nullptr);
+void SoundStudio_ReloadConsistSoundData(HWND hWnd);
+void SoundStudio_ReloadSmsIfMatches(HWND hWnd, const std::wstring& mutatedFilePath);
 
 // Backward-compatibility aliases
 inline HWND CreateRollingStockStudio(HWND hParent, HINSTANCE hInstance, int x, int y, int w, int h, int id) { return CreateSoundStudio(hParent, hInstance, x, y, w, h, id); }

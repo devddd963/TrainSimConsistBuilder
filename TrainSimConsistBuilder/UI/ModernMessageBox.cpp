@@ -1,4 +1,5 @@
 #include "ModernMessageBox.h"
+#include "UITheme.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <vector>
@@ -278,26 +279,7 @@ static LRESULT CALLBACK ModernMsgBoxWndProc(HWND hWnd, UINT uMsg, WPARAM wParam,
             int chkY = pState->rcCheckbox.top + (pState->rcCheckbox.bottom - pState->rcCheckbox.top - 18) / 2;
             RECT rcBox = { pState->rcCheckbox.left, chkY, pState->rcCheckbox.left + 18, chkY + 18 };
 
-            COLORREF chkBg = pState->isChecked ? RGB(0, 120, 215) : (pState->isCheckboxHovered ? RGB(48, 48, 54) : RGB(32, 32, 36));
-            COLORREF chkBorder = pState->isChecked ? RGB(0, 140, 240) : (pState->isCheckboxHovered ? RGB(110, 110, 120) : RGB(70, 70, 75));
-
-            HBRUSH hbrChk = CreateSolidBrush(chkBg);
-            HPEN hpChk = CreatePen(PS_SOLID, 1, chkBorder);
-            HGDIOBJ oB = SelectObject(hMemDC, hbrChk);
-            HGDIOBJ oP = SelectObject(hMemDC, hpChk);
-            RoundRect(hMemDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
-            SelectObject(hMemDC, oB);
-            SelectObject(hMemDC, oP);
-            DeleteObject(hbrChk);
-            DeleteObject(hpChk);
-
-            if (pState->isChecked)
-            {
-                HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontText);
-                SetTextColor(hMemDC, RGB(255, 255, 255));
-                DrawTextW(hMemDC, L"✓", -1, &rcBox, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                SelectObject(hMemDC, hOldF);
-            }
+            UITheme::DrawCheckbox(hMemDC, rcBox, pState->isChecked, pState->isCheckboxHovered, false);
 
             // Checkbox Label
             if (pState->hFontText)

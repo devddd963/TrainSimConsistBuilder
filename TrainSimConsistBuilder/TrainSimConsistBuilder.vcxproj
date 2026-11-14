@@ -179,6 +179,7 @@
     <ClInclude Include="SRC\TrainSimConsistBuilder.h" />
     <ClInclude Include="UI\NavToolbar.h" />
     <ClInclude Include="UI\CommandBar.h" />
+    <ClInclude Include="UI\UIScaleEngine.h" />
     <ClInclude Include="SRC\ConsistReader.h" />
     <ClInclude Include="UI\CustomListControl.h" />
     <ClInclude Include="UI\FluentDragGhost.h" />
@@ -195,6 +196,7 @@
     <ClInclude Include="SRC\ConsistWriter.h" />
     <ClInclude Include="UI\ModernMessageBox.h" />
     <ClInclude Include="UI\VisualConsistView.h" />
+    <ClInclude Include="UI\ClassicConsistView.h" />
     <ClInclude Include="UI\ModernContextMenu.h" />
     <ClInclude Include="SRC\ActivityConsistReader.h" />
     <ClInclude Include="SRC\ActivityConsistWriter.h" />
@@ -204,6 +206,8 @@
     <ClInclude Include="SRC\BatchConsistGenerator.h" />
     <ClInclude Include="UI\PoolManagerDlg.h" />
     <ClInclude Include="UI\BatchConsistGeneratorDlg.h" />
+    <ClInclude Include="UI\SetConsistParametersDlg.h" />
+    <ClInclude Include="UI\ModernEditControl.h" />
     <ClInclude Include="SRC\PoolMutator.h" />
     <ClInclude Include="UI\PoolMutatorDlg.h" />
     <ClInclude Include="UI\CustomTitleBar.h" />
@@ -241,6 +245,7 @@
     <ClCompile Include="SRC\SmsParser.cpp" />
     <ClCompile Include="UI\NavToolbar.cpp" />
     <ClCompile Include="UI\CommandBar.cpp" />
+    <ClCompile Include="UI\UIScaleEngine.cpp" />
     <ClCompile Include="SRC\ConsistReader.cpp" />
     <ClCompile Include="UI\CustomListControl.cpp" />
     <ClCompile Include="UI\FluentDragGhost.cpp" />
@@ -256,6 +261,7 @@
     <ClCompile Include="SRC\ConsistWriter.cpp" />
     <ClCompile Include="UI\ModernMessageBox.cpp" />
     <ClCompile Include="UI\VisualConsistView.cpp" />
+    <ClCompile Include="UI\ClassicConsistView.cpp" />
     <ClCompile Include="UI\UnitPreviewCard.cpp" />
     <ClCompile Include="UI\ModernContextMenu.cpp" />
     <ClCompile Include="SRC\ActivityConsistReader.cpp" />
@@ -266,6 +272,8 @@
     <ClCompile Include="SRC\BatchConsistGenerator.cpp" />
     <ClCompile Include="UI\PoolManagerDlg.cpp" />
     <ClCompile Include="UI\BatchConsistGeneratorDlg.cpp" />
+    <ClCompile Include="UI\SetConsistParametersDlg.cpp" />
+    <ClCompile Include="UI\ModernEditControl.cpp" />
     <ClCompile Include="SRC\PoolMutator.cpp" />
     <ClCompile Include="UI\PoolMutatorDlg.cpp" />
     <ClCompile Include="UI\CustomTitleBar.cpp" />

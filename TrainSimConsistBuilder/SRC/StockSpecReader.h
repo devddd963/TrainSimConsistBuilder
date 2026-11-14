@@ -127,6 +127,7 @@ namespace StockSpecReader
         std::vector<std::wstring> missingIncludes;
         bool isValid = false;
         bool fileExistsOnDisk = true;
+        bool isCorruptedStock = false;
 
         // Helper calculations
         float GetCouplerZeroLengthM() const
@@ -157,6 +158,11 @@ namespace StockSpecReader
     StockSpec ReadFullSpec(
         const std::wstring& filePath,
         const std::wstring& trainsetBasePath = L"");
+
+    // Check if stock file (.eng or .wag) is corrupted on disk
+    bool IsStockCorrupted(const std::wstring& stockFilePath);
+    void ClearStockCache();
+    void ClearStockCacheForPath(const std::wstring& stockFilePath);
 
     // Unit parsing helpers
     float ParseDistanceUnit(const std::string& valStr, float defaultM = 0.0f);

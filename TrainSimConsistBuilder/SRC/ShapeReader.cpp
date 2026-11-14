@@ -12,6 +12,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <unordered_set>
+#include <mutex>
 
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -1429,7 +1431,142 @@ static bool ParseBinaryShape(const uint8_t* pData, size_t dataLen, ParsedShape& 
 // =========================================================================
 // Main Shape CPU Parsing Implementation (Thread-Safe)
 // =========================================================================
-bool ShapeReader::ParseShapeFile(
+
+static std::mutex s_shapeCacheMutex;
+static std::unordered_set<std::wstring> s_corruptedShapeCache;
+static std::unordered_set<std::wstring> s_validShapeCache;
+
+bool ShapeReader::IsShapeCorrupted(const std::wstring& shapeFilePath) {
+    if (shapeFilePath.empty()) return false;
+
+    std::wstring lowerPath = shapeFilePath;
+    for (wchar_t& c : lowerPath) c = towlower(c);
+
+    {
+        std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
+        if (s_corruptedShapeCache.count(lowerPath) > 0) return true;
+        if (s_validShapeCache.count(lowerPath) > 0) return false;
+    }
+
+    HANDLE hFile = CreateFileW(
+        shapeFilePath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_SEQUENTIAL_SCAN,
+        NULL
+    );
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false; // Not corrupted, simply not found on disk
+    }
+
+    LARGE_INTEGER liSize;
+    if (!GetFileSizeEx(hFile, &liSize)) {
+        CloseHandle(hFile);
+        return false;
+    }
+
+    if (liSize.QuadPart < 16) {
+        CloseHandle(hFile);
+        std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
+        s_corruptedShapeCache.insert(lowerPath);
+        return true;
+    }
+
+    uint8_t header[64] = { 0 };
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, header, sizeof(header), &bytesRead, NULL) || bytesRead < 16) {
+        CloseHandle(hFile);
+        std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
+        s_corruptedShapeCache.insert(lowerPath);
+        return true;
+    }
+    CloseHandle(hFile);
+
+    bool isUtf16 = (bytesRead >= 2 && header[0] == 0xFF && header[1] == 0xFE);
+    bool isCompressed = false;
+    bool isSimisa = false;
+
+    if (isUtf16) {
+        const wchar_t* pw = (const wchar_t*)(header + 2);
+        size_t wlen = (bytesRead - 2) / sizeof(wchar_t);
+        if (wlen >= 8 && std::wcsncmp(pw, L"SIMISA@F", 8) == 0) {
+            isCompressed = true;
+            isSimisa = true;
+        } else if (wlen >= 8 && std::wcsncmp(pw, L"SIMISA@@", 8) == 0) {
+            isSimisa = true;
+        }
+    } else {
+        if (bytesRead >= 8 && std::memcmp(header, "SIMISA@F", 8) == 0) {
+            isCompressed = true;
+            isSimisa = true;
+        } else if (bytesRead >= 8 && std::memcmp(header, "SIMISA@@", 8) == 0) {
+            isSimisa = true;
+        }
+    }
+
+    if (isCompressed) {
+        bool foundZlib = false;
+        for (size_t i = (isUtf16 ? 16u : 8u); i + 1 < (size_t)bytesRead; ++i) {
+            uint8_t cmf = header[i];
+            uint8_t flg = header[i + 1];
+            // Universal RFC 1950 check:
+            // 1. Compression method must be 8 (deflate)
+            // 2. Window size info <= 7 (32K window max)
+            // 3. (CMF * 256 + FLG) % 31 == 0 (header checksum)
+            if ((cmf & 0x0F) == 8 && (cmf >> 4) <= 7 && (((uint32_t)cmf * 256 + (uint32_t)flg) % 31 == 0)) {
+                foundZlib = true;
+                break;
+            }
+        }
+        if (!foundZlib) {
+            std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
+            s_corruptedShapeCache.insert(lowerPath);
+            return true;
+        }
+    } else if (!isSimisa) {
+        std::string rawStr((const char*)header, bytesRead);
+        std::string lowerStr = rawStr;
+        for (char& c : lowerStr) c = (char)tolower((unsigned char)c);
+        if (lowerStr.find("shape") == std::string::npos) {
+            std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
+            s_corruptedShapeCache.insert(lowerPath);
+            return true;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
+        s_validShapeCache.insert(lowerPath);
+    }
+    return false;
+}
+
+void ShapeReader::ClearShapeCacheForPath(const std::wstring& shapeFilePath) {
+    if (shapeFilePath.empty()) return;
+    std::wstring lower = shapeFilePath;
+    for (wchar_t& c : lower) c = towlower(c);
+    std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
+    s_corruptedShapeCache.erase(lower);
+    s_validShapeCache.erase(lower);
+}
+
+void ShapeReader::ClearAllShapeCaches() {
+    std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
+    s_corruptedShapeCache.clear();
+    s_validShapeCache.clear();
+}
+
+static void MarkShapeCorrupted(const std::wstring& shapeFilePath) {
+    std::wstring lower = shapeFilePath;
+    for (wchar_t& c : lower) c = towlower(c);
+    std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
+    s_validShapeCache.erase(lower);
+    s_corruptedShapeCache.insert(lower);
+}
+
+static bool ParseShapeFileInternal(
     const std::wstring& shapeFilePath,
     ParsedShape& outShape,
     const std::atomic<bool>* pCancelToken
@@ -1512,7 +1649,9 @@ bool ShapeReader::ParseShapeFile(
     if (isCompressed) {
         size_t zlibStart = (isUtf16 ? 34 : 16);
         for (size_t i = (isUtf16 ? 16u : 8u); i < (isUtf16 ? 64u : 32u) && i + 1 < (size_t)fileSize; ++i) {
-            if (pRawBytes[i] == 0x78 && (pRawBytes[i + 1] == 0x9C || pRawBytes[i + 1] == 0xDA || pRawBytes[i + 1] == 0x01 || pRawBytes[i + 1] == 0x5E)) {
+            uint8_t cmf = pRawBytes[i];
+            uint8_t flg = pRawBytes[i + 1];
+            if ((cmf & 0x0F) == 8 && (cmf >> 4) <= 7 && (((uint32_t)cmf * 256 + (uint32_t)flg) % 31 == 0)) {
                 zlibStart = i;
                 break;
             }
@@ -2462,6 +2601,43 @@ bool ShapeReader::ParseShapeFile(
         outShape.boundsMin.x, outShape.boundsMin.y, outShape.boundsMin.z,
         outShape.boundsMax.x, outShape.boundsMax.y, outShape.boundsMax.z,
         outShape.center.x, outShape.center.y, outShape.center.z, outShape.radius);
+    return true;
+}
+
+static bool SafeExecuteParseShapeInternal(
+    const std::wstring& shapeFilePath,
+    ParsedShape& outShape,
+    const std::atomic<bool>* pCancelToken
+) {
+    __try {
+        return ParseShapeFileInternal(shapeFilePath, outShape, pCancelToken);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool ShapeReader::ParseShapeFile(
+    const std::wstring& shapeFilePath,
+    ParsedShape& outShape,
+    const std::atomic<bool>* pCancelToken
+) {
+    if (pCancelToken && *pCancelToken) return false;
+    outShape.isValid = false;
+    outShape.isCorrupted = false;
+
+    if (IsShapeCorrupted(shapeFilePath)) {
+        outShape.isCorrupted = true;
+        return false;
+    }
+
+    bool ok = SafeExecuteParseShapeInternal(shapeFilePath, outShape, pCancelToken);
+    if (!ok || !outShape.isValid) {
+        MarkShapeCorrupted(shapeFilePath);
+        outShape.isValid = false;
+        outShape.isCorrupted = true;
+        return false;
+    }
     return true;
 }
 

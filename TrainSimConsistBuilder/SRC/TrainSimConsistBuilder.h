@@ -50,6 +50,10 @@
 #define IDC_ED_TRAINCFGID   1017
 #define IDC_ED_FILENAME     1018
 #define IDC_LBL_FILENAME    1019
+#define IDC_LBL_CFGID       1020
+#define IDC_LBL_TRAINNAME   1021
+#define IDC_LBL_MAXVELOCITY 1022
+#define IDC_LBL_PERFFACTOR  1023
 #define IDC_ROUTETREE       1020
 #define IDC_ED_SECTION_METRICS 1025
 #define IDC_ED_METRIC_MASS     1026
@@ -86,6 +90,7 @@ void App_ShowClipboardContents(HWND hWnd);
 std::wstring        GetAppConsistsDirectory();
 void                TriggerAppConsistsRescan(HWND hWnd = NULL);
 HWND                GetAppMainWindow();
+HWND                GetSoundStudioWindow();
 void                App_NotifySoundLibraryChanged(const std::wstring& newSmsPath = L"");
 std::vector<PoolMutator::BrokenConsistInfo> ScanActiveTargetConsistsForBrokenUnits(
     const std::vector<std::wstring>& targetConsistPaths,

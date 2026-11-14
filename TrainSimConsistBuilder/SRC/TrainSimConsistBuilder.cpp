@@ -10,6 +10,7 @@ ActivePane g_ActivePane = PANE_CONSIST;
 #include "TrainSimConsistBuilder.h"
 #include "../UI/UITheme.h"
 #include "../UI/CustomTreeView.h"
+#include "../UI/ModernEditControl.h"
 #include <vector>
 #include <string>
 #include <sstream>
@@ -21,8 +22,10 @@ ActivePane g_ActivePane = PANE_CONSIST;
 #include "TrainConfig.h"
 #include "../../TSCBResources/TSCBResources.h"
 #include "../../Common/Version.h"
+#include <gdiplus.h>
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "gdiplus.lib")
 
 // Global Variables
 HINSTANCE hInst;
@@ -38,10 +41,16 @@ HWND g_hAssetList = NULL;
 HWND g_hEditorPane = NULL;
 HWND g_hWorkspaceHeader = NULL;
 HWND g_hMainWnd = NULL;
+extern HWND g_hRollingStockStudio;
 
 HWND GetAppMainWindow()
 {
     return g_hMainWnd;
+}
+
+HWND GetSoundStudioWindow()
+{
+    return g_hRollingStockStudio;
 }
 
 HFONT hUIFont = NULL;
@@ -130,12 +139,15 @@ static HANDLE g_hSoundScanThread = NULL;
 #include "../UI/StockInfoDlg.h"
 #include "../UI/3D-VisualStudio.h"
 #include "../UI/UnitPreviewCard.h"
+#include "../UI/ClassicConsistView.h"
+#include "../UI/SetConsistParametersDlg.h"
 #include "../UI/TrainConfigStudioDlg.h"
 #include "../UI/SoundStudio.h"
 #include "../UI/SmsPoolManagerDlg.h"
 #include "../UI/BatchSoundMutatorDlg.h"
 #include "../UI/SmsStreamMutatorDlg.h"
 #include "StockSpecReader.h"
+#include "ShapeReader.h"
 #include "SmsParser.h"
 
 HWND g_hRollingStockStudio = NULL;
@@ -204,6 +216,51 @@ HWND g_hEditMetricPower   = NULL;
 HWND g_hLabelMetricRatio  = NULL;
 HWND g_hEditMetricRatio   = NULL;
 
+// Consist Editor Workspace Dual Views: Studio Grid vs Classic TSRE
+enum class ConsistWorkspaceViewMode {
+    StudioGrid = 0,
+    ClassicView = 1
+};
+static ConsistWorkspaceViewMode g_ConsistViewMode = ConsistWorkspaceViewMode::StudioGrid;
+static bool g_bConsistViewLocked = false;
+HWND g_hClassicConsistView = NULL;
+static void ConfigureEditorUnitListColumns(bool isClassicView)
+{
+    g_EditorUnitList.ClearColumns();
+    if (isClassicView)
+    {
+        // Classic View: 4 columns (No. after checkbox and before Name, Name, Orientation, Status)
+        g_EditorUnitList.AddColumn(L"No.",          48,  1);
+        g_EditorUnitList.AddColumn(L"Name",        220,  0);
+        g_EditorUnitList.AddColumn(L"Orientation", 100,  0);
+        g_EditorUnitList.AddColumn(L"Status",      100,  0);
+    }
+    else
+    {
+        // Studio Grid: full 6-column tabular view
+        g_EditorUnitList.AddColumn(L"No.",              48,  1);
+        g_EditorUnitList.AddColumn(L"Name",             200, 0);
+        g_EditorUnitList.AddColumn(L"Type",             80,  0);
+        g_EditorUnitList.AddColumn(L"Status",           90,  0);
+        g_EditorUnitList.AddColumn(L"Orientation",      90,  0);
+        g_EditorUnitList.AddColumn(L"Parent Directory", 200, 0);
+    }
+}
+
+static int GetUnitIndexFromListRow(int row)
+{
+    if (row < 0 || row >= g_EditorUnitList.GetItemCount()) return -1;
+    std::wstring strNo = g_EditorUnitList.GetCellText(row, 0);
+    return _wtoi(strNo.c_str()) - 1;
+}
+
+static std::wstring GetUnitNoStrFromListRow(int row)
+{
+    if (row < 0 || row >= g_EditorUnitList.GetItemCount()) return L"";
+    return g_EditorUnitList.GetCellText(row, 0);
+}
+
+
 
 // Track which edit box is focused for accent-line rendering
 HWND g_hFocusedEdit = NULL;
@@ -247,6 +304,7 @@ std::wstring g_szStockSearchQuery = L"";
 std::wstring g_szBasePath = L"";
 std::vector<ConsistReader::UnitInfo> g_LoadedConsistUnits;
 std::wstring g_szCurrentConsistFile;
+std::wstring g_szMainConsistFile;
 
 void App_NotifySoundLibraryChanged(const std::wstring& newSmsPath)
 {
@@ -264,7 +322,9 @@ enum class UnitHealthStatus
 {
     Healthy,
     MissingStock,
-    MissingShape
+    CorruptedStock,
+    MissingShape,
+    CorruptedShape
 };
 
 static UnitHealthStatus GetUnitHealthOnDisk(const ConsistReader::UnitInfo& unit, const std::wstring& basePath)
@@ -290,10 +350,23 @@ static UnitHealthStatus GetUnitHealthOnDisk(const ConsistReader::UnitInfo& unit,
         unitPath = altPath;
     }
 
+    if (StockSpecReader::IsStockCorrupted(unitPath))
+    {
+        return UnitHealthStatus::CorruptedStock;
+    }
+
     StockSpecReader::StockSpec spec = StockSpecReader::ReadFullSpec(unitPath, basePath);
+    if (spec.isCorruptedStock)
+    {
+        return UnitHealthStatus::CorruptedStock;
+    }
     if (!spec.mainShapeFile.empty() && !spec.shapeExistsOnDisk)
     {
         return UnitHealthStatus::MissingShape;
+    }
+    if (spec.shapeExistsOnDisk && !spec.fullShapePath.empty() && ShapeReader::IsShapeCorrupted(spec.fullShapePath))
+    {
+        return UnitHealthStatus::CorruptedShape;
     }
 
     return UnitHealthStatus::Healthy;
@@ -302,9 +375,59 @@ static UnitHealthStatus GetUnitHealthOnDisk(const ConsistReader::UnitInfo& unit,
 static bool IsUnitBrokenOnDisk(const ConsistReader::UnitInfo& unit, const std::wstring& basePath, bool checkShape = true)
 {
     UnitHealthStatus h = GetUnitHealthOnDisk(unit, basePath);
-    if (h == UnitHealthStatus::MissingStock) return true;
-    if (checkShape && h == UnitHealthStatus::MissingShape) return true;
+    if (h == UnitHealthStatus::MissingStock || h == UnitHealthStatus::CorruptedStock) return true;
+    if (checkShape && (h == UnitHealthStatus::MissingShape || h == UnitHealthStatus::CorruptedShape)) return true;
     return false;
+}
+
+static std::wstring EvaluateStockHealth(StockItem& item, const std::wstring& basePath)
+{
+    if (basePath.empty()) return L"Healthy";
+    std::wstring stockPath = basePath;
+    if (!stockPath.empty() && stockPath.back() != L'\\') stockPath += L'\\';
+    stockPath += L"TRAINS\\TRAINSET\\" + item.szFolder + L"\\" + item.szFileName + item.szExtension;
+
+    DWORD attr = GetFileAttributesW(stockPath.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        std::wstring altExt = (item.szExtension == L".eng") ? L".wag" : L".eng";
+        std::wstring altPath = basePath;
+        if (!altPath.empty() && altPath.back() != L'\\') altPath += L'\\';
+        altPath += L"TRAINS\\TRAINSET\\" + item.szFolder + L"\\" + item.szFileName + altExt;
+        DWORD altAttr = GetFileAttributesW(altPath.c_str());
+        if (altAttr == INVALID_FILE_ATTRIBUTES || (altAttr & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            item.szStatus = L"Missing Stock";
+            return item.szStatus;
+        }
+        stockPath = altPath;
+    }
+
+    if (StockSpecReader::IsStockCorrupted(stockPath))
+    {
+        item.szStatus = L"Corrupted Stock";
+        return item.szStatus;
+    }
+
+    StockSpecReader::StockSpec spec = StockSpecReader::ReadFullSpec(stockPath, basePath);
+    if (spec.isCorruptedStock)
+    {
+        item.szStatus = L"Corrupted Stock";
+        return item.szStatus;
+    }
+    if (!spec.mainShapeFile.empty() && !spec.shapeExistsOnDisk)
+    {
+        item.szStatus = L"Missing Shape";
+        return item.szStatus;
+    }
+    if (spec.shapeExistsOnDisk && !spec.fullShapePath.empty() && ShapeReader::IsShapeCorrupted(spec.fullShapePath))
+    {
+        item.szStatus = L"Corrupted Shape";
+        return item.szStatus;
+    }
+
+    item.szStatus = L"Healthy";
+    return item.szStatus;
 }
 
 static std::wstring BuildFullStockPath(const std::wstring& basePath, const std::wstring& folder, const std::wstring& fileName, const std::wstring& ext = L"")
@@ -351,7 +474,9 @@ static std::wstring EvaluateAndUpdateConsistStatus(
     bool isSavedToDisk = false)
 {
     bool hasMissingStock = false;
+    bool hasCorruptedStock = false;
     bool hasMissingShape = false;
+    bool hasCorruptedShape = false;
     for (const auto& u : units)
     {
         UnitHealthStatus h = GetUnitHealthOnDisk(u, g_szBasePath);
@@ -360,13 +485,21 @@ static std::wstring EvaluateAndUpdateConsistStatus(
             hasMissingStock = true;
             break;
         }
+        else if (h == UnitHealthStatus::CorruptedStock)
+        {
+            hasCorruptedStock = true;
+        }
+        else if (h == UnitHealthStatus::CorruptedShape)
+        {
+            hasCorruptedShape = true;
+        }
         else if (h == UnitHealthStatus::MissingShape)
         {
             hasMissingShape = true;
         }
     }
 
-    bool isBroken = (hasMissingStock || hasMissingShape);
+    bool isBroken = (hasMissingStock || hasCorruptedStock || hasMissingShape || hasCorruptedShape);
 
     if (isSavedToDisk)
     {
@@ -389,8 +522,12 @@ static std::wstring EvaluateAndUpdateConsistStatus(
 
     bool isFixed = (!isBroken && !consistKey.empty() && g_SessionFixedConsists.count(consistKey) > 0);
     if (isFixed) return L"Fixed";
-    if (hasMissingStock || (!consistKey.empty() && g_InitiallyBrokenConsists.count(consistKey) > 0 && !isSavedToDisk && g_SessionFixedConsists.count(consistKey) == 0))
+    if (hasMissingStock)
         return L"Missing Stock";
+    if (hasCorruptedStock)
+        return L"Corrupted Stock";
+    if (hasCorruptedShape)
+        return L"Corrupted Shape";
     if (hasMissingShape)
         return L"Missing Shape";
 
@@ -424,6 +561,28 @@ enum SplitterType {
     SPLITTER_VERTICAL_UNIT_PREVIEW_RIGHT = 7 // Splitter 7: Right border of 3D Live Unit Preview (IDC_SIZEWE)
 };
 
+static int GetDynamicLeftDeckMinWidth(bool useDesiredWidth = false)
+{
+    int consistFit = useDesiredWidth ? g_ConsistList.GetDesiredWidth() : g_ConsistList.GetMinimumHeaderFitWidth();
+    if (g_ActiveTab == 1)
+    {
+        consistFit += (g_wCategorySplit + 9);
+    }
+
+    int assetFit = 0;
+    if (g_StockDeckTab == STOCK_DECK_SOUND_SMS)
+    {
+        assetFit = useDesiredWidth ? g_SoundList.GetDesiredWidth() : g_SoundList.GetMinimumHeaderFitWidth();
+    }
+    else
+    {
+        int listFit = useDesiredWidth ? g_AssetList.GetDesiredWidth() : g_AssetList.GetMinimumHeaderFitWidth();
+        assetFit = (g_wCategorySplit + 9) + listFit;
+    }
+
+    return (std::max)(consistFit, assetFit);
+}
+
 static LRESULT CALLBACK SplitterWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     SplitterType type = (SplitterType)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
@@ -452,6 +611,7 @@ static LRESULT CALLBACK SplitterWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
         SetCapture(hWnd);
         s_isDragging = true;
         s_hDragWnd = hWnd;
+        InvalidateRect(hWnd, NULL, TRUE);
         GetCursorPos(&s_ptDragStart);
         if (type == SPLITTER_VERTICAL_MAIN)
         {
@@ -506,7 +666,9 @@ static LRESULT CALLBACK SplitterWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
             {
                 int dx = ptNow.x - s_ptDragStart.x;
                 g_wConsist = s_initialVal + dx;
-                if (g_wConsist < 200) g_wConsist = 200;
+                int minW = (std::min)(width - 200, GetDynamicLeftDeckMinWidth(false));
+                if (minW < 200) minW = 200;
+                if (g_wConsist < minW) g_wConsist = minW;
                 if (g_wConsist > width - 200) g_wConsist = width - 200;
                 if (g_wCategorySplit > g_wConsist - 80) g_wCategorySplit = g_wConsist - 80;
                 SetCursor(LoadCursor(NULL, IDC_SIZEWE));
@@ -604,6 +766,7 @@ static LRESULT CALLBACK SplitterWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
             s_isDragging = false;
             s_hDragWnd = NULL;
             ReleaseCapture();
+            InvalidateRect(hWnd, NULL, TRUE);
         }
         return 0;
     }
@@ -618,13 +781,17 @@ static LRESULT CALLBACK SplitterWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
         RECT rc;
         GetClientRect(hWnd, &rc);
 
-        // Dark background matching fluent theme
-        HBRUSH hbrBg = CreateSolidBrush(RGB(32, 32, 32));
+        bool isPressed = (s_isDragging && s_hDragWnd == hWnd);
+
+        // Active blue feedback when dragging/pressed; dark background matching fluent theme when idle
+        COLORREF clrBg = isPressed ? RGB(14, 52, 98) : RGB(32, 32, 32);
+        COLORREF clrLine = isPressed ? RGB(0, 150, 255) : RGB(65, 65, 65);
+
+        HBRUSH hbrBg = CreateSolidBrush(clrBg);
         FillRect(hdc, &rc, hbrBg);
         DeleteObject(hbrBg);
 
         // 1px border lines
-        COLORREF clrLine = RGB(65, 65, 65);
         HPEN hPen = CreatePen(PS_SOLID, 1, clrLine);
         HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
 
@@ -711,6 +878,7 @@ void SwitchActiveConsistTab(HWND hWnd, int newSel)
 
         if (g_ActiveTab == 2) // Sound Editing Tab
         {
+            if (g_hClassicConsistView) ShowWindow(g_hClassicConsistView, SW_HIDE);
             if (g_hRollingStockStudio)
             {
                 RollingStockStudio_SetVisible(g_hRollingStockStudio, true);
@@ -798,6 +966,8 @@ void SwitchActiveConsistTab(HWND hWnd, int newSel)
         }
         else if (g_ActiveTab == 1) // Activity Consists Tab
         {
+            if (g_hClassicConsistView) ShowWindow(g_hClassicConsistView, SW_HIDE);
+            if (g_hWorkspaceHeader) ShowWindow(g_hWorkspaceHeader, SW_SHOW);
             g_StockDeckTab = STOCK_DECK_ROLLING_STOCK;
             if (g_hRollingStockStudio)
             {
@@ -818,12 +988,13 @@ void SwitchActiveConsistTab(HWND hWnd, int newSel)
         }
         else // Main Consists Tab (Tab 0)
         {
+            if (g_hWorkspaceHeader) ShowWindow(g_hWorkspaceHeader, SW_SHOW);
             g_StockDeckTab = STOCK_DECK_ROLLING_STOCK;
             if (g_hRollingStockStudio)
             {
                 RollingStockStudio_SetVisible(g_hRollingStockStudio, false);
             }
-            std::wstring curFile = g_szCurrentConsistFile;
+            std::wstring curFile = g_szMainConsistFile;
             ResetConsistEditorWorkspace(hWnd);
             g_ConsistList.Clear();
             g_ConsistList.ClearColumns();
@@ -840,7 +1011,8 @@ void SwitchActiveConsistTab(HWND hWnd, int newSel)
             if (g_hEditMaxVelocity) SendMessage(g_hEditMaxVelocity, EM_SETREADONLY, FALSE, 0);
             if (g_hEditPerfFactor)  SendMessage(g_hEditPerfFactor,  EM_SETREADONLY, FALSE, 0);
 
-            if (!curFile.empty())
+            // Only reload if curFile is a valid standalone .con file
+            if (!curFile.empty() && curFile.find(L"ACTIVITY:") == std::wstring::npos && curFile.find(L"#") == std::wstring::npos)
             {
                 LoadAndDisplayConsist(hWnd, curFile);
             }
@@ -891,6 +1063,54 @@ struct ActivityUndoState {
 };
 static std::unordered_map<int, ActivityUndoState> g_ActivityUndoStacks;
 static std::unordered_map<std::wstring, ConsistSessionState> g_ConsistSessions;
+
+struct CopiedConsistParameters {
+    bool hasSpeed = false;
+    double speed = 0.0;
+    bool hasPerf = false;
+    double perf = 0.0;
+};
+static CopiedConsistParameters g_CopiedConsistParams;
+
+static ULONG_PTR s_gdiplusToken = 0;
+static int s_gdiplusRefCount = 0;
+
+static void EnsureGdiPlus()
+{
+    if (s_gdiplusRefCount == 0)
+    {
+        Gdiplus::GdiplusStartupInput gsi;
+        Gdiplus::GdiplusStartup(&s_gdiplusToken, &gsi, NULL);
+    }
+    s_gdiplusRefCount++;
+}
+
+static void ReleaseGdiPlus()
+{
+    s_gdiplusRefCount--;
+    if (s_gdiplusRefCount <= 0)
+    {
+        s_gdiplusRefCount = 0;
+        if (s_gdiplusToken)
+        {
+            Gdiplus::GdiplusShutdown(s_gdiplusToken);
+            s_gdiplusToken = 0;
+        }
+    }
+}
+
+static void AddRoundedRectPath(Gdiplus::GraphicsPath& path, Gdiplus::RectF rc, Gdiplus::REAL radius)
+{
+    Gdiplus::REAL d = radius * 2.0f;
+    if (d > rc.Width) d = rc.Width;
+    if (d > rc.Height) d = rc.Height;
+
+    path.AddArc(rc.X, rc.Y, d, d, 180.0f, 90.0f);
+    path.AddArc(rc.X + rc.Width - d, rc.Y, d, d, 270.0f, 90.0f);
+    path.AddArc(rc.X + rc.Width - d, rc.Y + rc.Height - d, d, d, 0.0f, 90.0f);
+    path.AddArc(rc.X, rc.Y + rc.Height - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+}
 
 
 
@@ -974,6 +1194,7 @@ extern "C" __declspec(dllexport) int TSCB_Run(HINSTANCE hInstance, LPWSTR lpCmdL
 
     DatabaseManager::Initialize();
     AppLogging::AppLogger::Initialize();
+    EnsureGdiPlus();
 
     // Register embedded font resources in process memory
     TSCB_LoadEmbeddedFonts();
@@ -1012,6 +1233,7 @@ extern "C" __declspec(dllexport) int TSCB_Run(HINSTANCE hInstance, LPWSTR lpCmdL
     if (g_hbrDarkBackground) DeleteObject(g_hbrDarkBackground);
 
     TSCB_UnloadEmbeddedFonts();
+    ReleaseGdiPlus();
     AppLogging::AppLogger::Shutdown();
     DatabaseManager::Shutdown();
 
@@ -1351,7 +1573,9 @@ struct ScannedConsist {
     FILETIME ftLastWriteTime = { 0 };
     bool isBroken = false;
     bool hasMissingStock = false;
+    bool hasCorruptedStock = false;
     bool hasMissingShape = false;
+    bool hasCorruptedShape = false;
 };
 
 static std::vector<ScannedConsist> g_ScannedConsistsCache;
@@ -1392,10 +1616,16 @@ static void PopulateConsistListFromCache()
             bool isFixedInSession = (!item.isBroken && g_SessionFixedConsists.count(item.szFileName) > 0);
             if (isFixedInSession)
                 statusStr = L"Fixed";
-            else if (item.hasMissingStock || (item.isBroken && !item.hasMissingShape))
+            else if (item.hasMissingStock)
                 statusStr = L"Missing Stock";
+            else if (item.hasCorruptedStock)
+                statusStr = L"Corrupted Stock";
+            else if (item.hasCorruptedShape)
+                statusStr = L"Corrupted Shape";
             else if (item.hasMissingShape)
                 statusStr = L"Missing Shape";
+            else if (item.isBroken)
+                statusStr = L"Missing Stock";
             else
                 statusStr = L"Healthy";
         }
@@ -1846,7 +2076,9 @@ DWORD WINAPI ConsistScannerThreadProc(LPVOID lpParam)
 
                 // Health check: verify all engines/wagons and shapes exist on disk
                 bool hasMissingStock = false;
+                bool hasCorruptedStock = false;
                 bool hasMissingShape = false;
+                bool hasCorruptedShape = false;
                 try
                 {
                     ConsistReader::ConsistData conData = ConsistReader::LoadConsist(fileFullPath);
@@ -1858,6 +2090,14 @@ DWORD WINAPI ConsistScannerThreadProc(LPVOID lpParam)
                             hasMissingStock = true;
                             break;
                         }
+                        else if (h == UnitHealthStatus::CorruptedStock)
+                        {
+                            hasCorruptedStock = true;
+                        }
+                        else if (h == UnitHealthStatus::CorruptedShape)
+                        {
+                            hasCorruptedShape = true;
+                        }
                         else if (h == UnitHealthStatus::MissingShape)
                         {
                             hasMissingShape = true;
@@ -1868,7 +2108,7 @@ DWORD WINAPI ConsistScannerThreadProc(LPVOID lpParam)
                 {
                     hasMissingStock = true;
                 }
-                bool isBroken = (hasMissingStock || hasMissingShape);
+                bool isBroken = (hasMissingStock || hasCorruptedStock || hasMissingShape || hasCorruptedShape);
 
                 ScannedConsist* pConsist = new ScannedConsist();
                 pConsist->szFileName = ffd.cFileName;
@@ -1878,7 +2118,9 @@ DWORD WINAPI ConsistScannerThreadProc(LPVOID lpParam)
                 pConsist->ftLastWriteTime = ffd.ftLastWriteTime;
                 pConsist->isBroken = isBroken;
                 pConsist->hasMissingStock = hasMissingStock;
+                pConsist->hasCorruptedStock = hasCorruptedStock;
                 pConsist->hasMissingShape = hasMissingShape;
+                pConsist->hasCorruptedShape = hasCorruptedShape;
                 if (isBroken)
                 {
                     g_InitiallyBrokenConsists.insert(ffd.cFileName);
@@ -1897,20 +2139,74 @@ DWORD WINAPI ConsistScannerThreadProc(LPVOID lpParam)
 
 static void ResetConsistEditorWorkspace(HWND hWnd)
 {
-    // Reset editor pane to placeholder state
-    if (g_hEditorPane)       ShowWindow(g_hEditorPane,       SW_SHOW);
-    if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg,  SW_HIDE);
-    if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,     SW_HIDE);
-    if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_HIDE);
-    if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_HIDE);
-    if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId,  SW_HIDE);
-    if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,   SW_HIDE);
-    if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_HIDE);
-    if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_HIDE);
-    if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
-    if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_HIDE);
-    if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_HIDE);
-    if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_HIDE);
+    // Permanent professional workspace: never hide with placeholder text
+    if (g_hEditorPane)       ShowWindow(g_hEditorPane,       SW_HIDE);
+
+    bool isClassic = (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView);
+    if (isClassic)
+    {
+        if (g_hClassicConsistView) ShowWindow(g_hClassicConsistView, SW_SHOW);
+        if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg,  SW_HIDE);
+        if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,     SW_HIDE);
+        if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_HIDE);
+        if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_HIDE);
+        if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId,  SW_HIDE);
+        if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,   SW_HIDE);
+        if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_HIDE);
+        if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_HIDE);
+        if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
+        if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_HIDE);
+        if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_HIDE);
+        if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_HIDE);
+    }
+    else
+    {
+        if (g_hClassicConsistView) ShowWindow(g_hClassicConsistView, SW_HIDE);
+        if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg,  SW_SHOW);
+        if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,     SW_SHOW);
+        if (g_ActiveTab == 0)
+        {
+            if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_SHOW);
+            if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_SHOW);
+            if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_SHOW);
+            if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_SHOW);
+            if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_SHOW);
+            if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_SHOW);
+            if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_SHOW);
+            if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_SHOW);
+        }
+        else
+        {
+            if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_HIDE);
+            if (g_hEditFileName)     ShowWindow(g_hEditFileName,    SW_HIDE);
+            if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_HIDE);
+            if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_HIDE);
+            if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
+            if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_HIDE);
+            if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_HIDE);
+            if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_HIDE);
+        }
+        if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId,  SW_SHOW);
+        if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,   SW_SHOW);
+    }
+
+    // Clear and reset edit control texts and disable when no consist is loaded
+    HWND edControls[] = { g_hEditFileName, g_hEditTrainCfgId, g_hEditTrainName, g_hEditMaxVelocity, g_hEditPerfFactor };
+    for (HWND hEd : edControls)
+    {
+        if (hEd)
+        {
+            SetWindowTextW(hEd, L"");
+            EnableWindow(hEd, FALSE);
+            InvalidateRect(hEd, NULL, TRUE);
+        }
+    }
+    HWND lblControls[] = { g_hLabelFileName, g_hLabelTrainCfgId, g_hLabelTrainName, g_hLabelMaxVelocity, g_hLabelPerfFactor };
+    for (HWND hLbl : lblControls)
+    {
+        if (hLbl) InvalidateRect(hLbl, NULL, TRUE);
+    }
+
     if (g_hSectionMetrics)   ShowWindow(g_hSectionMetrics,   SW_HIDE);
     if (g_hLabelMetricMass)   ShowWindow(g_hLabelMetricMass,   SW_HIDE);
     if (g_hEditMetricMass)    ShowWindow(g_hEditMetricMass,    SW_HIDE);
@@ -1920,16 +2216,35 @@ static void ResetConsistEditorWorkspace(HWND hWnd)
     if (g_hEditMetricPower)   ShowWindow(g_hEditMetricPower,   SW_HIDE);
     if (g_hLabelMetricRatio)  ShowWindow(g_hLabelMetricRatio,  SW_HIDE);
     if (g_hEditMetricRatio)   ShowWindow(g_hEditMetricRatio,   SW_HIDE);
+
+    // Both Unit Preview Card and Editor Unit List are kept permanently visible
     if (g_hUnitPreviewCard)
     {
-        ShowWindow(g_hUnitPreviewCard, SW_HIDE);
+        ShowWindow(g_hUnitPreviewCard, (g_ActiveTab == 2) ? SW_HIDE : SW_SHOW);
         UnitPreviewCard_Clear(g_hUnitPreviewCard);
     }
-    if (g_hEditorUnitList)   ShowWindow(g_hEditorUnitList,   SW_HIDE);
+
+    if (g_hEditorUnitList)
+    {
+        ShowWindow(g_hEditorUnitList, (g_ActiveTab == 2) ? SW_HIDE : SW_SHOW);
+        g_EditorUnitList.Clear();
+        g_EditorUnitList.ClearSelection();
+        g_EditorUnitList.Invalidate();
+    }
+
+    if (g_hClassicConsistView)
+    {
+        ClassicConsistView_SetConsistMetadata(g_hClassicConsistView, L"", L"", L"", L"", L"");
+        ClassicConsistView_SetUnits(g_hClassicConsistView, {}, g_szBasePath, L"", L"");
+        ClassicConsistView_SetSelectedIndices(g_hClassicConsistView, {});
+        ClassicConsistView_SetDirty(g_hClassicConsistView, false);
+        InvalidateRect(g_hClassicConsistView, NULL, TRUE);
+    }
+
     if (g_hVisualConsistView)
     {
         VisualConsistView_SetUnits(g_hVisualConsistView, {}, g_szBasePath, L"", L"");
-        ShowWindow(g_hVisualConsistView, SW_SHOW);
+        ShowWindow(g_hVisualConsistView, (g_ActiveTab == 2) ? SW_HIDE : SW_SHOW);
     }
 
     // Clear active loaded consist state
@@ -1942,6 +2257,9 @@ static void ResetConsistEditorWorkspace(HWND hWnd)
 
     if (hWnd)
     {
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        SendMessage(hWnd, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
         InvalidateRect(hWnd, NULL, TRUE);
     }
 }
@@ -2131,6 +2449,11 @@ static LRESULT CALLBACK ModernEditSubclassProc(
 
     case WM_SETCURSOR:
     {
+        if (!IsWindowEnabled(hWnd))
+        {
+            SetCursor(LoadCursor(NULL, IDC_ARROW));
+            return TRUE;
+        }
         if ((uIdSubclass >= 40 && uIdSubclass <= 42) || uIdSubclass == 45)
         {
             POINT pt;
@@ -2223,46 +2546,6 @@ static LRESULT CALLBACK ModernEditSubclassProc(
                 return 0;
         }
 
-        // Strict numeric-only validation for Max Velocity (11) and Performance Factor (12)
-        if (uIdSubclass == 11 || uIdSubclass == 12)
-        {
-            wchar_t ch = (wchar_t)wParam;
-            // Allow control keys (backspace, enter, escape, Ctrl combinations)
-            if (ch < 32)
-            {
-                // allow control character
-            }
-            else if (ch >= L'0' && ch <= L'9')
-            {
-                // allow digit
-            }
-            else if (ch == L'.')
-            {
-                // Allow only one decimal point
-                wchar_t szBuf[128] = { 0 };
-                GetWindowTextW(hWnd, szBuf, 128);
-                DWORD dwSel = (DWORD)SendMessageW(hWnd, EM_GETSEL, 0, 0);
-                int selStart = LOWORD(dwSel);
-                int selEnd = HIWORD(dwSel);
-
-                wchar_t* pDot = wcschr(szBuf, L'.');
-                if (pDot)
-                {
-                    int dotPos = (int)(pDot - szBuf);
-                    // If selection covers the existing dot, allow replacement; otherwise block
-                    if (!(selStart <= dotPos && selEnd > dotPos))
-                    {
-                        return 0; // block extra decimal points
-                    }
-                }
-            }
-            else
-            {
-                // Block letters, spaces, symbols
-                return 0;
-            }
-        }
-
         LRESULT lr = DefSubclassProc(hWnd, uMsg, wParam, lParam);
         InvalidateRect(hWnd, NULL, FALSE);
         return lr;
@@ -2270,36 +2553,6 @@ static LRESULT CALLBACK ModernEditSubclassProc(
 
     case WM_PASTE:
     {
-        if (uIdSubclass == 11 || uIdSubclass == 12)
-        {
-            if (OpenClipboard(hWnd))
-            {
-                HANDLE hData = GetClipboardData(CF_UNICODETEXT);
-                if (hData)
-                {
-                    wchar_t* pClip = (wchar_t*)GlobalLock(hData);
-                    if (pClip)
-                    {
-                        std::wstring filtered;
-                        bool hasDot = false;
-                        for (size_t i = 0; pClip[i] != L'\0'; ++i)
-                        {
-                            if (pClip[i] >= L'0' && pClip[i] <= L'9') filtered += pClip[i];
-                            else if (pClip[i] == L'.' && !hasDot) { filtered += L'.'; hasDot = true; }
-                        }
-                        GlobalUnlock(hData);
-                        CloseClipboard();
-                        if (!filtered.empty())
-                        {
-                            SendMessageW(hWnd, EM_REPLACESEL, TRUE, (LPARAM)filtered.c_str());
-                            InvalidateRect(hWnd, NULL, FALSE);
-                        }
-                        return 0;
-                    }
-                }
-                CloseClipboard();
-            }
-        }
         LRESULT lr = DefSubclassProc(hWnd, uMsg, wParam, lParam);
         InvalidateRect(hWnd, NULL, FALSE);
         return lr;
@@ -2343,6 +2596,11 @@ static LRESULT CALLBACK ModernEditSubclassProc(
 
     case WM_MOUSEMOVE:
     {
+        if (!IsWindowEnabled(hWnd))
+        {
+            if (g_hHoveredEdit == hWnd) g_hHoveredEdit = NULL;
+            break;
+        }
         if (((uIdSubclass >= 40 && uIdSubclass <= 42) || uIdSubclass == 45) && GetWindowTextLengthW(hWnd) > 0)
         {
             InvalidateRect(hWnd, NULL, FALSE);
@@ -2394,8 +2652,9 @@ static LRESULT CALLBACK ModernEditSubclassProc(
                 HBITMAP hMemBmp = CreateCompatibleBitmap(hdc, width, height);
                 HBITMAP hOldBmp = (HBITMAP)SelectObject(hMemDC, hMemBmp);
 
-                bool focused = (g_hFocusedEdit == hWnd);
-                bool hovered = (g_hHoveredEdit == hWnd);
+                bool isEnabled = IsWindowEnabled(hWnd) != FALSE;
+                bool focused = isEnabled && (g_hFocusedEdit == hWnd);
+                bool hovered = isEnabled && (g_hHoveredEdit == hWnd);
                 bool hasText = (GetWindowTextLengthW(hWnd) > 0);
 
                 // 1. Fill parent workspace background to anti-alias corners
@@ -2404,29 +2663,44 @@ static LRESULT CALLBACK ModernEditSubclassProc(
                 DeleteObject(hbrParent);
 
                 // 2. Select edit box background color based on active state (Win11 Explorer spec)
-                COLORREF clrBg = focused ? RGB(30, 30, 30) : (hovered ? RGB(45, 45, 45) : RGB(38, 38, 38));
-                COLORREF clrBorder = focused ? RGB(70, 70, 70) : (hovered ? RGB(65, 65, 65) : RGB(50, 50, 50));
+                COLORREF clrBg;
+                COLORREF clrBorder;
+                if (!isEnabled)
+                {
+                    clrBg = RGB(26, 26, 26);
+                    clrBorder = RGB(40, 40, 40);
+                }
+                else
+                {
+                    clrBg = focused ? RGB(30, 30, 30) : (hovered ? RGB(45, 45, 45) : RGB(38, 38, 38));
+                    clrBorder = focused ? RGB(70, 70, 70) : (hovered ? RGB(65, 65, 65) : RGB(50, 50, 50));
+                }
 
-                HBRUSH hbrBg = CreateSolidBrush(clrBg);
-                HPEN hPen = CreatePen(PS_SOLID, 1, clrBorder);
-                HGDIOBJ hOldBr = SelectObject(hMemDC, hbrBg);
-                HGDIOBJ hOldP = SelectObject(hMemDC, hPen);
+                EnsureGdiPlus();
+                Gdiplus::Graphics g(hMemDC);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
 
-                RoundRect(hMemDC, rc.left, rc.top, rc.right, rc.bottom, 6, 6);
+                Gdiplus::RectF rcBox(0.5f, 0.5f, (Gdiplus::REAL)width - 1.0f, (Gdiplus::REAL)height - 1.0f);
+                Gdiplus::GraphicsPath boxPath;
+                AddRoundedRectPath(boxPath, rcBox, 4.0f);
 
-                SelectObject(hMemDC, hOldP);
-                SelectObject(hMemDC, hOldBr);
-                DeleteObject(hPen);
-                DeleteObject(hbrBg);
+                Gdiplus::SolidBrush brBg(Gdiplus::Color(255, GetRValue(clrBg), GetGValue(clrBg), GetBValue(clrBg)));
+                g.FillPath(&brBg, &boxPath);
 
                 // 3. Render edit control text onto memory DC (clipped cleanly within rounded boundaries)
-                HRGN hRgnClip = CreateRoundRectRgn(rc.left + 1, rc.top + 1, rc.right, rc.bottom, 6, 6);
+                RECT rcClip = { rc.left + 2, rc.top + 1, rc.right - 2, rc.bottom - 2 };
+                HRGN hRgnClip = CreateRectRgnIndirect(&rcClip);
                 SelectClipRgn(hMemDC, hRgnClip);
                 DefSubclassProc(hWnd, WM_PRINTCLIENT, (WPARAM)hMemDC, PRF_CLIENT);
                 SelectClipRgn(hMemDC, NULL);
                 DeleteObject(hRgnClip);
 
-                // 4. For search controls: draw placeholder when empty and unfocused, plus right icon (clear '✕' \xE711 or search glass \xE721)
+                // 4. Draw anti-aliased border around edit box
+                Gdiplus::Pen penBorder(Gdiplus::Color(255, GetRValue(clrBorder), GetGValue(clrBorder), GetBValue(clrBorder)), 1.0f);
+                g.DrawPath(&penBorder, &boxPath);
+
+                // 5. For search controls: draw placeholder when empty and unfocused, plus right icon (clear '✕' \xE711 or search glass \xE721)
                 if ((uIdSubclass >= 40 && uIdSubclass <= 42) || uIdSubclass == 45)
                 {
                     if (!focused && !hasText)
@@ -2483,19 +2757,20 @@ static LRESULT CALLBACK ModernEditSubclassProc(
                     SelectObject(hMemDC, hOldIconFont);
                 }
 
-                // 5. Draw focused accent blue bottom line
+                // 6. Draw focused accent light blue bottom line (Windows 11 Fluent edit highlight with curved corners)
                 bool isReadOnly = (GetWindowLongPtr(hWnd, GWL_STYLE) & ES_READONLY) != 0;
-                if (focused && !isReadOnly)
+                if (focused && !isReadOnly && isEnabled)
                 {
-                    HPEN hAccent = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
-                    HGDIOBJ hOldA = SelectObject(hMemDC, hAccent);
-                    MoveToEx(hMemDC, rc.left + 4, rc.bottom - 2, NULL);
-                    LineTo(hMemDC, rc.right - 4, rc.bottom - 2);
-                    SelectObject(hMemDC, hOldA);
-                    DeleteObject(hAccent);
+                    g.SetClip(&boxPath);
+                    Gdiplus::SolidBrush accentBrush(Gdiplus::Color(255, 96, 205, 255));
+                    g.FillRectangle(&accentBrush, 0.0f, (Gdiplus::REAL)height - 3.0f, (Gdiplus::REAL)width, 3.0f);
+                    g.ResetClip();
+
+                    // Re-stroke border so accent line integrates seamlessly with 1px border
+                    g.DrawPath(&penBorder, &boxPath);
                 }
 
-                // 6. Blit entire frame to screen in one single operation
+                // 7. Blit entire frame to screen in one single operation
                 BitBlt(hdc, 0, 0, width, height, hMemDC, 0, 0, SRCCOPY);
 
                 SelectObject(hMemDC, hOldBmp);
@@ -2819,9 +3094,16 @@ LRESULT CALLBACK ConsistHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, 
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
 
+static RECT s_rcBtnGrid = { 0 };
+static RECT s_rcBtnClassic = { 0 };
+static RECT s_rcBtnLock = { 0 };
+static int s_hoverHeaderBtn = 0; // 1 = Grid, 2 = Classic, 3 = Lock
+
 LRESULT CALLBACK WorkspaceHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
-    if (uMsg == WM_NCHITTEST)
+    switch (uMsg)
+    {
+    case WM_NCHITTEST:
     {
         POINT pt;
         pt.x = (int)(short)LOWORD(lParam);
@@ -2833,16 +3115,264 @@ LRESULT CALLBACK WorkspaceHeaderSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam
         {
             return HTTRANSPARENT;
         }
+        break;
     }
-    else if (uMsg == WM_LBUTTONDOWN)
+
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT:
     {
-        HWND hParent = GetParent(hWnd);
-        SetActivePane(PANE_WORKSPACE, hParent);
-        if (g_hEditorUnitList) SetFocus(g_hEditorUnitList);
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+        int w = rcClient.right - rcClient.left;
+        int h = rcClient.bottom - rcClient.top;
+
+        HDC memDC = CreateCompatibleDC(hdc);
+        HBITMAP memBM = CreateCompatibleBitmap(hdc, w, h);
+        HBITMAP oldBM = (HBITMAP)SelectObject(memDC, memBM);
+
+        // Background
+        COLORREF bg = (g_ActivePane == PANE_WORKSPACE) ? RGB(22, 42, 68) : RGB(24, 26, 32);
+        HBRUSH hbrBg = CreateSolidBrush(bg);
+        FillRect(memDC, &rcClient, hbrBg);
+        DeleteObject(hbrBg);
+
+        // Bottom border
+        HPEN hpBorder = CreatePen(PS_SOLID, 1, RGB(42, 46, 58));
+        HGDIOBJ oldP = SelectObject(memDC, hpBorder);
+        MoveToEx(memDC, 0, h - 1, NULL);
+        LineTo(memDC, w, h - 1);
+        SelectObject(memDC, oldP);
+        DeleteObject(hpBorder);
+
+        SetBkMode(memDC, TRANSPARENT);
+
+        // Title text
+        SelectObject(memDC, g_hSectionFont ? g_hSectionFont : (hUIFont ? hUIFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT)));
+        SetTextColor(memDC, (g_ActivePane == PANE_WORKSPACE) ? RGB(255, 255, 255) : RGB(215, 220, 230));
+        const wchar_t* titleStr = L"  Consist Editor Workspace";
+        RECT rcText = { 10, 0, w, h };
+        DrawTextW(memDC, titleStr, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        // Calculate text width to position the buttons immediately to the left after the title
+        SIZE szTitle = { 0 };
+        GetTextExtentPoint32W(memDC, titleStr, (int)wcslen(titleStr), &szTitle);
+        int curX = 10 + szTitle.cx + 14;
+
+        // View switchers and lock button on the left after title
+        int btnH = 24;
+        int btnY = (h - btnH) / 2;
+
+        const wchar_t* lblGrid = L"⊞ Studio Grid";
+        const wchar_t* lblClassic = L"☰ Classic View";
+        const wchar_t* lblLock = g_bConsistViewLocked ? L"🔒 Locked" : L"🔓 Pin View";
+
+        // Dynamic text measurement + generous padding (30px horizontal padding: 15px breathing space on each side)
+        HFONT hBtnFont = hUIFont ? hUIFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HGDIOBJ oldFont = SelectObject(memDC, hBtnFont);
+
+        SIZE szGrid = { 0 }, szClassic = { 0 }, szLock = { 0 };
+        GetTextExtentPoint32W(memDC, lblGrid, (int)wcslen(lblGrid), &szGrid);
+        GetTextExtentPoint32W(memDC, lblClassic, (int)wcslen(lblClassic), &szClassic);
+        GetTextExtentPoint32W(memDC, lblLock, (int)wcslen(lblLock), &szLock);
+
+        int padH = 30;
+        int gridW = szGrid.cx + padH;
+        if (gridW < 128) gridW = 128;
+        int classicW = szClassic.cx + padH;
+        if (classicW < 130) classicW = 130;
+        int lockW = szLock.cx + padH;
+        if (lockW < 108) lockW = 108;
+
+        s_rcBtnGrid = { curX, btnY, curX + gridW, btnY + btnH };
+        curX += gridW + 8;
+
+        s_rcBtnClassic = { curX, btnY, curX + classicW, btnY + btnH };
+        curX += classicW + 8;
+
+        s_rcBtnLock = { curX, btnY, curX + lockW, btnY + btnH };
+
+        auto drawHeaderPill = [&](const RECT& rcBtn, const wchar_t* label, bool isActive, bool isHovered, bool isLockBtn, bool isLocked) {
+            COLORREF pBg, pBorder, pFg;
+            if (isLockBtn)
+            {
+                if (isLocked)
+                {
+                    pBg = isHovered ? RGB(65, 48, 20) : RGB(48, 36, 14);
+                    pBorder = isHovered ? RGB(255, 200, 60) : RGB(245, 158, 11);
+                    pFg = RGB(255, 215, 90);
+                }
+                else
+                {
+                    pBg = isHovered ? RGB(40, 44, 56) : RGB(28, 30, 38);
+                    pBorder = isHovered ? RGB(85, 90, 110) : RGB(52, 56, 70);
+                    pFg = isHovered ? RGB(235, 240, 250) : RGB(140, 145, 160);
+                }
+            }
+            else
+            {
+                if (isActive)
+                {
+                    pBg = isHovered ? RGB(0, 140, 240) : RGB(0, 120, 215);
+                    pBorder = RGB(0, 160, 255);
+                    pFg = RGB(255, 255, 255);
+                }
+                else
+                {
+                    pBg = isHovered ? RGB(42, 46, 60) : RGB(30, 33, 42);
+                    pBorder = isHovered ? RGB(75, 80, 100) : RGB(46, 50, 64);
+                    pFg = isHovered ? RGB(240, 245, 255) : RGB(155, 160, 175);
+                }
+            }
+
+            HBRUSH hbr = CreateSolidBrush(pBg);
+            HPEN hp = CreatePen(PS_SOLID, 1, pBorder);
+            HGDIOBJ ob = SelectObject(memDC, hbr);
+            HGDIOBJ op = SelectObject(memDC, hp);
+            RoundRect(memDC, rcBtn.left, rcBtn.top, rcBtn.right, rcBtn.bottom, 6, 6);
+            SelectObject(memDC, ob);
+            SelectObject(memDC, op);
+            DeleteObject(hbr);
+            DeleteObject(hp);
+
+            SetTextColor(memDC, pFg);
+            RECT rcT = rcBtn;
+            DrawTextW(memDC, label, -1, &rcT, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        };
+
+        drawHeaderPill(s_rcBtnGrid, lblGrid, g_ConsistViewMode == ConsistWorkspaceViewMode::StudioGrid, s_hoverHeaderBtn == 1, false, false);
+        drawHeaderPill(s_rcBtnClassic, lblClassic, g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView, s_hoverHeaderBtn == 2, false, false);
+        drawHeaderPill(s_rcBtnLock, lblLock, false, s_hoverHeaderBtn == 3, true, g_bConsistViewLocked);
+
+        BitBlt(hdc, 0, 0, w, h, memDC, 0, 0, SRCCOPY);
+        SelectObject(memDC, oldBM);
+        DeleteObject(memBM);
+        DeleteDC(memDC);
+
+        EndPaint(hWnd, &ps);
+        return 0;
     }
-    else if (uMsg == WM_NCDESTROY)
+
+    case WM_MOUSEMOVE:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        int prev = s_hoverHeaderBtn;
+        s_hoverHeaderBtn = 0;
+        if (PtInRect(&s_rcBtnGrid, pt)) s_hoverHeaderBtn = 1;
+        else if (PtInRect(&s_rcBtnClassic, pt)) s_hoverHeaderBtn = 2;
+        else if (PtInRect(&s_rcBtnLock, pt)) s_hoverHeaderBtn = 3;
+
+        if (prev != s_hoverHeaderBtn)
+        {
+            TRACKMOUSEEVENT tme{ sizeof(TRACKMOUSEEVENT), TME_LEAVE, hWnd, 0 };
+            TrackMouseEvent(&tme);
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+        break;
+    }
+
+    case WM_MOUSELEAVE:
+    {
+        if (s_hoverHeaderBtn != 0)
+        {
+            s_hoverHeaderBtn = 0;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+        break;
+    }
+
+    case WM_SETCURSOR:
+    {
+        if (s_hoverHeaderBtn > 0)
+        {
+            SetCursor(LoadCursor(NULL, IDC_HAND));
+            return TRUE;
+        }
+        break;
+    }
+
+    case WM_LBUTTONDOWN:
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        HWND hParent = GetParent(hWnd);
+
+        if (PtInRect(&s_rcBtnGrid, pt))
+        {
+            if (g_ConsistViewMode != ConsistWorkspaceViewMode::StudioGrid)
+            {
+                g_ConsistViewMode = ConsistWorkspaceViewMode::StudioGrid;
+                if (g_bConsistViewLocked)
+                {
+                    DatabaseManager::SetSettingInt(L"PreferredConsistViewMode", 0);
+                }
+                ConfigureEditorUnitListColumns(false);
+                SetActivePane(PANE_WORKSPACE, hParent);
+                RECT rc;
+                GetClientRect(hParent, &rc);
+                SendMessageW(hParent, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
+                RefreshEditorUnitList(true);
+                UpdateUnitPreviewFromSelected();
+                InvalidateRect(hParent, NULL, TRUE);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            return 0;
+        }
+
+        if (PtInRect(&s_rcBtnClassic, pt))
+        {
+            if (g_ConsistViewMode != ConsistWorkspaceViewMode::ClassicView)
+            {
+                g_ConsistViewMode = ConsistWorkspaceViewMode::ClassicView;
+                if (g_bConsistViewLocked)
+                {
+                    DatabaseManager::SetSettingInt(L"PreferredConsistViewMode", 1);
+                }
+                ConfigureEditorUnitListColumns(true);
+                SetActivePane(PANE_WORKSPACE, hParent);
+                RECT rc;
+                GetClientRect(hParent, &rc);
+                SendMessageW(hParent, WM_SIZE, 0, MAKELPARAM(rc.right, rc.bottom));
+                RefreshEditorUnitList(true);
+                UpdateUnitPreviewFromSelected();
+                InvalidateRect(hParent, NULL, TRUE);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+            return 0;
+        }
+
+        if (PtInRect(&s_rcBtnLock, pt))
+        {
+            g_bConsistViewLocked = !g_bConsistViewLocked;
+            DatabaseManager::SetSettingInt(L"ConsistViewModeLocked", g_bConsistViewLocked ? 1 : 0);
+            if (g_bConsistViewLocked)
+            {
+                DatabaseManager::SetSettingInt(L"PreferredConsistViewMode", (int)g_ConsistViewMode);
+            }
+            InvalidateRect(hWnd, NULL, FALSE);
+            return 0;
+        }
+
+        SetActivePane(PANE_WORKSPACE, hParent);
+        if (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView && g_hClassicConsistView)
+        {
+            SetFocus(g_hClassicConsistView);
+        }
+        else if (g_hEditorUnitList)
+        {
+            SetFocus(g_hEditorUnitList);
+        }
+        return 0;
+    }
+
+    case WM_NCDESTROY:
     {
         RemoveWindowSubclass(hWnd, WorkspaceHeaderSubclassProc, uIdSubclass);
+        break;
+    }
     }
     return DefSubclassProc(hWnd, uMsg, wParam, lParam);
 }
@@ -3537,6 +4067,19 @@ static void SortAssetGridPane(int paneIdx)
             }
             return ascending ? (cmp < 0) : (cmp > 0);
         }
+        else if (sortCol == 3) // Status
+        {
+            std::wstring sA = itemA.szStatus.empty() ? L"Healthy" : itemA.szStatus;
+            std::wstring sB = itemB.szStatus.empty() ? L"Healthy" : itemB.szStatus;
+            int cmp = StrCmpLogicalW(sA.c_str(), sB.c_str());
+            if (cmp == 0)
+            {
+                cmp = StrCmpLogicalW(itemA.szFileName.c_str(), itemB.szFileName.c_str());
+                if (cmp == 0) return false;
+                return ascending ? (cmp < 0) : (cmp > 0);
+            }
+            return ascending ? (cmp < 0) : (cmp > 0);
+        }
         return false;
     });
     LeaveCriticalSection(&g_StockCacheCS);
@@ -3635,6 +4178,15 @@ void PopulateAssetGridPane(int paneIdx, CustomTreeNode* hSelected)
         if (!MatchLetterFilter(item.szFolder, pList->GetActiveFilters(2)))
         {
             continue;
+        }
+        const auto& statusFilters = pList->GetActiveFilters(3);
+        if (!statusFilters.empty())
+        {
+            std::wstring st = item.szStatus.empty() ? L"Healthy" : item.szStatus;
+            if (std::find(statusFilters.begin(), statusFilters.end(), st) == statusFilters.end())
+            {
+                continue;
+            }
         }
 
         indices.push_back(i);
@@ -3816,13 +4368,13 @@ void ShowFilterPopup(HWND hWndList, int colIndex)
         {
             if (colIndex == 0) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
             else if (colIndex == 1) allOptions = { L"1-16", L"17-26", L"27-36", L"37-46", L"47-56", L"57-60+" };
-            else if (colIndex == 2) allOptions = { L"Healthy", L"Missing Shape", L"Missing Stock", L"Fixed" };
+            else if (colIndex == 2) allOptions = { L"Healthy", L"Missing Shape", L"Missing Stock", L"Corrupted Stock", L"Corrupted Shape", L"Fixed" };
         }
         else
         {
             if (colIndex == 0) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
             else if (colIndex == 1) allOptions = { L"1-16", L"17-26", L"27-36", L"37-46", L"47-56", L"57-60+" };
-            else if (colIndex == 2) allOptions = { L"Healthy", L"Missing Shape", L"Missing Stock", L"Fixed" };
+            else if (colIndex == 2) allOptions = { L"Healthy", L"Missing Shape", L"Missing Stock", L"Corrupted Stock", L"Corrupted Shape", L"Fixed" };
             else if (colIndex == 3) allOptions = { L"Today", L"Yesterday", L"Last week", L"Earlier this month", L"Last month", L"A long time ago" };
         }
     }
@@ -3860,15 +4412,26 @@ void ShowFilterPopup(HWND hWndList, int colIndex)
             }
         }
         else if (colIndex == 2) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
+        else if (colIndex == 3) allOptions = { L"Healthy", L"Corrupted Stock", L"Corrupted Shape", L"Missing Shape" };
     }
     else if (hWndList == g_hEditorUnitList)
     {
-        if (colIndex == 0)      allOptions = { L"1-16", L"17-26", L"27-36", L"37-46", L"47-56", L"57-60+" };
-        else if (colIndex == 1) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
-        else if (colIndex == 2) allOptions = { L"Engine", L"Wagon" };
-        else if (colIndex == 3) allOptions = { L"Healthy", L"Missing Shape", L"Missing Stock", L"Fixed" };
-        else if (colIndex == 4) allOptions = { L"Normal", L"Flipped" };
-        else if (colIndex == 5) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
+        if (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView)
+        {
+            if (colIndex == 0)      allOptions = { L"1-16", L"17-26", L"27-36", L"37-46", L"47-56", L"57-60+" };
+            else if (colIndex == 1) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
+            else if (colIndex == 2) allOptions = { L"Normal", L"Flipped" };
+            else if (colIndex == 3) allOptions = { L"Healthy", L"Missing Shape", L"Missing Stock", L"Corrupted Stock", L"Corrupted Shape", L"Fixed" };
+        }
+        else
+        {
+            if (colIndex == 0)      allOptions = { L"1-16", L"17-26", L"27-36", L"37-46", L"47-56", L"57-60+" };
+            else if (colIndex == 1) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
+            else if (colIndex == 2) allOptions = { L"Engine", L"Wagon" };
+            else if (colIndex == 3) allOptions = { L"Healthy", L"Missing Shape", L"Missing Stock", L"Corrupted Stock", L"Corrupted Shape", L"Fixed" };
+            else if (colIndex == 4) allOptions = { L"Normal", L"Flipped" };
+            else if (colIndex == 5) allOptions = { L"0-9", L"A-H", L"I-P", L"Q-Z", L"Other" };
+        }
     }
 
     if (allOptions.empty()) return;
@@ -4203,9 +4766,7 @@ static std::vector<int> GetSelectedConsistUnitIndices()
     {
         if (row >= 0 && row < g_EditorUnitList.GetItemCount())
         {
-            std::wstring noStr = g_EditorUnitList.GetCellText(row, 0);
-            int originalNo = _wtoi(noStr.c_str());
-            int unitIdx = originalNo - 1;
+            int unitIdx = GetUnitIndexFromListRow(row);
             if (unitIdx >= 0 && unitIdx < (int)g_LoadedConsistUnits.size())
             {
                 uniqueIndices.insert(unitIdx);
@@ -4341,7 +4902,7 @@ static void GatherConsistSmsFiles(
 
                 for (const auto& s : info.wagonSounds)
                 {
-                    addS(s, u.isEngine ? L"Wagon/Tender Sound" : L"Wagon Sound");
+                    addS(s, L"Wagon Sound");
                 }
                 for (const auto& s : info.engineSounds)
                 {
@@ -4409,9 +4970,7 @@ static int GetSelectedConsistUnitIndex()
     int sel = g_EditorUnitList.GetSelectedIndex();
     if (sel >= 0 && sel < g_EditorUnitList.GetItemCount())
     {
-        std::wstring noStr = g_EditorUnitList.GetCellText(sel, 0);
-        int originalNo = _wtoi(noStr.c_str());
-        int unitIdx = originalNo - 1;
+        int unitIdx = GetUnitIndexFromListRow(sel);
         if (unitIdx >= 0 && unitIdx < (int)g_LoadedConsistUnits.size())
         {
             return unitIdx;
@@ -4427,9 +4986,7 @@ static void SetSelectedConsistUnitIndices(const std::vector<int>& unitIndices)
     int count = g_EditorUnitList.GetItemCount();
     for (int r = 0; r < count; ++r)
     {
-        std::wstring noStr = g_EditorUnitList.GetCellText(r, 0);
-        int originalNo = _wtoi(noStr.c_str());
-        int unitIdx = originalNo - 1;
+        int unitIdx = GetUnitIndexFromListRow(r);
         if (unitSet.count(unitIdx) > 0)
         {
             matchingRows.push_back(r);
@@ -4483,18 +5040,21 @@ static void UpdateUnitPreviewFromSelected()
     }
     else if (g_ActivePane == PANE_WORKSPACE)
     {
-        // 2. Consist Editor Workspace active: Inspect first selected unit (anchor) in workspace
+        // 2. Consist Editor Workspace active: Inspect selected unit in either Classic or Grid view
         int sel = g_EditorUnitList.GetFirstSelectedIndex();
+        if (sel < 0 && g_EditorUnitList.GetItemCount() > 0) sel = 0;
         if (sel >= 0 && sel < g_EditorUnitList.GetItemCount())
         {
-            std::wstring strNo = g_EditorUnitList.GetCellText(sel, 0);
-            int originalNo = _wtoi(strNo.c_str());
-            int idx = originalNo - 1;
+            int idx = GetUnitIndexFromListRow(sel);
             if (idx >= 0 && idx < (int)g_LoadedConsistUnits.size())
             {
                 const auto& unit = g_LoadedConsistUnits[idx];
                 std::wstring fullPath = BuildFullStockPath(g_szBasePath, unit.parentDir, unit.uid, unit.isEngine ? L".eng" : L".wag");
                 UnitPreviewCard_SetUnit(g_hUnitPreviewCard, fullPath, g_szBasePath, unit.isFlipped, unit.uid, unit.isEngine ? L"Engine" : L"Wagon");
+                if (g_hClassicConsistView)
+                {
+                    ClassicConsistView_SetSelectedIndices(g_hClassicConsistView, { idx });
+                }
                 return;
             }
         }
@@ -4528,9 +5088,7 @@ static void RefreshEditorUnitList(bool preserveSelection)
         {
             if (r >= 0 && r < curItemCount)
             {
-                std::wstring noStr = g_EditorUnitList.GetCellText(r, 0);
-                int originalNo = _wtoi(noStr.c_str());
-                int unitIdx = originalNo - 1;
+                int unitIdx = GetUnitIndexFromListRow(r);
                 if (unitIdx >= 0 && unitIdx < (int)g_LoadedConsistUnits.size())
                 {
                     savedSelectedUnits.push_back(unitIdx);
@@ -4545,12 +5103,20 @@ static void RefreshEditorUnitList(bool preserveSelection)
 
     g_EditorUnitList.Clear();
 
-    const auto& filtersNo     = g_EditorUnitList.GetActiveFilters(0);
-    const auto& filtersName   = g_EditorUnitList.GetActiveFilters(1);
-    const auto& filtersType   = g_EditorUnitList.GetActiveFilters(2);
-    const auto& filtersStatus = g_EditorUnitList.GetActiveFilters(3);
-    const auto& filtersOrient = g_EditorUnitList.GetActiveFilters(4);
-    const auto& filtersParent = g_EditorUnitList.GetActiveFilters(5);
+    std::wstring classicSearch;
+    if (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView && g_hClassicConsistView)
+    {
+        classicSearch = ClassicConsistView_GetSearchQuery(g_hClassicConsistView);
+    }
+
+    bool isClassic = (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView);
+
+    const auto& filters0 = g_EditorUnitList.GetActiveFilters(0);
+    const auto& filters1 = g_EditorUnitList.GetActiveFilters(1);
+    const auto& filters2 = g_EditorUnitList.GetActiveFilters(2);
+    const auto& filters3 = g_EditorUnitList.GetActiveFilters(3);
+    const auto& filters4 = g_EditorUnitList.GetActiveFilters(4);
+    const auto& filters5 = g_EditorUnitList.GetActiveFilters(5);
 
     for (size_t i = 0; i < g_LoadedConsistUnits.size(); ++i)
     {
@@ -4573,72 +5139,106 @@ static void RefreshEditorUnitList(bool preserveSelection)
         }
         std::wstring unitStatus = L"Healthy";
         if (health == UnitHealthStatus::MissingStock) unitStatus = L"Missing Stock";
+        else if (health == UnitHealthStatus::CorruptedStock) unitStatus = L"Corrupted Stock";
         else if (health == UnitHealthStatus::MissingShape) unitStatus = L"Missing Shape";
+        else if (health == UnitHealthStatus::CorruptedShape) unitStatus = L"Corrupted Shape";
         else if (isFixedInSession) unitStatus = L"Fixed";
         std::wstring unitOrient = unit.isFlipped ? L"Flipped" : L"Normal";
 
-        // 1. Filter by No.
-        if (!filtersNo.empty())
+        if (!classicSearch.empty())
         {
-            bool match = false;
-            for (const auto& f : filtersNo)
+            if (StrStrIW(unit.uid.c_str(), classicSearch.c_str()) == NULL)
+                continue;
+        }
+
+        if (isClassic)
+        {
+            // Classic View: 4 columns (0: No., 1: Name, 2: Orientation, 3: Status)
+            if (!filters0.empty())
             {
-                if (f == L"1-16" && originalNo >= 1 && originalNo <= 16) match = true;
-                else if (f == L"17-26" && originalNo >= 17 && originalNo <= 26) match = true;
-                else if (f == L"27-36" && originalNo >= 27 && originalNo <= 36) match = true;
-                else if (f == L"37-46" && originalNo >= 37 && originalNo <= 46) match = true;
-                else if (f == L"47-56" && originalNo >= 47 && originalNo <= 56) match = true;
-                else if (f == L"57-60+" && originalNo >= 57) match = true;
+                bool match = false;
+                for (const auto& f : filters0)
+                {
+                    if (f == L"1-16" && originalNo >= 1 && originalNo <= 16) match = true;
+                    else if (f == L"17-26" && originalNo >= 17 && originalNo <= 26) match = true;
+                    else if (f == L"27-36" && originalNo >= 27 && originalNo <= 36) match = true;
+                    else if (f == L"37-46" && originalNo >= 37 && originalNo <= 46) match = true;
+                    else if (f == L"47-56" && originalNo >= 47 && originalNo <= 56) match = true;
+                    else if (f == L"57-60+" && originalNo >= 57) match = true;
+                }
+                if (!match) continue;
             }
-            if (!match) continue;
-        }
-
-        // 2. Filter by Name
-        if (!filtersName.empty())
-        {
-            if (!MatchLetterFilter(unit.uid, filtersName)) continue;
-        }
-
-        // 3. Filter by Type
-        if (!filtersType.empty())
-        {
-            bool match = false;
-            for (const auto& f : filtersType)
+            if (!filters1.empty())
             {
-                if (f == unitType) match = true;
+                if (!MatchLetterFilter(unit.uid, filters1)) continue;
             }
-            if (!match) continue;
-        }
-
-        // 4. Filter by Status
-        if (!filtersStatus.empty())
-        {
-            bool match = false;
-            for (const auto& f : filtersStatus)
+            if (!filters2.empty())
             {
-                if (f == unitStatus) match = true;
+                bool match = false;
+                for (const auto& f : filters2) if (f == unitOrient) match = true;
+                if (!match) continue;
             }
-            if (!match) continue;
-        }
-
-        // 5. Filter by Orientation
-        if (!filtersOrient.empty())
-        {
-            bool match = false;
-            for (const auto& f : filtersOrient)
+            if (!filters3.empty())
             {
-                if (f == unitOrient) match = true;
+                bool match = false;
+                for (const auto& f : filters3) if (f == unitStatus) match = true;
+                if (!match) continue;
             }
-            if (!match) continue;
-        }
 
-        // 6. Filter by Parent Directory
-        if (!filtersParent.empty())
+            g_EditorUnitList.AddItem({ unitNo, unit.uid, unitOrient, unitStatus });
+        }
+        else
         {
-            if (!MatchLetterFilter(unit.parentDir, filtersParent)) continue;
+            // Studio Grid: 6 columns (0: No., 1: Name, 2: Type, 3: Status, 4: Orientation, 5: Parent)
+            if (!filters0.empty())
+            {
+                bool match = false;
+                for (const auto& f : filters0)
+                {
+                    if (f == L"1-16" && originalNo >= 1 && originalNo <= 16) match = true;
+                    else if (f == L"17-26" && originalNo >= 17 && originalNo <= 26) match = true;
+                    else if (f == L"27-36" && originalNo >= 27 && originalNo <= 36) match = true;
+                    else if (f == L"37-46" && originalNo >= 37 && originalNo <= 46) match = true;
+                    else if (f == L"47-56" && originalNo >= 47 && originalNo <= 56) match = true;
+                    else if (f == L"57-60+" && originalNo >= 57) match = true;
+                }
+                if (!match) continue;
+            }
+
+            if (!filters1.empty())
+            {
+                if (!MatchLetterFilter(unit.uid, filters1)) continue;
+            }
+
+            if (!filters2.empty())
+            {
+                bool match = false;
+                for (const auto& f : filters2) if (f == unitType) match = true;
+                if (!match) continue;
+            }
+
+            if (!filters3.empty())
+            {
+                bool match = false;
+                for (const auto& f : filters3) if (f == unitStatus) match = true;
+                if (!match) continue;
+            }
+
+            if (!filters4.empty())
+            {
+                bool match = false;
+                for (const auto& f : filters4) if (f == unitOrient) match = true;
+                if (!match) continue;
+            }
+
+            if (!filters5.empty())
+            {
+                if (!MatchLetterFilter(unit.parentDir, filters5)) continue;
+            }
+
+            g_EditorUnitList.AddItem({ unitNo, unit.uid, unitType, unitStatus, unitOrient, unit.parentDir });
         }
 
-        g_EditorUnitList.AddItem({ unitNo, unit.uid, unitType, unitStatus, unitOrient, unit.parentDir });
         int rowIndex = g_EditorUnitList.GetItemCount() - 1;
         if (g_CheckedConsistUnits.count((int)i) > 0)
         {
@@ -4686,6 +5286,24 @@ static void RefreshEditorUnitList(bool preserveSelection)
     }
 
     UpdateConsistMetricsUI();
+
+    if (g_hClassicConsistView && IsWindow(g_hClassicConsistView))
+    {
+        wchar_t szFile[256] = { 0 }, szCfg[256] = { 0 }, szName[256] = { 0 }, szVel[256] = { 0 }, szPerf[256] = { 0 };
+        if (g_hEditFileName) GetWindowTextW(g_hEditFileName, szFile, 256);
+        if (g_hEditTrainCfgId) GetWindowTextW(g_hEditTrainCfgId, szCfg, 256);
+        if (g_hEditTrainName) GetWindowTextW(g_hEditTrainName, szName, 256);
+        if (g_hEditMaxVelocity) GetWindowTextW(g_hEditMaxVelocity, szVel, 256);
+        if (g_hEditPerfFactor) GetWindowTextW(g_hEditPerfFactor, szPerf, 256);
+
+        ClassicConsistView_SetConsistMetadata(g_hClassicConsistView, szFile, szCfg, szName, szVel, szPerf);
+        ClassicConsistView_SetUnits(g_hClassicConsistView, g_LoadedConsistUnits, g_szBasePath, szName, szFile);
+        ClassicConsistView_SetSelectedIndices(g_hClassicConsistView, GetSelectedConsistUnitIndices());
+        if (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView)
+        {
+            ClassicConsistView_SetDesiredListWidth(g_hClassicConsistView, g_EditorUnitList.GetDesiredWidth());
+        }
+    }
 
     if (preserveSelection && !savedSelectedUnits.empty())
     {
@@ -4778,6 +5396,96 @@ static void UpdateActivityConsistRow(int consistIndex)
             break;
         }
     }
+}
+
+static ConsistSessionState& EnsureConsistSession(const std::wstring& filename)
+{
+    auto it = g_ConsistSessions.find(filename);
+    if (it != g_ConsistSessions.end())
+    {
+        return it->second;
+    }
+
+    std::wstring path = EnsureConsistFilePath(g_szBasePath, filename);
+    auto& sess = g_ConsistSessions[filename];
+    sess.fileName = filename;
+    if (!path.empty() && PathFileExistsW(path.c_str()))
+    {
+        try {
+            auto data = ConsistReader::LoadConsist(path);
+            sess.trainCfg = data.trainCfg;
+            sess.savedTrainCfg = data.trainCfg;
+            sess.units = data.units;
+            sess.savedUnits = data.units;
+            sess.isDirty = false;
+        } catch (...) {
+            sess.isDirty = false;
+        }
+    }
+    return sess;
+}
+
+static void ApplyConsistParameters(HWND hWnd, const std::vector<std::wstring>& targetKeys, bool updateSpeed, double newSpeed, bool updatePerf, double newPerf)
+{
+    if (targetKeys.empty()) return;
+
+    auto FormatNumber = [](double val) -> std::wstring {
+        wchar_t buf[64];
+        if (std::abs(val - std::round(val)) < 1e-4)
+            swprintf_s(buf, L"%.0f", val);
+        else
+            swprintf_s(buf, L"%.3f", val);
+        return buf;
+    };
+
+    bool anyDirty = false;
+    bool currentAffected = false;
+
+    for (const auto& key : targetKeys)
+    {
+        auto& sess = EnsureConsistSession(key);
+        if (updateSpeed)
+        {
+            sess.trainCfg.maxVelocity = newSpeed;
+        }
+        if (updatePerf)
+        {
+            sess.trainCfg.perfFactor = newPerf;
+        }
+        sess.isDirty = (sess.units != sess.savedUnits || sess.trainCfg != sess.savedTrainCfg);
+        if (sess.isDirty) anyDirty = true;
+        UpdateConsistManagerRow(key);
+        if (key == g_szCurrentConsistFile) currentAffected = true;
+    }
+
+    if (currentAffected)
+    {
+        if (updateSpeed && g_hEditMaxVelocity && IsWindow(g_hEditMaxVelocity))
+        {
+            std::wstring sVel = FormatNumber(newSpeed);
+            SetWindowTextW(g_hEditMaxVelocity, sVel.c_str());
+            if (g_hClassicConsistView && IsWindow(g_hClassicConsistView))
+            {
+                ClassicConsistView_SetMaxVelocity(g_hClassicConsistView, sVel);
+            }
+        }
+        if (updatePerf && g_hEditPerfFactor && IsWindow(g_hEditPerfFactor))
+        {
+            std::wstring sPerf = FormatNumber(newPerf);
+            SetWindowTextW(g_hEditPerfFactor, sPerf.c_str());
+            if (g_hClassicConsistView && IsWindow(g_hClassicConsistView))
+            {
+                ClassicConsistView_SetPerfFactor(g_hClassicConsistView, sPerf);
+            }
+        }
+    }
+
+    if (g_hClassicConsistView && IsWindow(g_hClassicConsistView))
+    {
+        ClassicConsistView_SetDirty(g_hClassicConsistView, anyDirty);
+    }
+
+    g_ConsistList.Invalidate();
 }
 
 static void SaveCurrentConsistSessionState()
@@ -6628,9 +7336,11 @@ static bool SaveCurrentConsistDiskOnly(HWND hWnd)
                     item.szName = strName;
                     item.nUnits = (int)g_LoadedConsistUnits.size();
                     item.szLastModified = friendlyTime;
-                    item.isBroken = (statusStr == L"Missing Stock" || statusStr == L"Missing Shape" || statusStr == L"Broken");
+                    item.isBroken = (statusStr == L"Missing Stock" || statusStr == L"Corrupted Stock" || statusStr == L"Missing Shape" || statusStr == L"Corrupted Shape" || statusStr == L"Broken");
                     item.hasMissingStock = (statusStr == L"Missing Stock");
+                    item.hasCorruptedStock = (statusStr == L"Corrupted Stock");
                     item.hasMissingShape = (statusStr == L"Missing Shape");
+                    item.hasCorruptedShape = (statusStr == L"Corrupted Shape");
                     break;
                 }
             }
@@ -6749,6 +7459,7 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
     std::wstring fullPath = consistFolder + filename;
 
     g_bIsLoadingConsist = true;
+    ConfigureEditorUnitListColumns(g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView);
     try
     {
         ConsistReader::TrainConfig trainCfg;
@@ -6808,12 +7519,17 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
         else
         {
             if (g_hEditorPane)       ShowWindow(g_hEditorPane,      SW_HIDE);
-            if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg, SW_SHOW);
-            if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,     SW_SHOW);
-            if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,   SW_SHOW);
-            if (g_hEditFileName)     ShowWindow(g_hEditFileName,    SW_SHOW);
-            if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId, SW_SHOW);
-            if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,  SW_SHOW);
+
+            // In Classic View, the ClassicConsistView owns all labels, edit fields, and layout.
+            // Only show Studio Grid specific controls when NOT in Classic View.
+            bool isClassicView = (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView);
+
+            if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg, isClassicView ? SW_HIDE : SW_SHOW);
+            if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,    isClassicView ? SW_HIDE : SW_SHOW);
+            if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,   SW_HIDE);
+            if (g_hEditFileName)     ShowWindow(g_hEditFileName,    SW_HIDE);
+            if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId, isClassicView ? SW_HIDE : SW_SHOW);
+            if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,  isClassicView ? SW_HIDE : SW_SHOW);
             if (g_hSectionMetrics)   ShowWindow(g_hSectionMetrics,   SW_HIDE);
             if (g_hLabelMetricMass)   ShowWindow(g_hLabelMetricMass,   SW_HIDE);
             if (g_hEditMetricMass)    ShowWindow(g_hEditMetricMass,    SW_HIDE);
@@ -6823,9 +7539,19 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
             if (g_hEditMetricPower)   ShowWindow(g_hEditMetricPower,   SW_HIDE);
             if (g_hLabelMetricRatio)  ShowWindow(g_hLabelMetricRatio,  SW_HIDE);
             if (g_hEditMetricRatio)   ShowWindow(g_hEditMetricRatio,   SW_HIDE);
-            if (g_hUnitPreviewCard)  ShowWindow(g_hUnitPreviewCard,  SW_SHOW);
+            if (g_hUnitPreviewCard)   ShowWindow(g_hUnitPreviewCard,  (g_ActiveTab == 2) ? SW_HIDE : SW_SHOW);
 
-            if (g_ActiveTab == 1) // Activity Consists Tab: only Identifier is shown
+            if (isClassicView)
+            {
+                // Hide all Studio Grid labels/edits; Classic View renders its own
+                if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_HIDE);
+                if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_HIDE);
+                if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
+                if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_HIDE);
+                if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_HIDE);
+                if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_HIDE);
+            }
+            else if (g_ActiveTab == 1) // Activity Consists Tab: only Identifier is shown
             {
                 if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_HIDE);
                 if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_HIDE);
@@ -6836,7 +7562,7 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
                 if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_HIDE);
                 if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_HIDE);
             }
-            else // Main Consists Tab: show all fields
+            else // Main Consists Tab (Studio Grid): show all fields
             {
                 if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_SHOW);
                 if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_SHOW);
@@ -6848,10 +7574,25 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
                 if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_SHOW);
             }
 
-            if (g_hEditorUnitList)   ShowWindow(g_hEditorUnitList,  SW_SHOW);
+            if (g_hEditorUnitList)   ShowWindow(g_hEditorUnitList,  (g_ActiveTab == 2) ? SW_HIDE : SW_SHOW);
         }
 
-        // Populate edit controls
+        // Populate edit controls and enable them for editing
+        HWND edControls[] = { g_hEditFileName, g_hEditTrainCfgId, g_hEditTrainName, g_hEditMaxVelocity, g_hEditPerfFactor };
+        for (HWND hEd : edControls)
+        {
+            if (hEd)
+            {
+                EnableWindow(hEd, TRUE);
+                InvalidateRect(hEd, NULL, TRUE);
+            }
+        }
+        HWND lblControls[] = { g_hLabelFileName, g_hLabelTrainCfgId, g_hLabelTrainName, g_hLabelMaxVelocity, g_hLabelPerfFactor };
+        for (HWND hLbl : lblControls)
+        {
+            if (hLbl) InvalidateRect(hLbl, NULL, TRUE);
+        }
+
         if (g_hEditFileName)   SetWindowTextW(g_hEditFileName,   filename.c_str());
         if (g_hEditTrainCfgId) SetWindowTextW(g_hEditTrainCfgId, trainCfg.trainCfgId.c_str());
         if (g_hEditTrainName)  SetWindowTextW(g_hEditTrainName,  trainCfg.name.c_str());
@@ -6898,6 +7639,10 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
 
         g_LoadedConsistUnits = units;
         g_szCurrentConsistFile = filename;
+        if (g_ActiveTab == 0 && filename.find(L"ACTIVITY:") == std::wstring::npos && filename.find(L"#") == std::wstring::npos)
+        {
+            g_szMainConsistFile = filename;
+        }
 
         g_EditorUnitList.ClearAllFilters();
         RefreshEditorUnitList(false);
@@ -6937,6 +7682,17 @@ static void LoadAndDisplayConsist(HWND hWnd, const std::wstring& filename)
         UpdateConsistManagerRow(filename);
         LOG_INFO("Loaded consist '%ls' with %zu units.", filename.c_str(), g_LoadedConsistUnits.size());
 
+        // Trigger complete layout pass so g_hEditorUnitList and views are cleanly positioned and visible
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+        SendMessage(hWnd, WM_SIZE, SIZE_RESTORED, MAKELPARAM(rcClient.right, rcClient.bottom));
+
+        if (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView && g_hClassicConsistView)
+        {
+            InvalidateRect(g_hClassicConsistView, NULL, TRUE);
+            UpdateWindow(g_hClassicConsistView);
+        }
+
         InvalidateRect(hWnd, NULL, TRUE);
         UpdateWindow(hWnd);
         g_bIsLoadingConsist = false;
@@ -6967,16 +7723,20 @@ static void LoadAndDisplayActivityConsist(HWND hWnd, int consistIndex)
     const auto& actCon = g_CurrentActivityData.consists[consistIndex];
 
     g_bIsLoadingConsist = true;
+    ConfigureEditorUnitListColumns(g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView);
     try
     {
         // Hide placeholder and show editor controls
+        // In Classic View, the ClassicConsistView owns all labels, edit fields, and layout.
+        bool isClassicView = (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView);
+
         if (g_hEditorPane)       ShowWindow(g_hEditorPane,      SW_HIDE);
-        if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg, SW_SHOW);
-        if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,     SW_SHOW);
+        if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg, isClassicView ? SW_HIDE : SW_SHOW);
+        if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,    isClassicView ? SW_HIDE : SW_SHOW);
         if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,   SW_HIDE);
         if (g_hEditFileName)     ShowWindow(g_hEditFileName,    SW_HIDE);
-        if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId, SW_SHOW);
-        if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,  SW_SHOW);
+        if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId, isClassicView ? SW_HIDE : SW_SHOW);
+        if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,  isClassicView ? SW_HIDE : SW_SHOW);
         if (g_hSectionMetrics)   ShowWindow(g_hSectionMetrics,   SW_HIDE);
         if (g_hLabelMetricMass)   ShowWindow(g_hLabelMetricMass,   SW_HIDE);
         if (g_hEditMetricMass)    ShowWindow(g_hEditMetricMass,    SW_HIDE);
@@ -6988,7 +7748,7 @@ static void LoadAndDisplayActivityConsist(HWND hWnd, int consistIndex)
         if (g_hEditMetricRatio)   ShowWindow(g_hEditMetricRatio,   SW_HIDE);
         if (g_hUnitPreviewCard)  ShowWindow(g_hUnitPreviewCard,  SW_SHOW);
 
-        // Hide Train Name / Speed / Perf Factor in Activity mode
+        // Hide Train Name / Speed / Perf Factor in Activity mode (and always in Classic View)
         if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_HIDE);
         if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_HIDE);
         if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
@@ -7001,8 +7761,12 @@ static void LoadAndDisplayActivityConsist(HWND hWnd, int consistIndex)
         // Populate Consist Identifier (read-only)
         std::wstring idDisplay = actCon.id;
         if (idDisplay.empty()) idDisplay = actCon.name;
-        SetWindowTextW(g_hEditTrainCfgId, idDisplay.c_str());
-        SendMessage(g_hEditTrainCfgId, EM_SETREADONLY, TRUE, 0);
+        if (g_hEditTrainCfgId)
+        {
+            EnableWindow(g_hEditTrainCfgId, TRUE);
+            SetWindowTextW(g_hEditTrainCfgId, idDisplay.c_str());
+            SendMessage(g_hEditTrainCfgId, EM_SETREADONLY, TRUE, 0);
+        }
 
         // Re-apply EM_SETRECT
         RECT rc;
@@ -7040,6 +7804,17 @@ static void LoadAndDisplayActivityConsist(HWND hWnd, int consistIndex)
                 ShowWindow(g_hVisualConsistView, SW_SHOW);
             }
             VisualConsistView_SetUnits(g_hVisualConsistView, g_LoadedConsistUnits, g_szBasePath, actCon.name, actCon.id);
+        }
+
+        // Trigger complete layout pass so g_hEditorUnitList and views are cleanly positioned and visible
+        RECT rcClient;
+        GetClientRect(hWnd, &rcClient);
+        SendMessage(hWnd, WM_SIZE, SIZE_RESTORED, MAKELPARAM(rcClient.right, rcClient.bottom));
+
+        if (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView && g_hClassicConsistView)
+        {
+            InvalidateRect(g_hClassicConsistView, NULL, TRUE);
+            UpdateWindow(g_hClassicConsistView);
         }
 
         InvalidateRect(hWnd, NULL, TRUE);
@@ -7344,36 +8119,11 @@ static void ActionDeleteSelectedConsists(HWND hWnd)
 
     if (activeDeleted)
     {
-        g_szCurrentConsistFile = L"";
-        g_LoadedConsistUnits.clear();
-        if (g_hEditorPane)       ShowWindow(g_hEditorPane,       SW_SHOW);
-        if (g_hSectionTrainCfg)  ShowWindow(g_hSectionTrainCfg,  SW_HIDE);
-        if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,     SW_HIDE);
-        if (g_hLabelTrainCfgId)  ShowWindow(g_hLabelTrainCfgId,  SW_HIDE);
-        if (g_hEditTrainCfgId)   ShowWindow(g_hEditTrainCfgId,   SW_HIDE);
-        if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_HIDE);
-        if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_HIDE);
-        if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
-        if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_HIDE);
-        if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_HIDE);
-        if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_HIDE);
-        if (g_hSectionMetrics)   ShowWindow(g_hSectionMetrics,   SW_HIDE);
-        if (g_hLabelMetricMass)   ShowWindow(g_hLabelMetricMass,   SW_HIDE);
-        if (g_hEditMetricMass)    ShowWindow(g_hEditMetricMass,    SW_HIDE);
-        if (g_hLabelMetricLength) ShowWindow(g_hLabelMetricLength, SW_HIDE);
-        if (g_hEditMetricLength)  ShowWindow(g_hEditMetricLength,  SW_HIDE);
-        if (g_hLabelMetricPower)  ShowWindow(g_hLabelMetricPower,  SW_HIDE);
-        if (g_hEditMetricPower)   ShowWindow(g_hEditMetricPower,   SW_HIDE);
-        if (g_hLabelMetricRatio)  ShowWindow(g_hLabelMetricRatio,  SW_HIDE);
-        if (g_hEditMetricRatio)   ShowWindow(g_hEditMetricRatio,   SW_HIDE);
-        if (g_hEditorUnitList)   ShowWindow(g_hEditorUnitList,   SW_HIDE);
-        if (g_hUnitPreviewCard)
+        if (g_szMainConsistFile == g_szCurrentConsistFile)
         {
-            ShowWindow(g_hUnitPreviewCard, SW_HIDE);
-            UnitPreviewCard_Clear(g_hUnitPreviewCard);
+            g_szMainConsistFile = L"";
         }
-        if (g_hVisualConsistView) VisualConsistView_SetUnits(g_hVisualConsistView, {}, g_szBasePath);
-        InvalidateRect(hWnd, NULL, TRUE);
+        ResetConsistEditorWorkspace(hWnd);
     }
 
     TriggerConsistsRescan(hWnd);
@@ -7705,9 +8455,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_AssetList.SetAllowMarquee(true);
             g_AssetList.SetShowSelectionGutter(true);
             g_AssetList.SetVirtualMode(AssetListGetCellText, (void*)(intptr_t)0);
-            g_AssetList.AddColumn(L"Name", 200, 0);
+            g_AssetList.AddColumn(L"Name", 190, 0);
             g_AssetList.AddColumn(L"Type", 80, 0);
-            g_AssetList.AddColumn(L"Folder", 140, 0);
+            g_AssetList.AddColumn(L"Folder", 130, 0);
+            g_AssetList.AddColumn(L"Status", 110, 0);
         }
 
         // 8b. Create Bottom Deck: Asset ListView (Pane 1 - Dual/Triple)
@@ -7720,9 +8471,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_AssetList2.SetAllowMarquee(true);
             g_AssetList2.SetShowSelectionGutter(true);
             g_AssetList2.SetVirtualMode(AssetListGetCellText, (void*)(intptr_t)1);
-            g_AssetList2.AddColumn(L"Name", 200, 0);
+            g_AssetList2.AddColumn(L"Name", 190, 0);
             g_AssetList2.AddColumn(L"Type", 80, 0);
-            g_AssetList2.AddColumn(L"Folder", 140, 0);
+            g_AssetList2.AddColumn(L"Folder", 130, 0);
+            g_AssetList2.AddColumn(L"Status", 110, 0);
             ShowWindow(g_hAssetList2, SW_HIDE);
         }
 
@@ -7736,9 +8488,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_AssetList3.SetAllowMarquee(true);
             g_AssetList3.SetShowSelectionGutter(true);
             g_AssetList3.SetVirtualMode(AssetListGetCellText, (void*)(intptr_t)2);
-            g_AssetList3.AddColumn(L"Name", 200, 0);
+            g_AssetList3.AddColumn(L"Name", 190, 0);
             g_AssetList3.AddColumn(L"Type", 80, 0);
-            g_AssetList3.AddColumn(L"Folder", 140, 0);
+            g_AssetList3.AddColumn(L"Folder", 130, 0);
+            g_AssetList3.AddColumn(L"Status", 110, 0);
             ShowWindow(g_hAssetList3, SW_HIDE);
         }
 
@@ -7804,6 +8557,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         PopulateCategoryTree();
         UpdateLibraryTheme(g_bDarkMode);
 
+        // Dynamically compute Left Pane width so both Top and Bottom Decks (and the Status column) fit cleanly by default
+        int desiredLeftDeckW = GetDynamicLeftDeckMinWidth(true);
+        if (g_wConsist < desiredLeftDeckW)
+        {
+            g_wConsist = desiredLeftDeckW;
+        }
+
         // 9. Create Right Pane: Consist Editor Workspace Header (static control)
         g_hWorkspaceHeader = CreateWindowEx(
             0, L"STATIC", L"  Consist Editor Workspace",
@@ -7816,16 +8576,36 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             SetWindowSubclass(g_hWorkspaceHeader, WorkspaceHeaderSubclassProc, 7, 0);
         }
 
-        // 9b. Create Right Pane: Consist Editor Workspace Background / Placeholder
+        // 9b. Create Right Pane: Consist Editor Workspace Background / Placeholder (kept hidden; permanent structured workspace is shown)
         g_hEditorPane = CreateWindowEx(
-            0, L"STATIC", L"Consist Editor Workspace",
-            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE | SS_NOTIFY,
+            0, L"STATIC", L"",
+            WS_CHILD | SS_CENTER | SS_CENTERIMAGE | SS_NOTIFY,
             600, 178, 500, 600,
             hWnd, (HMENU)IDC_EDITORPANE, hInst, NULL
         );
         if (g_hEditorPane)
         {
             SetWindowSubclass(g_hEditorPane, EditorPaneSubclassProc, 6, 0);
+        }
+
+        // 9c. Create Alternative TSRE-Style Consist Editor View
+        g_hClassicConsistView = CreateClassicConsistView(hWnd, hInst, 600, 178, 500, 600, 9200);
+        if (g_hClassicConsistView)
+        {
+            ClassicConsistView_SetDarkMode(g_hClassicConsistView, g_bDarkMode);
+        }
+
+        // Load Persistent View Mode Preference
+        int isViewLocked = DatabaseManager::GetSettingInt(L"ConsistViewModeLocked", 0);
+        g_bConsistViewLocked = (isViewLocked == 1);
+        if (g_bConsistViewLocked)
+        {
+            int prefMode = DatabaseManager::GetSettingInt(L"PreferredConsistViewMode", 0);
+            g_ConsistViewMode = (prefMode == 1) ? ConsistWorkspaceViewMode::ClassicView : ConsistWorkspaceViewMode::StudioGrid;
+        }
+        else
+        {
+            g_ConsistViewMode = ConsistWorkspaceViewMode::StudioGrid;
         }
 
         // ---------------------------------------------------------------
@@ -7843,34 +8623,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         g_hLabelFileName    = CreateWindowEx(0, L"STATIC", L"File Name (.con)",
             WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_NOTIFY, 0, 0, 0, 0, hWnd, (HMENU)IDC_LBL_FILENAME, hInst, NULL);
         g_hLabelTrainCfgId  = CreateWindowEx(0, L"STATIC", L"Consist Identifier",
-            WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_NOTIFY, 0, 0, 0, 0, hWnd, NULL, hInst, NULL);
+            WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_NOTIFY, 0, 0, 0, 0, hWnd, (HMENU)IDC_LBL_CFGID, hInst, NULL);
         g_hLabelTrainName   = CreateWindowEx(0, L"STATIC", L"Train Name",
-            WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_NOTIFY, 0, 0, 0, 0, hWnd, NULL, hInst, NULL);
+            WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_NOTIFY, 0, 0, 0, 0, hWnd, (HMENU)IDC_LBL_TRAINNAME, hInst, NULL);
         g_hLabelMaxVelocity = CreateWindowEx(0, L"STATIC", L"Speed Limit (km/h)",
-            WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_NOTIFY, 0, 0, 0, 0, hWnd, NULL, hInst, NULL);
+            WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_NOTIFY, 0, 0, 0, 0, hWnd, (HMENU)IDC_LBL_MAXVELOCITY, hInst, NULL);
         g_hLabelPerfFactor  = CreateWindowEx(0, L"STATIC", L"Performance Factor (%)",
-            WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_NOTIFY, 0, 0, 0, 0, hWnd, NULL, hInst, NULL);
+            WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_NOTIFY, 0, 0, 0, 0, hWnd, (HMENU)IDC_LBL_PERFFACTOR, hInst, NULL);
 
         // Flat edit boxes — ES_MULTILINE allows EM_SETRECT for vertical centering.
-        // ES_CENTER centers text horizontally.
-        // ES_AUTOHSCROLL keeps single-line scroll behaviour.
+        // Text and numeric input controls use ES_LEFT with ES_AUTOHSCROLL for consistent reading and scrolling without glitching.
         // No WS_EX_CLIENTEDGE — border is drawn by ModernEditSubclassProc.
-        const DWORD dwEditStyle = WS_CHILD | ES_CENTER | ES_MULTILINE | ES_AUTOHSCROLL;
+        const DWORD dwTextEditStyle = WS_CHILD | ES_LEFT | ES_MULTILINE | ES_AUTOHSCROLL;
+        const DWORD dwNumEditStyle  = WS_CHILD | ES_LEFT | ES_MULTILINE | ES_AUTOHSCROLL;
 
         g_hEditFileName = CreateWindowEx(
-            0, L"EDIT", L"", dwEditStyle,
+            0, L"EDIT", L"", dwTextEditStyle,
             0, 0, 0, 0, hWnd, (HMENU)IDC_ED_FILENAME, hInst, NULL);
         g_hEditTrainCfgId = CreateWindowEx(
-            0, L"EDIT", L"", dwEditStyle,
+            0, L"EDIT", L"", dwTextEditStyle,
             0, 0, 0, 0, hWnd, (HMENU)IDC_ED_TRAINCFGID, hInst, NULL);
         g_hEditTrainName = CreateWindowEx(
-            0, L"EDIT", L"", dwEditStyle,
+            0, L"EDIT", L"", dwTextEditStyle,
             0, 0, 0, 0, hWnd, (HMENU)IDC_ED_TRAINNAME, hInst, NULL);
         g_hEditMaxVelocity = CreateWindowEx(
-            0, L"EDIT", L"", dwEditStyle,
+            0, L"EDIT", L"", dwNumEditStyle,
             0, 0, 0, 0, hWnd, (HMENU)IDC_ED_MAXVELOCITY, hInst, NULL);
         g_hEditPerfFactor = CreateWindowEx(
-            0, L"EDIT", L"", dwEditStyle,
+            0, L"EDIT", L"", dwNumEditStyle,
             0, 0, 0, 0, hWnd, (HMENU)IDC_ED_PERFFACTOR, hInst, NULL);
 
         // Right Card: "TRAIN SUMMARY & METRICS" section header
@@ -7886,21 +8666,32 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         g_hLabelMetricRatio  = CreateWindowEx(0, L"STATIC", L"Composition", WS_CHILD | SS_LEFT | SS_CENTERIMAGE, 0, 0, 0, 0, hWnd, NULL, hInst, NULL);
 
         // Metrics read-only edit boxes
-        g_hEditMetricMass   = CreateWindowEx(0, L"EDIT", L"", dwEditStyle | ES_READONLY, 0, 0, 0, 0, hWnd, (HMENU)IDC_ED_METRIC_MASS, hInst, NULL);
-        g_hEditMetricLength = CreateWindowEx(0, L"EDIT", L"", dwEditStyle | ES_READONLY, 0, 0, 0, 0, hWnd, (HMENU)IDC_ED_METRIC_LENGTH, hInst, NULL);
-        g_hEditMetricPower  = CreateWindowEx(0, L"EDIT", L"", dwEditStyle | ES_READONLY, 0, 0, 0, 0, hWnd, (HMENU)IDC_ED_METRIC_POWER, hInst, NULL);
-        g_hEditMetricRatio  = CreateWindowEx(0, L"EDIT", L"", dwEditStyle | ES_READONLY, 0, 0, 0, 0, hWnd, (HMENU)IDC_ED_METRIC_RATIO, hInst, NULL);
+        g_hEditMetricMass   = CreateWindowEx(0, L"EDIT", L"", dwNumEditStyle | ES_READONLY, 0, 0, 0, 0, hWnd, (HMENU)IDC_ED_METRIC_MASS, hInst, NULL);
+        g_hEditMetricLength = CreateWindowEx(0, L"EDIT", L"", dwNumEditStyle | ES_READONLY, 0, 0, 0, 0, hWnd, (HMENU)IDC_ED_METRIC_LENGTH, hInst, NULL);
+        g_hEditMetricPower  = CreateWindowEx(0, L"EDIT", L"", dwNumEditStyle | ES_READONLY, 0, 0, 0, 0, hWnd, (HMENU)IDC_ED_METRIC_POWER, hInst, NULL);
+        g_hEditMetricRatio  = CreateWindowEx(0, L"EDIT", L"", dwNumEditStyle | ES_READONLY, 0, 0, 0, 0, hWnd, (HMENU)IDC_ED_METRIC_RATIO, hInst, NULL);
 
-        // Apply modern-style subclass to each edit box
-        if (g_hEditFileName)    SetWindowSubclass(g_hEditFileName,    ModernEditSubclassProc, 18, 0);
-        if (g_hEditTrainCfgId)  SetWindowSubclass(g_hEditTrainCfgId,  ModernEditSubclassProc, 9,  0);
-        if (g_hEditTrainName)   SetWindowSubclass(g_hEditTrainName,   ModernEditSubclassProc, 10, 0);
-        if (g_hEditMaxVelocity) SetWindowSubclass(g_hEditMaxVelocity, ModernEditSubclassProc, 11, 0);
-        if (g_hEditPerfFactor)  SetWindowSubclass(g_hEditPerfFactor,  ModernEditSubclassProc, 12, 0);
-        if (g_hEditMetricMass)   SetWindowSubclass(g_hEditMetricMass,   ModernEditSubclassProc, 13, 0);
-        if (g_hEditMetricLength) SetWindowSubclass(g_hEditMetricLength, ModernEditSubclassProc, 14, 0);
-        if (g_hEditMetricPower)  SetWindowSubclass(g_hEditMetricPower,  ModernEditSubclassProc, 15, 0);
-        if (g_hEditMetricRatio)  SetWindowSubclass(g_hEditMetricRatio,  ModernEditSubclassProc, 16, 0);
+        // Apply modern-style subclass to each edit box via ModernEditControl
+        if (g_hEditFileName)    ModernEdit_Attach(g_hEditFileName,    false, true, false, false);
+        if (g_hEditTrainCfgId)  ModernEdit_Attach(g_hEditTrainCfgId,  false, true, false, false);
+        if (g_hEditTrainName)   ModernEdit_Attach(g_hEditTrainName,   false, true, false, false);
+        if (g_hEditMaxVelocity) ModernEdit_Attach(g_hEditMaxVelocity, true,  true, true,  false);
+        if (g_hEditPerfFactor)  ModernEdit_Attach(g_hEditPerfFactor,  true,  true, true,  false);
+        if (g_hEditMetricMass)   ModernEdit_Attach(g_hEditMetricMass,   false, true, false, false);
+        if (g_hEditMetricLength) ModernEdit_Attach(g_hEditMetricLength, false, true, false, false);
+        if (g_hEditMetricPower)  ModernEdit_Attach(g_hEditMetricPower,  false, true, false, false);
+        if (g_hEditMetricRatio)  ModernEdit_Attach(g_hEditMetricRatio,  false, true, false, false);
+
+        HWND initialEdits[] = { g_hEditFileName, g_hEditTrainCfgId, g_hEditTrainName, g_hEditMaxVelocity, g_hEditPerfFactor,
+                                g_hEditMetricMass, g_hEditMetricLength, g_hEditMetricPower, g_hEditMetricRatio };
+        for (HWND hEd : initialEdits)
+        {
+            if (hEd)
+            {
+                SendMessageW(hEd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(9, 9));
+                EnableWindow(hEd, FALSE);
+            }
+        }
 
         // "Consist Units" section header
         g_hSectionUnits = CreateWindowEx(
@@ -7919,14 +8710,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             g_EditorUnitList.SetAllowMarquee(true);
             g_EditorUnitList.SetDrawCardBorder(true);
             g_EditorUnitList.SetShowSelectionGutter(true);
-            g_EditorUnitList.AddColumn(L"No.",              48,  1);
-            g_EditorUnitList.AddColumn(L"Name",             200, 0);
-            g_EditorUnitList.AddColumn(L"Type",             80,  0);
-            g_EditorUnitList.AddColumn(L"Status",           90,  0);
-            g_EditorUnitList.AddColumn(L"Orientation",      90,  0);
-            g_EditorUnitList.AddColumn(L"Parent Directory", 200, 0);
+            ConfigureEditorUnitListColumns(g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView);
             g_EditorUnitList.SetInlineCopyColumn(1);
-            ShowWindow(g_hEditorUnitList, SW_HIDE);
+            ShowWindow(g_hEditorUnitList, SW_SHOW);
         }
 
         // Visual Consist Track Preview (docked by default in dedicated bottom workspace partition)
@@ -8237,7 +9023,205 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         break;
     }
 
-    case WM_COMMAND:
+    case WM_CLASSIC_UNIT_SELECTED:
+    {
+        int selUnit = (int)wParam;
+        for (int r = 0; r < g_EditorUnitList.GetItemCount(); ++r)
+        {
+            int no = GetUnitIndexFromListRow(r);
+            if (no == selUnit)
+            {
+                g_EditorUnitList.SetSelectedIndex(r);
+                break;
+            }
+        }
+        UpdateUnitPreviewFromSelected();
+        return 0;
+    }
+
+    case WM_CLASSIC_UNIT_FLIP:
+    {
+        int flipIdx = (int)wParam;
+        if (flipIdx >= 0 && flipIdx < (int)g_LoadedConsistUnits.size())
+        {
+            PushUndoState(L"Flip Unit");
+            g_LoadedConsistUnits[flipIdx].isFlipped = !g_LoadedConsistUnits[flipIdx].isFlipped;
+            RefreshEditorUnitList(true);
+            if (g_hVisualConsistView)
+            {
+                VisualConsistView_SetUnits(g_hVisualConsistView, g_LoadedConsistUnits, g_szBasePath);
+            }
+            SaveCurrentConsist(hWnd);
+        }
+        return 0;
+    }
+
+    case WM_CLASSIC_UNIT_DELETE:
+    {
+        int delIdx = (int)wParam;
+        if (delIdx >= 0 && delIdx < (int)g_LoadedConsistUnits.size())
+        {
+            SetSelectedConsistUnitIndices({ delIdx });
+            DeleteSelectedConsistUnits(hWnd);
+        }
+        else
+        {
+            // delIdx == -1: Delete button in header clicked, delete all selected units (or single selected unit)
+            DeleteSelectedConsistUnits(hWnd);
+        }
+        return 0;
+    }
+
+    case WM_CLASSIC_UNITS_REORDER:
+    {
+        int srcIdx = (int)wParam;
+        int tgtIdx = (int)lParam;
+        ReorderConsistUnits(hWnd, { srcIdx }, tgtIdx);
+        return 0;
+    }
+
+    case WM_CLASSIC_SAVE_REQUEST:
+    {
+        SaveCurrentConsist(hWnd);
+        return 0;
+    }
+
+    case WM_CLASSIC_SAVE_AS_REQUEST:
+    {
+        SendMessage(hWnd, WM_COMMAND, MAKEWPARAM(CMD_ACTION_CLONE_CONSIST, 0), 0);
+        return 0;
+    }
+
+    case WM_CLASSIC_FLIP_ALL:
+    {
+        if (!g_LoadedConsistUnits.empty())
+        {
+            PushUndoState(L"Flip Entire Consist");
+            for (auto& u : g_LoadedConsistUnits)
+            {
+                u.isFlipped = !u.isFlipped;
+            }
+            RefreshEditorUnitList(true);
+            if (g_hVisualConsistView)
+            {
+                VisualConsistView_SetUnits(g_hVisualConsistView, g_LoadedConsistUnits, g_szBasePath);
+            }
+            SaveCurrentConsist(hWnd);
+        }
+        return 0;
+    }
+
+    case WM_CLASSIC_CLEAR_REQUEST:
+    {
+        if (!g_LoadedConsistUnits.empty())
+        {
+            if (ShowModernMessageBox(hWnd, L"Are you sure you want to clear all units from this consist?", L"Clear Consist", MB_YESNO | MB_ICONWARNING) == IDYES)
+            {
+                PushUndoState(L"Clear Consist");
+                g_LoadedConsistUnits.clear();
+                g_CheckedConsistUnits.clear();
+                RefreshEditorUnitList(false);
+                if (g_hVisualConsistView)
+                {
+                    VisualConsistView_SetUnits(g_hVisualConsistView, g_LoadedConsistUnits, g_szBasePath);
+                }
+                SaveCurrentConsist(hWnd);
+            }
+        }
+        return 0;
+    }
+
+    case WM_CLASSIC_CONTEXT_MENU:
+    {
+        NMCELLCLICK nmcc = { 0 };
+        nmcc.hdr.hwndFrom = g_hEditorUnitList;
+        nmcc.hdr.idFrom = IDC_ED_UNITLIST;
+        nmcc.hdr.code = NM_RCELLCLICK;
+        nmcc.itemIndex = (int)wParam;
+        nmcc.subItemIndex = (int)lParam;
+        SendMessageW(hWnd, WM_NOTIFY, IDC_ED_UNITLIST, (LPARAM)&nmcc);
+        return 0;
+    }
+
+    case WM_CLASSIC_SPLITTER_RESIZED:
+    {
+        if (g_hClassicConsistView)
+        {
+            if (g_hEditorUnitList)
+            {
+                RECT rcList = { 0 };
+                ClassicConsistView_GetUnitListRect(g_hClassicConsistView, &rcList);
+                if (rcList.right > rcList.left && rcList.bottom > rcList.top)
+                {
+                    POINT ptTL = { rcList.left, rcList.top };
+                    POINT ptBR = { rcList.right, rcList.bottom };
+                    ClientToScreen(g_hClassicConsistView, &ptTL);
+                    ClientToScreen(g_hClassicConsistView, &ptBR);
+                    ScreenToClient(hWnd, &ptTL);
+                    ScreenToClient(hWnd, &ptBR);
+                    SetWindowPos(g_hEditorUnitList, HWND_TOP, ptTL.x, ptTL.y, ptBR.x - ptTL.x, ptBR.y - ptTL.y, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                }
+            }
+            if (g_hUnitPreviewCard)
+            {
+                RECT rcPrev = { 0 };
+                ClassicConsistView_GetPreviewCardRect(g_hClassicConsistView, &rcPrev);
+                if (rcPrev.right > rcPrev.left && rcPrev.bottom > rcPrev.top)
+                {
+                    POINT ptTL = { rcPrev.left, rcPrev.top };
+                    POINT ptBR = { rcPrev.right, rcPrev.bottom };
+                    ClientToScreen(g_hClassicConsistView, &ptTL);
+                    ClientToScreen(g_hClassicConsistView, &ptBR);
+                    ScreenToClient(hWnd, &ptTL);
+                    ScreenToClient(hWnd, &ptBR);
+                    SetWindowPos(g_hUnitPreviewCard, HWND_TOP, ptTL.x, ptTL.y, ptBR.x - ptTL.x, ptBR.y - ptTL.y, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                }
+            }
+        }
+        return 0;
+    }
+
+    case WM_CLASSIC_METADATA_CHANGE:
+    {
+        if (wParam == 99)
+        {
+            RefreshEditorUnitList(true);
+        }
+        else if (wParam == 0) // EN_CHANGE from Classic View edit controls
+        {
+            if (g_hClassicConsistView && !g_szCurrentConsistFile.empty())
+            {
+                std::wstring cFile, cCfgId, cName, cVel, cPerf;
+                ClassicConsistView_GetConsistMetadata(g_hClassicConsistView, cFile, cCfgId, cName, cVel, cPerf);
+
+                // Synchronize hidden Studio Grid controls
+                if (g_hEditTrainCfgId)  SetWindowTextW(g_hEditTrainCfgId,  cCfgId.c_str());
+                if (g_hEditTrainName)   SetWindowTextW(g_hEditTrainName,   cName.c_str());
+                if (g_hEditMaxVelocity) SetWindowTextW(g_hEditMaxVelocity, cVel.c_str());
+                if (g_hEditPerfFactor)  SetWindowTextW(g_hEditPerfFactor,  cPerf.c_str());
+
+                auto it = g_ConsistSessions.find(g_szCurrentConsistFile);
+                if (it != g_ConsistSessions.end())
+                {
+                    it->second.trainCfg.trainCfgId = cCfgId;
+                    it->second.trainCfg.name = cName;
+                    it->second.trainCfg.maxVelocity = _wtof(cVel.c_str());
+                    it->second.trainCfg.perfFactor = _wtof(cPerf.c_str());
+
+                    it->second.isDirty = (it->second.units != it->second.savedUnits || it->second.trainCfg != it->second.savedTrainCfg);
+                    UpdateConsistManagerRow(g_szCurrentConsistFile);
+                    ClassicConsistView_SetDirty(g_hClassicConsistView, it->second.isDirty);
+                }
+            }
+        }
+        else if (wParam == 1) // EN_KILLFOCUS from Classic View edit controls
+        {
+            SaveCurrentConsist(hWnd);
+        }
+        return 0;
+    }
+
+        case WM_COMMAND:
     {
         int wmId = LOWORD(wParam);
         int wmEvent = HIWORD(wParam);
@@ -8248,7 +9232,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             int clickedIndex = (int)(INT_PTR)lParam;
             for (int r = 0; r < g_EditorUnitList.GetItemCount(); ++r)
             {
-                int no = _wtoi(g_EditorUnitList.GetCellText(r, 0).c_str()) - 1;
+                int no = GetUnitIndexFromListRow(r);
                 if (no == clickedIndex)
                 {
                     g_EditorUnitList.SetSelectedIndex(r);
@@ -8434,10 +9418,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         // Caption labels – small, muted text above each field
         else if (hwndStatic == g_hLabelFileName || hwndStatic == g_hLabelTrainCfgId || hwndStatic == g_hLabelTrainName || hwndStatic == g_hLabelMaxVelocity || hwndStatic == g_hLabelPerfFactor ||
-                 hwndStatic == g_hLabelMetricMass || hwndStatic == g_hLabelMetricLength || hwndStatic == g_hLabelMetricPower || hwndStatic == g_hLabelMetricRatio)
+                 hwndStatic == g_hLabelMetricMass || hwndStatic == g_hLabelMetricLength || hwndStatic == g_hLabelMetricPower || hwndStatic == g_hLabelMetricRatio ||
+                 id == IDC_LBL_FILENAME || id == IDC_LBL_CFGID || id == IDC_LBL_TRAINNAME || id == IDC_LBL_MAXVELOCITY || id == IDC_LBL_PERFFACTOR)
         {
+            HWND hPairedEdit = NULL;
+            if (hwndStatic == g_hLabelFileName || id == IDC_LBL_FILENAME) hPairedEdit = g_hEditFileName;
+            else if (hwndStatic == g_hLabelTrainCfgId || id == IDC_LBL_CFGID) hPairedEdit = g_hEditTrainCfgId;
+            else if (hwndStatic == g_hLabelTrainName || id == IDC_LBL_TRAINNAME) hPairedEdit = g_hEditTrainName;
+            else if (hwndStatic == g_hLabelMaxVelocity || id == IDC_LBL_MAXVELOCITY) hPairedEdit = g_hEditMaxVelocity;
+            else if (hwndStatic == g_hLabelPerfFactor || id == IDC_LBL_PERFFACTOR) hPairedEdit = g_hEditPerfFactor;
+
+            bool isEnabled = hPairedEdit ? (IsWindowEnabled(hPairedEdit) != FALSE) : (!g_szCurrentConsistFile.empty() || !g_LoadedConsistUnits.empty());
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, UITheme::TextMuted);
+            SetTextColor(hdc, isEnabled ? UITheme::TextMuted : RGB(100, 100, 110));
             static HBRUSH hbrCapDark = CreateSolidBrush(UITheme::DarkBackground);
             return (LRESULT)hbrCapDark;
         }
@@ -8445,13 +9438,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         else if (hwndStatic == g_hEditFileName || hwndStatic == g_hEditTrainCfgId || hwndStatic == g_hEditTrainName || hwndStatic == g_hEditMaxVelocity || hwndStatic == g_hEditPerfFactor ||
                  hwndStatic == g_hEditMetricMass || hwndStatic == g_hEditMetricLength || hwndStatic == g_hEditMetricPower || hwndStatic == g_hEditMetricRatio)
         {
-            COLORREF clrBg = (hwndStatic == g_hHoveredEdit) ? RGB(45, 45, 45) : RGB(38, 38, 38);
-            SetBkMode(hdc, OPAQUE);
-            SetBkColor(hdc, clrBg);
-            SetTextColor(hdc, RGB(220, 220, 220));
-            static HBRUSH hbrEditRoNormal  = CreateSolidBrush(RGB(38, 38, 38));
-            static HBRUSH hbrEditRoHovered = CreateSolidBrush(RGB(45, 45, 45));
-            return (LRESULT)((hwndStatic == g_hHoveredEdit) ? hbrEditRoHovered : hbrEditRoNormal);
+            return ModernEdit_OnCtlColor(hdc, hwndStatic);
         }
         // Editor pane placeholder
         else if (id == IDC_EDITORPANE)
@@ -8489,20 +9476,38 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
         HDC  hdc      = (HDC)wParam;
         HWND hwndEdit = (HWND)lParam;
-        // Restyle consist-editor fields and multi-pane search edit fields
+        // Restyle consist-editor fields
         if (hwndEdit == g_hEditFileName || hwndEdit == g_hEditTrainCfgId || hwndEdit == g_hEditTrainName || hwndEdit == g_hEditMaxVelocity || hwndEdit == g_hEditPerfFactor ||
-            hwndEdit == g_hEditMetricMass || hwndEdit == g_hEditMetricLength || hwndEdit == g_hEditMetricPower || hwndEdit == g_hEditMetricRatio ||
-            hwndEdit == g_hPaneSearchEdit[0] || hwndEdit == g_hPaneSearchEdit[1] || hwndEdit == g_hPaneSearchEdit[2])
+            hwndEdit == g_hEditMetricMass || hwndEdit == g_hEditMetricLength || hwndEdit == g_hEditMetricPower || hwndEdit == g_hEditMetricRatio)
         {
-            COLORREF clrBg = (hwndEdit == g_hFocusedEdit) ? RGB(30, 30, 30) : ((hwndEdit == g_hHoveredEdit) ? RGB(45, 45, 45) : RGB(38, 38, 38));
+            return ModernEdit_OnCtlColor(hdc, hwndEdit);
+        }
+        // Restyle multi-pane search edit fields
+        if (hwndEdit == g_hPaneSearchEdit[0] || hwndEdit == g_hPaneSearchEdit[1] || hwndEdit == g_hPaneSearchEdit[2] || hwndEdit == g_hSoundSearchEdit)
+        {
+            bool isEnabled = IsWindowEnabled(hwndEdit) != FALSE;
+            COLORREF clrBg;
+            COLORREF clrText;
+            if (!isEnabled)
+            {
+                clrBg = RGB(26, 26, 26);
+                clrText = RGB(100, 100, 110);
+            }
+            else
+            {
+                clrBg = (hwndEdit == g_hFocusedEdit) ? RGB(30, 30, 30) : ((hwndEdit == g_hHoveredEdit) ? RGB(45, 45, 45) : RGB(38, 38, 38));
+                clrText = UITheme::TextPrimary;
+            }
             SetBkMode(hdc, OPAQUE);
             SetBkColor(hdc, clrBg);
-            SetTextColor(hdc, UITheme::TextPrimary);
+            SetTextColor(hdc, clrText);
 
-            static HBRUSH hbrEditFocused = CreateSolidBrush(RGB(30, 30, 30));
-            static HBRUSH hbrEditHovered = CreateSolidBrush(RGB(45, 45, 45));
-            static HBRUSH hbrEditNormal  = CreateSolidBrush(RGB(38, 38, 38));
+            static HBRUSH hbrEditDisabled = CreateSolidBrush(RGB(26, 26, 26));
+            static HBRUSH hbrEditFocused  = CreateSolidBrush(RGB(30, 30, 30));
+            static HBRUSH hbrEditHovered  = CreateSolidBrush(RGB(45, 45, 45));
+            static HBRUSH hbrEditNormal   = CreateSolidBrush(RGB(38, 38, 38));
 
+            if (!isEnabled) return (LRESULT)hbrEditDisabled;
             if (hwndEdit == g_hFocusedEdit) return (LRESULT)hbrEditFocused;
             if (hwndEdit == g_hHoveredEdit) return (LRESULT)hbrEditHovered;
             return (LRESULT)hbrEditNormal;
@@ -8653,8 +9658,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 {
                     bool isFixedInSession = (!pConsist->isBroken && g_SessionFixedConsists.count(pConsist->szFileName) > 0);
                     if (isFixedInSession) statusStr = L"Fixed";
-                    else if (pConsist->hasMissingStock || (pConsist->isBroken && !pConsist->hasMissingShape)) statusStr = L"Missing Stock";
+                    else if (pConsist->hasMissingStock) statusStr = L"Missing Stock";
+                    else if (pConsist->hasCorruptedStock) statusStr = L"Corrupted Stock";
+                    else if (pConsist->hasCorruptedShape) statusStr = L"Corrupted Shape";
                     else if (pConsist->hasMissingShape) statusStr = L"Missing Shape";
+                    else if (pConsist->isBroken) statusStr = L"Missing Stock";
                     else statusStr = L"Healthy";
                 }
 
@@ -9243,7 +10251,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             if (g_DragState == DRAG_SPLIT1)
             {
                 g_wConsist = x;
-                if (g_wConsist < 200) g_wConsist = 200;
+                int minW = (std::min)(width - 200, GetDynamicLeftDeckMinWidth(false));
+                if (minW < 200) minW = 200;
+                if (g_wConsist < minW) g_wConsist = minW;
                 if (g_wConsist > width - 200) g_wConsist = width - 200;
                 if (g_wCategorySplit > g_wConsist - 80) g_wCategorySplit = g_wConsist - 80;
                 if (g_wCategorySplit < 80) g_wCategorySplit = 80;
@@ -9423,6 +10433,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         int paneHeight = height - paneY;
         if (paneHeight < 50) paneHeight = 50;
 
+        if (width > 400 && g_wConsist > width - 200)
+        {
+            g_wConsist = width - 200;
+        }
         int wLeftPane = g_wConsist;
         int wEditor = width - wLeftPane - 9; // 9px vertical gap for Splitter 1
         if (wEditor < 100) wEditor = 100;
@@ -9743,6 +10757,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
         if (g_ActiveTab == 2)
         {
+            if (g_hClassicConsistView) ShowWindow(g_hClassicConsistView, SW_HIDE);
             if (g_hWorkspaceHeader)   ShowWindow(g_hWorkspaceHeader, SW_HIDE);
             if (g_hEditorPane)        ShowWindow(g_hEditorPane, SW_HIDE);
             if (g_hSplitterSection3)  ShowWindow(g_hSplitterSection3, SW_HIDE);
@@ -9793,7 +10808,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         // Position Workspace Header (static control)
         if (g_hWorkspaceHeader != NULL)
         {
-            SetWindowPos(g_hWorkspaceHeader, NULL, wLeftPane + 9, paneY, wEditor, 28, SWP_NOZORDER | SWP_NOCOPYBITS);
+            SetWindowPos(g_hWorkspaceHeader, NULL, wLeftPane + 9, paneY, wEditor, 28, SWP_NOZORDER | SWP_NOCOPYBITS | SWP_SHOWWINDOW);
+            ShowWindow(g_hWorkspaceHeader, SW_SHOW);
             InvalidateRect(g_hWorkspaceHeader, NULL, TRUE);
         }
 
@@ -9826,7 +10842,113 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
         }
 
-            // Dual card layout: Train Details on Left, 3D Unit Preview Card on Right (Directly edge-resizable)
+            if (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView)
+            {
+                // Hide Studio Grid specific controls
+                if (g_hSectionTrainCfg) ShowWindow(g_hSectionTrainCfg, SW_HIDE);
+                if (g_hLabelFileName)   ShowWindow(g_hLabelFileName,   SW_HIDE);
+                if (g_hEditFileName)    ShowWindow(g_hEditFileName,    SW_HIDE);
+                if (g_hLabelTrainCfgId) ShowWindow(g_hLabelTrainCfgId, SW_HIDE);
+                if (g_hEditTrainCfgId)  ShowWindow(g_hEditTrainCfgId,  SW_HIDE);
+                if (g_hLabelTrainName)  ShowWindow(g_hLabelTrainName,  SW_HIDE);
+                if (g_hEditTrainName)   ShowWindow(g_hEditTrainName,   SW_HIDE);
+                if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
+                if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_HIDE);
+                if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_HIDE);
+                if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_HIDE);
+                if (g_hSectionUnits)     ShowWindow(g_hSectionUnits,     SW_HIDE);
+                if (g_hSectionMetrics)   ShowWindow(g_hSectionMetrics,   SW_HIDE);
+                if (g_hEditMetricMass)   ShowWindow(g_hEditMetricMass,    SW_HIDE);
+                if (g_hEditMetricLength) ShowWindow(g_hEditMetricLength,  SW_HIDE);
+                if (g_hEditMetricPower)  ShowWindow(g_hEditMetricPower,   SW_HIDE);
+                if (g_hEditMetricRatio)  ShowWindow(g_hEditMetricRatio,   SW_HIDE);
+                if (g_hSplitterUnitPreview) ShowWindow(g_hSplitterUnitPreview, SW_HIDE);
+                if (g_hSplitterUnitPreviewRight) ShowWindow(g_hSplitterUnitPreviewRight, SW_HIDE);
+                if (g_hSplitterTopDeck) ShowWindow(g_hSplitterTopDeck, SW_HIDE);
+
+                // Show & Position Classic Consist View
+                if (g_hClassicConsistView)
+                {
+                    SetWindowPos(g_hClassicConsistView, NULL, edX, paneY + 29, edW, topAreaHeight - 29, SWP_NOZORDER | SWP_SHOWWINDOW);
+
+                    wchar_t szF[256] = { 0 }, szC[256] = { 0 }, szN[256] = { 0 }, szV[256] = { 0 }, szP[256] = { 0 };
+                    if (g_hEditFileName) GetWindowTextW(g_hEditFileName, szF, 256);
+                    if (g_hEditTrainCfgId) GetWindowTextW(g_hEditTrainCfgId, szC, 256);
+                    if (g_hEditTrainName) GetWindowTextW(g_hEditTrainName, szN, 256);
+                    if (g_hEditMaxVelocity) GetWindowTextW(g_hEditMaxVelocity, szV, 256);
+                    if (g_hEditPerfFactor) GetWindowTextW(g_hEditPerfFactor, szP, 256);
+
+                    ClassicConsistView_SetConsistMetadata(g_hClassicConsistView, szF, szC, szN, szV, szP);
+                    ClassicConsistView_SetUnits(g_hClassicConsistView, g_LoadedConsistUnits, g_szBasePath, szN, szF);
+
+                    // Position g_hEditorUnitList inside Classic View's dedicated list area
+                    if (g_hEditorUnitList)
+                    {
+                        RECT rcList = { 0 };
+                        ClassicConsistView_GetUnitListRect(g_hClassicConsistView, &rcList);
+                        if (rcList.right > rcList.left && rcList.bottom > rcList.top)
+                        {
+                            POINT ptTL = { rcList.left, rcList.top };
+                            POINT ptBR = { rcList.right, rcList.bottom };
+                            ClientToScreen(g_hClassicConsistView, &ptTL);
+                            ClientToScreen(g_hClassicConsistView, &ptBR);
+                            ScreenToClient(hWnd, &ptTL);
+                            ScreenToClient(hWnd, &ptBR);
+                            SetWindowPos(g_hEditorUnitList, HWND_TOP, ptTL.x, ptTL.y, ptBR.x - ptTL.x, ptBR.y - ptTL.y, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                        }
+                    }
+
+                    // Position 3D Unit Preview Card inside Classic View's dedicated upper preview area
+                    if (g_hUnitPreviewCard)
+                    {
+                        RECT rcPrev = { 0 };
+                        ClassicConsistView_GetPreviewCardRect(g_hClassicConsistView, &rcPrev);
+                        if (rcPrev.right > rcPrev.left && rcPrev.bottom > rcPrev.top)
+                        {
+                            POINT ptTL = { rcPrev.left, rcPrev.top };
+                            POINT ptBR = { rcPrev.right, rcPrev.bottom };
+                            ClientToScreen(g_hClassicConsistView, &ptTL);
+                            ClientToScreen(g_hClassicConsistView, &ptBR);
+                            ScreenToClient(hWnd, &ptTL);
+                            ScreenToClient(hWnd, &ptBR);
+                            SetWindowPos(g_hUnitPreviewCard, HWND_TOP, ptTL.x, ptTL.y, ptBR.x - ptTL.x, ptBR.y - ptTL.y, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                        }
+                    }
+                }
+                break;
+            }
+
+            if (g_hClassicConsistView) ShowWindow(g_hClassicConsistView, SW_HIDE);
+
+            // Re-show Studio Grid specific controls (they were hidden in Classic View)
+            if (g_hSectionTrainCfg) ShowWindow(g_hSectionTrainCfg, SW_SHOW);
+            if (g_hSectionUnits)    ShowWindow(g_hSectionUnits,    SW_SHOW);
+            if (g_hLabelTrainCfgId) ShowWindow(g_hLabelTrainCfgId, SW_SHOW);
+            if (g_hEditTrainCfgId)  ShowWindow(g_hEditTrainCfgId,  SW_SHOW);
+
+            if (g_ActiveTab == 0) // Main Consists Tab
+            {
+                if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_SHOW);
+                if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_SHOW);
+                if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_SHOW);
+                if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_SHOW);
+                if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_SHOW);
+                if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_SHOW);
+                if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_SHOW);
+                if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_SHOW);
+            }
+            else // Activity Consists Tab
+            {
+                if (g_hLabelFileName)    ShowWindow(g_hLabelFileName,    SW_HIDE);
+                if (g_hEditFileName)     ShowWindow(g_hEditFileName,     SW_HIDE);
+                if (g_hLabelTrainName)   ShowWindow(g_hLabelTrainName,   SW_HIDE);
+                if (g_hEditTrainName)    ShowWindow(g_hEditTrainName,    SW_HIDE);
+                if (g_hLabelMaxVelocity) ShowWindow(g_hLabelMaxVelocity, SW_HIDE);
+                if (g_hEditMaxVelocity)  ShowWindow(g_hEditMaxVelocity,  SW_HIDE);
+                if (g_hLabelPerfFactor)  ShowWindow(g_hLabelPerfFactor,  SW_HIDE);
+                if (g_hEditPerfFactor)   ShowWindow(g_hEditPerfFactor,   SW_HIDE);
+            }
+
             int previewW = g_wUnitPreviewWidth;
             if (previewW < 200) previewW = 200;
             if (previewW > edW - 240) previewW = edW - 240;
@@ -9862,7 +10984,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     SetWindowPos(g_hLabelFileName, NULL, leftCardX, leftY, labelW, FIELD_H, SWP_NOZORDER);
                 if (g_hEditFileName) {
                     SetWindowPos(g_hEditFileName, NULL, leftValX, leftY, valueW, FIELD_H, SWP_NOZORDER);
-                    RECT rcFmt = { 6, VPAD, valueW - 6, FIELD_H - VPAD };
+                    RECT rcFmt = { 9, VPAD, valueW - 9, FIELD_H - VPAD };
                     SendMessage(g_hEditFileName, EM_SETRECT, 0, (LPARAM)&rcFmt);
                 }
                 leftY += FIELD_H + ROW_GAP;
@@ -9873,7 +10995,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 SetWindowPos(g_hLabelTrainCfgId, NULL, leftCardX, leftY, labelW, FIELD_H, SWP_NOZORDER);
             if (g_hEditTrainCfgId) {
                 SetWindowPos(g_hEditTrainCfgId, NULL, leftValX, leftY, valueW, FIELD_H, SWP_NOZORDER);
-                RECT rcFmt = { 6, VPAD, valueW - 6, FIELD_H - VPAD };
+                RECT rcFmt = { 9, VPAD, valueW - 9, FIELD_H - VPAD };
                 SendMessage(g_hEditTrainCfgId, EM_SETRECT, 0, (LPARAM)&rcFmt);
             }
             leftY += FIELD_H + ROW_GAP;
@@ -9885,7 +11007,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     SetWindowPos(g_hLabelTrainName, NULL, leftCardX, leftY, labelW, FIELD_H, SWP_NOZORDER);
                 if (g_hEditTrainName) {
                     SetWindowPos(g_hEditTrainName, NULL, leftValX, leftY, valueW, FIELD_H, SWP_NOZORDER);
-                    RECT rcFmt = { 6, VPAD, valueW - 6, FIELD_H - VPAD };
+                    RECT rcFmt = { 9, VPAD, valueW - 9, FIELD_H - VPAD };
                     SendMessage(g_hEditTrainName, EM_SETRECT, 0, (LPARAM)&rcFmt);
                 }
                 leftY += FIELD_H + ROW_GAP;
@@ -9895,7 +11017,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     SetWindowPos(g_hLabelMaxVelocity, NULL, leftCardX, leftY, labelW, FIELD_H, SWP_NOZORDER);
                 if (g_hEditMaxVelocity) {
                     SetWindowPos(g_hEditMaxVelocity, NULL, leftValX, leftY, valueW, FIELD_H, SWP_NOZORDER);
-                    RECT rcFmt = { 6, VPAD, valueW - 6, FIELD_H - VPAD };
+                    RECT rcFmt = { 9, VPAD, valueW - 9, FIELD_H - VPAD };
                     SendMessage(g_hEditMaxVelocity, EM_SETRECT, 0, (LPARAM)&rcFmt);
                 }
                 leftY += FIELD_H + ROW_GAP;
@@ -9905,7 +11027,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     SetWindowPos(g_hLabelPerfFactor, NULL, leftCardX, leftY, labelW, FIELD_H, SWP_NOZORDER);
                 if (g_hEditPerfFactor) {
                     SetWindowPos(g_hEditPerfFactor, NULL, leftValX, leftY, valueW, FIELD_H, SWP_NOZORDER);
-                    RECT rcFmt = { 6, VPAD, valueW - 6, FIELD_H - VPAD };
+                    RECT rcFmt = { 9, VPAD, valueW - 9, FIELD_H - VPAD };
                     SendMessage(g_hEditPerfFactor, EM_SETRECT, 0, (LPARAM)&rcFmt);
                 }
                 leftY += FIELD_H + ROW_GAP;
@@ -10609,6 +11731,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 menuItems.push_back(ContextMenuItem::Action(17, L"\xE946", L"Inspect Unit Specifications (Stock Info)...", L"", hasSelection));
                 menuItems.push_back(ContextMenuItem::Action(19, L"\xE7F4", L"Inspect in 3D Visual Studio (Stock Inspector)...", L"", hasSelection));
                 menuItems.push_back(ContextMenuItem::Action(18, L"\xE7B7", L"View 3D Model in Shape Viewer...", L"", hasSelection));
+                menuItems.push_back(ContextMenuItem::Action(26, L"\xE72C", L"Re-evaluate Unit Health", L"", hasSelection));
                 menuItems.push_back(ContextMenuItem::Separator());
                 menuItems.push_back(ContextMenuItem::Action(25, L"\xE70F", L"Open .eng/.wag in Default Editor", L"Enter", hasSelection));
                 menuItems.push_back(ContextMenuItem::Separator());
@@ -10669,6 +11792,38 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         OpenFileInDefaultEditor(hWnd, fullPath);
                     }
                 }
+                break;
+            }
+            case 26:
+            {
+                for (int idx : selIndices)
+                {
+                    if (idx >= 0 && idx < (int)g_LoadedConsistUnits.size())
+                    {
+                        const auto& u = g_LoadedConsistUnits[idx];
+                        std::wstring ext = u.isEngine ? L".eng" : L".wag";
+                        std::wstring altExt = u.isEngine ? L".wag" : L".eng";
+                        std::wstring p1 = g_szBasePath + L"\\TRAINS\\TRAINSET\\" + u.parentDir + L"\\" + u.uid + ext;
+                        std::wstring p2 = g_szBasePath + L"\\TRAINS\\TRAINSET\\" + u.parentDir + L"\\" + u.uid + altExt;
+                        StockSpecReader::ClearStockCacheForPath(p1);
+                        StockSpecReader::ClearStockCacheForPath(p2);
+                        StockSpecReader::StockSpec spec = StockSpecReader::ReadFullSpec(p1, g_szBasePath);
+                        if (!spec.fullShapePath.empty())
+                        {
+                            ShapeReader::ClearShapeCacheForPath(spec.fullShapePath);
+                        }
+                    }
+                }
+                EvaluateAndUpdateConsistStatus(g_szCurrentConsistFile, g_LoadedConsistUnits, true);
+                int selConsistRow = g_ConsistList.GetSelectedIndex();
+                if (selConsistRow >= 0)
+                {
+                    std::wstring st = EvaluateAndUpdateConsistStatus(g_szCurrentConsistFile, g_LoadedConsistUnits, false);
+                    g_ConsistList.SetCellText(selConsistRow, 2, st);
+                    g_ConsistList.Invalidate();
+                }
+                InvalidateRect(g_hEditorUnitList, NULL, FALSE);
+                if (g_hVisualConsistView) InvalidateRect(g_hVisualConsistView, NULL, FALSE);
                 break;
             }
             case 14:
@@ -10737,21 +11892,148 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
             bool hasSelection = !selRows.empty();
 
+            bool isMainConsistTab = (g_ActiveTab != 1);
+            double refSpeed = 0.0;
+            double refPerf = 1.0;
+            bool hasRefConsist = false;
+
+            if (isMainConsistTab && !selRows.empty())
+            {
+                std::wstring refFn = g_ConsistList.GetCellText(selRows[0], 4);
+                if (!refFn.empty())
+                {
+                    const auto& refSess = EnsureConsistSession(refFn);
+                    refSpeed = refSess.trainCfg.maxVelocity;
+                    refPerf = refSess.trainCfg.perfFactor;
+                    hasRefConsist = true;
+                }
+            }
+
+            auto FormatNum = [](double val) -> std::wstring {
+                wchar_t b[64];
+                if (std::abs(val - std::round(val)) < 1e-4)
+                    swprintf_s(b, L"%.0f", val);
+                else
+                    swprintf_s(b, L"%.3f", val);
+                return b;
+            };
+
+            wchar_t szCopySpeed[128], szCopyPerf[128], szCopyBoth[128];
+            if (hasRefConsist)
+            {
+                swprintf_s(szCopySpeed, L"Copy Speed Limit (%s km/h)", FormatNum(refSpeed).c_str());
+                swprintf_s(szCopyPerf, L"Copy Performance Factor (%s%%)", FormatNum(refPerf * 100.0).c_str());
+                swprintf_s(szCopyBoth, L"Copy Both (Speed: %s, Perf: %s%%)", FormatNum(refSpeed).c_str(), FormatNum(refPerf * 100.0).c_str());
+            }
+            else
+            {
+                wcscpy_s(szCopySpeed, L"Copy Speed Limit");
+                wcscpy_s(szCopyPerf, L"Copy Performance Factor");
+                wcscpy_s(szCopyBoth, L"Copy Both (Speed & Performance)");
+            }
+
+            std::vector<ContextMenuItem> copySubItems = {
+                ContextMenuItem::Action(101, L"\xE8C8", szCopySpeed, L"", hasRefConsist),
+                ContextMenuItem::Action(102, L"\xE8C8", szCopyPerf, L"", hasRefConsist),
+                ContextMenuItem::Action(103, L"\xE8C8", szCopyBoth, L"", hasRefConsist)
+            };
+
+            wchar_t szPasteSpeed[128], szPastePerf[128], szPasteBoth[128];
+            bool canPasteSpeed = g_CopiedConsistParams.hasSpeed && hasSelection && isMainConsistTab;
+            bool canPastePerf = g_CopiedConsistParams.hasPerf && hasSelection && isMainConsistTab;
+            bool canPasteBoth = (g_CopiedConsistParams.hasSpeed || g_CopiedConsistParams.hasPerf) && hasSelection && isMainConsistTab;
+
+            if (g_CopiedConsistParams.hasSpeed)
+                swprintf_s(szPasteSpeed, L"Paste Speed Limit (%s km/h)", FormatNum(g_CopiedConsistParams.speed).c_str());
+            else
+                wcscpy_s(szPasteSpeed, L"Paste Speed Limit");
+
+            if (g_CopiedConsistParams.hasPerf)
+                swprintf_s(szPastePerf, L"Paste Performance Factor (%s%%)", FormatNum(g_CopiedConsistParams.perf * 100.0).c_str());
+            else
+                wcscpy_s(szPastePerf, L"Paste Performance Factor");
+
+            if (g_CopiedConsistParams.hasSpeed && g_CopiedConsistParams.hasPerf)
+                swprintf_s(szPasteBoth, L"Paste Both (Speed: %s, Perf: %s%%)", FormatNum(g_CopiedConsistParams.speed).c_str(), FormatNum(g_CopiedConsistParams.perf * 100.0).c_str());
+            else
+                wcscpy_s(szPasteBoth, L"Paste Both");
+
+            std::vector<ContextMenuItem> pasteSubItems = {
+                ContextMenuItem::Action(104, L"\xE77F", szPasteSpeed, L"", canPasteSpeed),
+                ContextMenuItem::Action(105, L"\xE77F", szPastePerf, L"", canPastePerf),
+                ContextMenuItem::Action(106, L"\xE77F", szPasteBoth, L"", canPasteBoth)
+            };
+
+            std::vector<ContextMenuItem> setSubItems = {
+                ContextMenuItem::Action(107, L"\xE70F", L"Set Speed Limit...", L"", hasSelection && isMainConsistTab),
+                ContextMenuItem::Action(108, L"\xE70F", L"Set Performance Factor...", L"", hasSelection && isMainConsistTab),
+                ContextMenuItem::Action(109, L"\xE70F", L"Set Both (Speed & Performance)...", L"", hasSelection && isMainConsistTab)
+            };
+
             std::vector<ContextMenuItem> menuItems = {
                 ContextMenuItem::Action(6, L"\xE916", L"Batch Sound Mutator...", L"", hasSelection),
                 ContextMenuItem::Separator(),
                 ContextMenuItem::Action(1, L"\xE790", L"Mutate Consist(s) from Pool Preset...", L"", hasSelection),
                 ContextMenuItem::Action(2, L"\xE77F", L"Insert Units from Pool Preset...", L"", hasSelection),
                 ContextMenuItem::Separator(),
+                ContextMenuItem::SubMenu(L"\xE8C8", L"Copy Parameters", copySubItems, isMainConsistTab && hasRefConsist),
+                ContextMenuItem::SubMenu(L"\xE77F", L"Paste Parameters", pasteSubItems, canPasteBoth),
+                ContextMenuItem::SubMenu(L"\xE70F", L"Set Parameters", setSubItems, hasSelection && isMainConsistTab),
+                ContextMenuItem::Separator(),
                 ContextMenuItem::Action(3, L"\xE8C8", L"Clone Consist", L"", hasSelection),
                 ContextMenuItem::Action(4, L"\xE74D", L"Delete Consist(s)", L"Del", hasSelection),
                 ContextMenuItem::Separator(),
-                ContextMenuItem::Action(5, L"\xE74E", L"Save Consist(s)", L"Ctrl+S", hasSelection)
+                ContextMenuItem::Action(5, L"\xE74E", L"Save Consist(s)", L"Ctrl+S", hasSelection),
+                ContextMenuItem::Separator(),
+                ContextMenuItem::Action(7, L"\xE72C", L"Re-evaluate Consist Health", L"", hasSelection)
             };
 
             int cmd = ModernContextMenu::Show(hWnd, screenX, screenY, menuItems, TRUE);
             switch (cmd)
             {
+            case 7:
+            {
+                for (int r : selRows)
+                {
+                    std::wstring fn = g_ConsistList.GetCellText(r, 4);
+                    if (fn.empty()) continue;
+                    std::wstring fp = EnsureConsistFilePath(g_szBasePath, fn);
+                    if (fp.empty()) continue;
+                    try {
+                        ConsistReader::ConsistData conData = ConsistReader::LoadConsist(fp);
+                        for (const auto& unit : conData.units)
+                        {
+                            std::wstring ext = unit.isEngine ? L".eng" : L".wag";
+                            std::wstring altExt = unit.isEngine ? L".wag" : L".eng";
+                            std::wstring p1 = g_szBasePath + L"\\TRAINS\\TRAINSET\\" + unit.parentDir + L"\\" + unit.uid + ext;
+                            std::wstring p2 = g_szBasePath + L"\\TRAINS\\TRAINSET\\" + unit.parentDir + L"\\" + unit.uid + altExt;
+                            StockSpecReader::ClearStockCacheForPath(p1);
+                            StockSpecReader::ClearStockCacheForPath(p2);
+                            StockSpecReader::StockSpec spec = StockSpecReader::ReadFullSpec(p1, g_szBasePath);
+                            if (!spec.fullShapePath.empty())
+                            {
+                                ShapeReader::ClearShapeCacheForPath(spec.fullShapePath);
+                            }
+                        }
+                        std::wstring newStatus = EvaluateAndUpdateConsistStatus(fn, conData.units, true);
+                        g_ConsistList.SetCellText(r, 2, newStatus);
+                        for (auto& item : g_ScannedConsistsCache)
+                        {
+                            if (item.szFileName == fn)
+                            {
+                                item.isBroken = (newStatus == L"Missing Stock" || newStatus == L"Corrupted Stock" || newStatus == L"Missing Shape" || newStatus == L"Corrupted Shape" || newStatus == L"Broken");
+                                item.hasMissingStock = (newStatus == L"Missing Stock");
+                                item.hasCorruptedStock = (newStatus == L"Corrupted Stock");
+                                item.hasMissingShape = (newStatus == L"Missing Shape");
+                                item.hasCorruptedShape = (newStatus == L"Corrupted Shape");
+                                break;
+                            }
+                        }
+                    } catch (...) {}
+                }
+                g_ConsistList.Invalidate();
+                break;
+            }
             case 1:
             {
                 std::vector<std::wstring> selFiles;
@@ -10837,6 +12119,122 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                     }
                 }
                 ShowBatchSoundMutatorDialog(hWnd, g_szBasePath, selFiles, 0);
+                break;
+            }
+            case 101: // Copy Speed
+            {
+                if (hasRefConsist)
+                {
+                    g_CopiedConsistParams.hasSpeed = true;
+                    g_CopiedConsistParams.speed = refSpeed;
+                }
+                break;
+            }
+            case 102: // Copy Perf
+            {
+                if (hasRefConsist)
+                {
+                    g_CopiedConsistParams.hasPerf = true;
+                    g_CopiedConsistParams.perf = refPerf;
+                }
+                break;
+            }
+            case 103: // Copy Both
+            {
+                if (hasRefConsist)
+                {
+                    g_CopiedConsistParams.hasSpeed = true;
+                    g_CopiedConsistParams.speed = refSpeed;
+                    g_CopiedConsistParams.hasPerf = true;
+                    g_CopiedConsistParams.perf = refPerf;
+                }
+                break;
+            }
+            case 104: // Paste Speed
+            {
+                if (g_CopiedConsistParams.hasSpeed)
+                {
+                    std::vector<std::wstring> targets;
+                    for (int r : selRows)
+                    {
+                        std::wstring fn = g_ConsistList.GetCellText(r, 4);
+                        if (!fn.empty()) targets.push_back(fn);
+                    }
+                    ApplyConsistParameters(hWnd, targets, true, g_CopiedConsistParams.speed, false, 0.0);
+                }
+                break;
+            }
+            case 105: // Paste Perf
+            {
+                if (g_CopiedConsistParams.hasPerf)
+                {
+                    std::vector<std::wstring> targets;
+                    for (int r : selRows)
+                    {
+                        std::wstring fn = g_ConsistList.GetCellText(r, 4);
+                        if (!fn.empty()) targets.push_back(fn);
+                    }
+                    ApplyConsistParameters(hWnd, targets, false, 0.0, true, g_CopiedConsistParams.perf);
+                }
+                break;
+            }
+            case 106: // Paste Both
+            {
+                std::vector<std::wstring> targets;
+                for (int r : selRows)
+                {
+                    std::wstring fn = g_ConsistList.GetCellText(r, 4);
+                    if (!fn.empty()) targets.push_back(fn);
+                }
+                ApplyConsistParameters(hWnd, targets, g_CopiedConsistParams.hasSpeed, g_CopiedConsistParams.speed, g_CopiedConsistParams.hasPerf, g_CopiedConsistParams.perf);
+                break;
+            }
+            case 107: // Set Speed Limit...
+            {
+                double outSpeed = refSpeed;
+                double outPerf = refPerf;
+                if (ShowSetConsistParametersDialog(hWnd, 0, refSpeed, refPerf, outSpeed, outPerf))
+                {
+                    std::vector<std::wstring> targets;
+                    for (int r : selRows)
+                    {
+                        std::wstring fn = g_ConsistList.GetCellText(r, 4);
+                        if (!fn.empty()) targets.push_back(fn);
+                    }
+                    ApplyConsistParameters(hWnd, targets, true, outSpeed, false, 0.0);
+                }
+                break;
+            }
+            case 108: // Set Performance Factor...
+            {
+                double outSpeed = refSpeed;
+                double outPerf = refPerf;
+                if (ShowSetConsistParametersDialog(hWnd, 1, refSpeed, refPerf, outSpeed, outPerf))
+                {
+                    std::vector<std::wstring> targets;
+                    for (int r : selRows)
+                    {
+                        std::wstring fn = g_ConsistList.GetCellText(r, 4);
+                        if (!fn.empty()) targets.push_back(fn);
+                    }
+                    ApplyConsistParameters(hWnd, targets, false, 0.0, true, outPerf);
+                }
+                break;
+            }
+            case 109: // Set Both (Speed & Performance)...
+            {
+                double outSpeed = refSpeed;
+                double outPerf = refPerf;
+                if (ShowSetConsistParametersDialog(hWnd, 2, refSpeed, refPerf, outSpeed, outPerf))
+                {
+                    std::vector<std::wstring> targets;
+                    for (int r : selRows)
+                    {
+                        std::wstring fn = g_ConsistList.GetCellText(r, 4);
+                        if (!fn.empty()) targets.push_back(fn);
+                    }
+                    ApplyConsistParameters(hWnd, targets, true, outSpeed, true, outPerf);
+                }
                 break;
             }
             }
@@ -10995,6 +12393,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 ContextMenuItem::Action(17, L"\xE946", L"Inspect Stock Specifications (Stock Info)...", L"", hasStockSel),
                 ContextMenuItem::Action(19, L"\xE7F4", L"Inspect in 3D Visual Studio (Stock Inspector)...", L"", hasStockSel),
                 ContextMenuItem::Action(18, L"\xE7B7", L"View 3D Model in Shape Viewer...", L"", hasStockSel),
+                ContextMenuItem::Action(26, L"\xE72C", L"Re-evaluate Stock Health", L"", hasStockSel),
                 ContextMenuItem::Separator(),
                 ContextMenuItem::Action(25, L"\xE70F", L"Open .eng/.wag in Default Editor", L"", hasStockSel)
             };
@@ -11002,6 +12401,38 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             int cmd = ModernContextMenu::Show(hWnd, screenX, screenY, menuItems, TRUE);
             switch (cmd)
             {
+            case 26:
+            {
+                CustomListControl* pActiveAssetList = (idCtrl == IDC_ASSETLIST) ? &g_AssetList : ((idCtrl == IDC_ASSETLIST2) ? &g_AssetList2 : &g_AssetList3);
+                if (hasStockSel && pActiveAssetList)
+                {
+                    int paneIdx = (idCtrl == IDC_ASSETLIST) ? 0 : ((idCtrl == IDC_ASSETLIST2) ? 1 : 2);
+                    std::vector<int> selStock = pActiveAssetList->GetSelectedIndices();
+                    EnterCriticalSection(&g_StockCacheCS);
+                    for (int sIdx : selStock)
+                    {
+                        if (sIdx >= 0 && sIdx < (int)g_FilteredStockIndicesPane[paneIdx].size())
+                        {
+                            size_t gIdx = g_FilteredStockIndicesPane[paneIdx][sIdx];
+                            if (gIdx < g_StockCache.size())
+                            {
+                                auto& item = g_StockCache[gIdx];
+                                std::wstring stockPath = g_szBasePath + L"\\TRAINS\\TRAINSET\\" + item.szFolder + L"\\" + item.szFileName + item.szExtension;
+                                StockSpecReader::ClearStockCacheForPath(stockPath);
+                                StockSpecReader::StockSpec spec = StockSpecReader::ReadFullSpec(stockPath, g_szBasePath);
+                                if (!spec.fullShapePath.empty())
+                                {
+                                    ShapeReader::ClearShapeCacheForPath(spec.fullShapePath);
+                                }
+                                EvaluateStockHealth(item, g_szBasePath);
+                            }
+                        }
+                    }
+                    LeaveCriticalSection(&g_StockCacheCS);
+                    pActiveAssetList->Invalidate();
+                }
+                break;
+            }
             case 5: CopySelectedStockUnits(hWnd); break;
             case 20: CopySelectedUnitNamesToClipboard(hWnd); break;
             case 6: PasteConsistUnits(hWnd, PASTE_END, &selectedStock); break;
@@ -11152,7 +12583,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
             return 0;
         }
-        else if (pnmhdr->hwndFrom == g_hConsistList && (pnmhdr->code == NM_CLICK || pnmhdr->code == NM_CELLCLICK || pnmhdr->code == NM_RETURN || pnmhdr->code == NM_DBLCLK))
+        else if (pnmhdr->hwndFrom == g_hConsistList && (pnmhdr->code == NM_CLICK || pnmhdr->code == NM_CELLCLICK || pnmhdr->code == NM_RETURN || pnmhdr->code == NM_DBLCLK || pnmhdr->code == LVN_ITEMCHANGED))
         {
             SetActivePane(PANE_CONSIST, hWnd);
             int sel = g_ConsistList.GetSelectedIndex();
@@ -11170,10 +12601,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 else // Main Consists Tab & Sound Editing Tab
                 {
                     std::wstring filename = g_ConsistList.GetCellText(sel, 4);
-                    if (!filename.empty())
+                    if (!filename.empty() && filename != g_szCurrentConsistFile)
                     {
                         LoadAndDisplayConsist(hWnd, filename);
                     }
+                }
+            }
+            else
+            {
+                // Unselecting / clicking outside deselects and unloads the consist cleanly
+                if (!g_szCurrentConsistFile.empty() || !g_LoadedConsistUnits.empty() || g_CurrentActivityConsistIndex != -1)
+                {
+                    SaveCurrentConsistSessionState();
+                    ResetConsistEditorWorkspace(hWnd);
                 }
             }
             SyncPoolMutatorSelectionIfOpen();
@@ -11239,7 +12679,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         return 0;
                     }
                 }
-                else if (pCellClick->subItemIndex == 4) // Orientation column (index 4)
+                else if (pCellClick->subItemIndex == (g_ConsistViewMode == ConsistWorkspaceViewMode::ClassicView ? 2 : 4)) // Orientation column (index 2 in Classic View, 4 in Studio Grid)
                 {
                     int clickedRow = pCellClick->itemIndex;
                     if (clickedRow >= 0)
@@ -11303,7 +12743,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                                 else wagFiles.push_back(item);
                             }
                         };
-                        for (const auto& s : info.wagonSounds) addS(s, u.isEngine ? L"Wagon/Tender Sound" : L"Wagon Sound");
+                        for (const auto& s : info.wagonSounds) addS(s, L"Wagon Sound");
                         for (const auto& s : info.engineSounds) addS(s, L"Engine Sound");
                         for (const auto& s : info.orts3dCabSounds) addS(s, L"Cab Sound");
                         for (const auto& s : info.insideSounds) addS(s, L"Interior Sound");
@@ -11856,6 +13296,7 @@ std::wstring AssetListGetCellText(int itemIndex, int subItemIndex, void* pParam)
             if (subItemIndex == 0) text = item.szFileName;
             else if (subItemIndex == 1) text = item.szCategory;
             else if (subItemIndex == 2) text = item.szFolder;
+            else if (subItemIndex == 3) text = item.szStatus.empty() ? L"Healthy" : item.szStatus;
         }
     }
     LeaveCriticalSection(&g_StockCacheCS);

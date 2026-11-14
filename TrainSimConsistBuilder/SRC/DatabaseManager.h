@@ -72,9 +72,13 @@ namespace DatabaseManager
     bool DeleteSmsPoolPreset(int id);
     void SeedDefaultSmsPoolPresetsInternal();
 
-    // SMS Stream Presets persistence (SMS Stream Mutator)
+    // SMS Stream Presets physical folder & database persistence (SoundData\SMS_Presets)
+    std::wstring GetSmsPresetsRootDir();
+    std::wstring SanitizePresetFileName(const std::wstring& name);
+    std::vector<std::wstring> GetSmsPresetCategories();
     bool LoadStreamPresets(std::vector<StreamPresetCard>& outCards);
-    bool SaveStreamPresets(const std::vector<StreamPresetCard>& cards);
+    bool SaveStreamPresets(std::vector<StreamPresetCard>& cards);
+    bool DeleteStreamPresetFile(const StreamPresetCard& card);
 
     // Cleanup legacy .dat cache files if present
     void CleanupLegacyDatFiles();

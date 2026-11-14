@@ -18,7 +18,9 @@ namespace ActivityConsistReader {
         int totalUnits = 0;
         bool isBroken = false;
         bool hasMissingStock = false;
+        bool hasCorruptedStock = false;
         bool hasMissingShape = false;
+        bool hasCorruptedShape = false;
         bool isDirty = false;
     };
 

@@ -751,7 +751,6 @@ static void AddRoundedRectPath(Gdiplus::GraphicsPath& path, Gdiplus::RectF rc, G
 void CustomScrollBar::Paint(HDC hdc, COLORREF gutterColor, COLORREF parentBg)
 {
     if (!m_isVisible) return;
-    if (m_orientation == ScrollBarOrientation::Vertical && m_animAlpha <= 0.005f) return;
 
     Gdiplus::Graphics g(hdc);
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -860,17 +859,11 @@ void CustomScrollBar::Paint(HDC hdc, COLORREF gutterColor, COLORREF parentBg)
         float travelLen = trackLen - thumbLen;
         float thumbOffset = (travelRange > 0 && travelLen > 0) ? ((float)(m_pos - m_min) * travelLen / (float)travelRange) : 0.0f;
 
+        float cx = (float)(m_rcBounds.left + m_rcBounds.right) / 2.0f;
         float colW = 2.5f;
         float expW = 6.0f;
         thumbW = colW + (expW - colW) * m_animExpand;
-
-        float colRight = (float)m_rcBounds.right - 2.0f;
-        float expCenterX = (float)(m_rcBounds.left + m_rcBounds.right) / 2.0f;
-
-        float colLeft = colRight - colW;
-        float expLeft = expCenterX - (expW / 2.0f);
-
-        thumbX = colLeft + (expLeft - colLeft) * m_animExpand;
+        thumbX = cx - (thumbW / 2.0f);
         thumbY = (float)m_rcBounds.top + arrowPad + thumbOffset;
         thumbH = thumbLen;
     }
@@ -907,9 +900,7 @@ void CustomScrollBar::Paint(HDC hdc, COLORREF gutterColor, COLORREF parentBg)
         clrBase = m_clrThumbHover;
     }
 
-    BYTE thumbAlpha = (m_orientation == ScrollBarOrientation::Horizontal)
-        ? (BYTE)(130.0f + 125.0f * (std::max)(m_animAlpha, m_animExpand))
-        : (BYTE)(255.0f * m_animAlpha);
+    BYTE thumbAlpha = (BYTE)(130.0f + 125.0f * (std::max)(m_animAlpha, m_animExpand));
 
     Gdiplus::SolidBrush thumbBr(Gdiplus::Color(thumbAlpha, GetRValue(clrBase), GetGValue(clrBase), GetBValue(clrBase)));
 

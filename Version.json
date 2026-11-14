@@ -1,6 +1,6 @@
 {
   "version": "9.3.6",
-  "build": 99000,
-  "changelog": "Minor Bug Fixes , UI Improvements.",
+  "build": 99300,
+  "changelog": "1. Bug Fix: Corrected Issue where last unit didnt show up in Unit table.\n2. New Feature: Introduced Classic View.\n3. Some UI Improvements, Changes.",
   "download_url": "https://github.com/devddd963/TrainSimConsistBuilder/releases/latest/download/TrainSimConsistBuilder.zip"
 }

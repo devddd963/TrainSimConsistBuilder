@@ -5,9 +5,31 @@
 #include <sstream>
 #include <cctype>
 #include <cmath>
+#include <mutex>
+#include <unordered_set>
 
 namespace StockSpecReader
 {
+    static std::mutex s_stockCacheMutex;
+    static std::unordered_set<std::wstring> s_corruptedStockCache;
+    static std::unordered_set<std::wstring> s_validStockCache;
+
+    void ClearStockCache()
+    {
+        std::lock_guard<std::mutex> lock(s_stockCacheMutex);
+        s_corruptedStockCache.clear();
+        s_validStockCache.clear();
+    }
+
+    void ClearStockCacheForPath(const std::wstring& stockFilePath)
+    {
+        if (stockFilePath.empty()) return;
+        std::wstring lowerPath = stockFilePath;
+        for (wchar_t& c : lowerPath) c = towlower(c);
+        std::lock_guard<std::mutex> lock(s_stockCacheMutex);
+        s_corruptedStockCache.erase(lowerPath);
+        s_validStockCache.erase(lowerPath);
+    }
     // =========================================================================
     // String & Unicode Helpers
     // =========================================================================
@@ -86,6 +108,117 @@ namespace StockSpecReader
             if (c == L'/') c = L'\\';
         }
         return res;
+    }
+
+    bool IsStockCorrupted(const std::wstring& stockFilePath)
+    {
+        if (stockFilePath.empty()) return false;
+
+        std::wstring lowerPath = ToLowerWide(stockFilePath);
+
+        {
+            std::lock_guard<std::mutex> lock(s_stockCacheMutex);
+            if (s_corruptedStockCache.count(lowerPath) > 0) return true;
+            if (s_validStockCache.count(lowerPath) > 0) return false;
+        }
+
+        HANDLE hFile = CreateFileW(
+            stockFilePath.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            NULL,
+            OPEN_EXISTING,
+            FILE_FLAG_SEQUENTIAL_SCAN,
+            NULL
+        );
+        if (hFile == INVALID_HANDLE_VALUE)
+        {
+            return false; // Not corrupted, simply not found on disk (caller handles MissingStock)
+        }
+
+        LARGE_INTEGER liSize;
+        if (!GetFileSizeEx(hFile, &liSize))
+        {
+            CloseHandle(hFile);
+            return false;
+        }
+
+        // A valid .eng or .wag file must have some minimal tokens, e.g. at least 16 bytes
+        if (liSize.QuadPart < 16)
+        {
+            CloseHandle(hFile);
+            std::lock_guard<std::mutex> lock(s_stockCacheMutex);
+            s_corruptedStockCache.insert(lowerPath);
+            return true;
+        }
+
+        // Read the first chunk (up to 4096 bytes) to verify it's a valid text STF file containing basic keywords
+        DWORD toRead = (DWORD)min((LONGLONG)4096, liSize.QuadPart);
+        std::vector<uint8_t> buf(toRead + 2, 0);
+        DWORD bytesRead = 0;
+        if (!ReadFile(hFile, buf.data(), toRead, &bytesRead, NULL) || bytesRead < 16)
+        {
+            CloseHandle(hFile);
+            std::lock_guard<std::mutex> lock(s_stockCacheMutex);
+            s_corruptedStockCache.insert(lowerPath);
+            return true;
+        }
+        CloseHandle(hFile);
+
+        // Check content: .eng and .wag can be UTF-16 LE (BOM 0xFF 0xFE) or ASCII/UTF-8
+        std::string textAscii;
+        if (bytesRead >= 2 && buf[0] == 0xFF && buf[1] == 0xFE)
+        {
+            // UTF-16LE
+            const wchar_t* pw = (const wchar_t*)(buf.data() + 2);
+            size_t wlen = (bytesRead - 2) / sizeof(wchar_t);
+            for (size_t i = 0; i < wlen; ++i)
+            {
+                wchar_t wc = pw[i];
+                if (wc < 128) textAscii.push_back((char)tolower((int)wc));
+                else textAscii.push_back(' ');
+            }
+        }
+        else
+        {
+            // ASCII / UTF-8
+            for (DWORD i = 0; i < bytesRead; ++i)
+            {
+                textAscii.push_back((char)tolower((int)buf[i]));
+            }
+        }
+
+        // Check for essential stock keywords anywhere in the first 4KB:
+        // "wagon", "engine", "wagonshape", "simisa", "include"
+        bool hasStockKeyword = (textAscii.find("wagon") != std::string::npos ||
+                                textAscii.find("engine") != std::string::npos ||
+                                textAscii.find("wagonshape") != std::string::npos ||
+                                textAscii.find("simisa") != std::string::npos ||
+                                textAscii.find("include") != std::string::npos);
+
+        if (!hasStockKeyword && liSize.QuadPart > 4096)
+        {
+            // Check full file if first 4KB didn't match (e.g. large comment header)
+            std::string fullRaw = ReadFileRawBytes(stockFilePath);
+            std::string lowerFull = ToLowerAscii(fullRaw);
+            hasStockKeyword = (lowerFull.find("wagon") != std::string::npos ||
+                               lowerFull.find("engine") != std::string::npos ||
+                               lowerFull.find("wagonshape") != std::string::npos ||
+                               lowerFull.find("include") != std::string::npos);
+        }
+
+        if (!hasStockKeyword)
+        {
+            std::lock_guard<std::mutex> lock(s_stockCacheMutex);
+            s_corruptedStockCache.insert(lowerPath);
+            return true;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(s_stockCacheMutex);
+            s_validStockCache.insert(lowerPath);
+        }
+        return false;
     }
 
     static std::wstring ResolvePathRelative(const std::wstring& baseDir, const std::wstring& relPath)
@@ -1395,7 +1528,27 @@ namespace StockSpecReader
 
         if (spec.fileExistsOnDisk)
         {
+            if (IsStockCorrupted(filePath))
+            {
+                spec.isCorruptedStock = true;
+                spec.isValid = false;
+                return spec;
+            }
+
             ParseSTFStream(filePath, spec, 0, trainsetBasePath);
+
+            if (spec.wagonName.empty() && spec.engineName.empty() && spec.mainShapeFile.empty() && spec.resolvedIncludes.empty())
+            {
+                // Only mark corrupted if IsStockCorrupted also confirmed failure (e.g. invalid bytes, missing keywords).
+                // If the file has valid stock tokens or structure, do not falsely flag as corrupted stock.
+                if (IsStockCorrupted(filePath))
+                {
+                    spec.isCorruptedStock = true;
+                    spec.isValid = false;
+                    return spec;
+                }
+            }
+
             spec.isValid = true;
         }
         else
@@ -1499,7 +1652,7 @@ namespace StockSpecReader
         const std::wstring& trainsetBasePath)
     {
         StockSpec spec = ReadFullSpec(filePath, trainsetBasePath);
-        if (!spec.isValid) return false;
+        if (!spec.isValid || spec.isCorruptedStock) return false;
 
         outName = spec.displayName;
         outType = spec.category;

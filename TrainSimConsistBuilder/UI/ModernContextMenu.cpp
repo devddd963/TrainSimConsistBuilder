@@ -18,6 +18,7 @@ struct ModernContextMenuState {
     bool isDone = false;
     int maxShortcutW = 0;
     HFONT hFontText = NULL;
+    HFONT hFontBold = NULL;
     HFONT hFontIcons = NULL;
     HFONT hFontShortcuts = NULL;
 
@@ -152,13 +153,23 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                 SetBkMode(hMemDC, TRANSPARENT);
 
                 // 1. Icon Glyph
-                if (pState->hFontIcons && !item.icon.empty())
+                if (!item.icon.empty())
                 {
-                    HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontIcons);
-                    SetTextColor(hMemDC, item.isEnabled ? RGB(96, 205, 255) : textDis);
                     RECT rcIcon = { rcItem.left + 6, rcItem.top, rcItem.left + 28, rcItem.bottom };
-                    DrawTextW(hMemDC, item.icon.c_str(), -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                    SelectObject(hMemDC, hOldF);
+                    if (item.icon == L"\xE73E" || item.icon == L"✓")
+                    {
+                        HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontBold);
+                        SetTextColor(hMemDC, item.isEnabled ? RGB(96, 205, 255) : textDis);
+                        DrawTextW(hMemDC, L"✓", -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        SelectObject(hMemDC, hOldF);
+                    }
+                    else if (pState->hFontIcons)
+                    {
+                        HFONT hOldF = (HFONT)SelectObject(hMemDC, pState->hFontIcons);
+                        SetTextColor(hMemDC, item.isEnabled ? RGB(96, 205, 255) : textDis);
+                        DrawTextW(hMemDC, item.icon.c_str(), -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        SelectObject(hMemDC, hOldF);
+                    }
                 }
 
                 int rightMargin = 12;
@@ -429,9 +440,11 @@ static LRESULT CALLBACK ModernContextMenuWndProc(HWND hWnd, UINT uMsg, WPARAM wP
                 pState->pSubMenuState = nullptr;
             }
             if (pState->hFontText) DeleteObject(pState->hFontText);
+            if (pState->hFontBold) DeleteObject(pState->hFontBold);
             if (pState->hFontShortcuts) DeleteObject(pState->hFontShortcuts);
             if (pState->hFontIcons) DeleteObject(pState->hFontIcons);
             pState->hFontText = NULL;
+            pState->hFontBold = NULL;
             pState->hFontShortcuts = NULL;
             pState->hFontIcons = NULL;
             pState->isDone = true;
@@ -493,6 +506,11 @@ static HWND CreateMenuWindow(HWND hParent, int x, int y, const std::vector<Conte
         -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
+
+    pState->hFontBold = CreateFontW(
+        -12, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
     pState->hFontShortcuts = CreateFontW(
         -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,

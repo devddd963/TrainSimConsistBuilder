@@ -23,5 +23,8 @@ void UnitPreviewCard_Clear(HWND hWnd);
 // Toggles or updates theme
 void UnitPreviewCard_SetDarkMode(HWND hWnd, BOOL bDark);
 
+// Controls whether the Unit Specs HUD Overlay is available (Classic View only)
+void UnitPreviewCard_SetHudAllowed(HWND hWnd, bool allowed);
+
 // Returns true if a unit is currently loaded and displaying
 bool UnitPreviewCard_HasModel(HWND hWnd);

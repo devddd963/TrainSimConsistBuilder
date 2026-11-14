@@ -3,6 +3,7 @@
 #endif
 
 #include "CustomDropDownMenu.h"
+#include "UITheme.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <algorithm>
@@ -162,14 +163,66 @@ namespace
         }
     }
 
-    static void RecalculateLayout(DropDownInternalState* pState)
+    static void RecalculateLayout(DropDownInternalState* pState, HWND hWnd = NULL)
     {
         if (!pState) return;
         auto visible = GetVisibleIndices(*pState);
         int totalVis = (int)visible.size();
+        int visibleItems = (std::min)(totalVis, pState->maxVisibleItems);
+        if (visibleItems < 1) visibleItems = 1;
+
         pState->contentHeight = 12 + totalVis * pState->itemHeight;
+        pState->viewportHeight = 12 + visibleItems * pState->itemHeight;
         int maxOffset = (std::max)(0, pState->contentHeight - pState->viewportHeight);
         pState->scrollOffset = (std::max)(0, (std::min)(maxOffset, pState->scrollOffset));
+
+        if (!hWnd) hWnd = pState->hWnd;
+        if (hWnd && IsWindow(hWnd))
+        {
+            RECT rcWindow;
+            GetWindowRect(hWnd, &rcWindow);
+            int curW = rcWindow.right - rcWindow.left;
+            int newH = pState->viewportHeight;
+
+            int x = rcWindow.left;
+            int y = pState->rcAnchorScreen.bottom + 4;
+
+            HMONITOR hMon = MonitorFromPoint({ x, y }, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi = { sizeof(mi) };
+            if (GetMonitorInfoW(hMon, &mi))
+            {
+                if (x + curW > mi.rcWork.right) x = mi.rcWork.right - curW - 6;
+                if (x < mi.rcWork.left) x = mi.rcWork.left + 6;
+
+                int spaceBelow = mi.rcWork.bottom - y;
+                int spaceAbove = pState->rcAnchorScreen.top - mi.rcWork.top - 4;
+
+                if (spaceBelow < newH && spaceAbove > spaceBelow)
+                {
+                    // Flip above anchor
+                    if (newH > spaceAbove)
+                    {
+                        newH = (std::max)(pState->itemHeight + 12, spaceAbove);
+                        pState->viewportHeight = newH;
+                    }
+                    y = pState->rcAnchorScreen.top - newH - 4;
+                }
+                else
+                {
+                    // Stay below anchor
+                    if (newH > spaceBelow)
+                    {
+                        newH = (std::max)(pState->itemHeight + 12, spaceBelow);
+                        pState->viewportHeight = newH;
+                    }
+                }
+            }
+
+            maxOffset = (std::max)(0, pState->contentHeight - pState->viewportHeight);
+            pState->scrollOffset = (std::max)(0, (std::min)(maxOffset, pState->scrollOffset));
+
+            SetWindowPos(hWnd, HWND_TOPMOST, x, y, curW, newH, SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
     }
 
     static HFONT CreateFluentFont(int pointSize, int weight, const wchar_t* faceName)
@@ -334,34 +387,9 @@ namespace
 
                     if (pState->isMultiSelect && it.id > 0)
                     {
-                        // Checkbox for whole group
+                        // Checkbox for whole group (Sound Studio standard)
                         RECT rcBox = { leftTextOffset, rcItem.top + (pState->itemHeight - 16) / 2, leftTextOffset + 16, rcItem.top + (pState->itemHeight - 16) / 2 + 16 };
-                        bool isBoxFilled = (it.isChecked || it.isIndeterminate);
-
-                        HBRUSH hBoxBr = CreateSolidBrush(isBoxFilled ? accentCol : RGB(32, 32, 34));
-                        HPEN hBoxPen = CreatePen(PS_SOLID, 1, isBoxFilled ? accentCol : borderCol);
-                        HBRUSH hOldBoxB = (HBRUSH)SelectObject(hMemDC, hBoxBr);
-                        HPEN hOldBoxP = (HPEN)SelectObject(hMemDC, hBoxPen);
-                        RoundRect(hMemDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
-                        SelectObject(hMemDC, hOldBoxB);
-                        SelectObject(hMemDC, hOldBoxP);
-                        DeleteObject(hBoxBr);
-                        DeleteObject(hBoxPen);
-
-                        if (it.isChecked)
-                        {
-                            SelectObject(hMemDC, pState->hFontIcon);
-                            SetTextColor(hMemDC, RGB(255, 255, 255));
-                            RECT rcGlyph = { rcBox.left, rcBox.top - 1, rcBox.right, rcBox.bottom };
-                            DrawTextW(hMemDC, L"\xE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                        }
-                        else if (it.isIndeterminate)
-                        {
-                            HBRUSH hDotBr = CreateSolidBrush(RGB(255, 255, 255));
-                            RECT rcDot = { rcBox.left + 4, rcBox.top + 4, rcBox.right - 4, rcBox.bottom - 4 };
-                            FillRect(hMemDC, &rcDot, hDotBr);
-                            DeleteObject(hDotBr);
-                        }
+                        UITheme::DrawCheckbox(hMemDC, rcBox, it.isChecked, false, it.isIndeterminate, accentCol);
                         leftTextOffset = rcBox.right + 8;
                     }
 
@@ -430,34 +458,9 @@ namespace
 
                 if (pState->isMultiSelect)
                 {
-                    // Checkbox
+                    // Checkbox (Sound Studio standard)
                     RECT rcBox = { rcItemDraw.left + 8, rcItem.top + (pState->itemHeight - 16) / 2, rcItemDraw.left + 24, rcItem.top + (pState->itemHeight - 16) / 2 + 16 };
-                    bool isBoxFilled = (it.isChecked || it.isIndeterminate);
-
-                    HBRUSH hBoxBr = CreateSolidBrush(isBoxFilled ? accentCol : RGB(32, 32, 34));
-                    HPEN hBoxPen = CreatePen(PS_SOLID, 1, isBoxFilled ? accentCol : borderCol);
-                    HBRUSH hOldBoxB = (HBRUSH)SelectObject(hMemDC, hBoxBr);
-                    HPEN hOldBoxP = (HPEN)SelectObject(hMemDC, hBoxPen);
-                    RoundRect(hMemDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
-                    SelectObject(hMemDC, hOldBoxB);
-                    SelectObject(hMemDC, hOldBoxP);
-                    DeleteObject(hBoxBr);
-                    DeleteObject(hBoxPen);
-
-                    if (it.isChecked)
-                    {
-                        SelectObject(hMemDC, pState->hFontIcon);
-                        SetTextColor(hMemDC, RGB(255, 255, 255));
-                        RECT rcGlyph = { rcBox.left, rcBox.top - 1, rcBox.right, rcBox.bottom };
-                        DrawTextW(hMemDC, L"\xE73E", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                    }
-                    else if (it.isIndeterminate)
-                    {
-                        HBRUSH hDotBr = CreateSolidBrush(RGB(255, 255, 255));
-                        RECT rcDot = { rcBox.left + 4, rcBox.top + 4, rcBox.right - 4, rcBox.bottom - 4 };
-                        FillRect(hMemDC, &rcDot, hDotBr);
-                        DeleteObject(hDotBr);
-                    }
+                    UITheme::DrawCheckbox(hMemDC, rcBox, it.isChecked, false, it.isIndeterminate, accentCol);
 
                     leftTextOffset = rcBox.right + 10;
 
@@ -476,10 +479,19 @@ namespace
                     // Single select icon or check
                     if (!it.icon.empty())
                     {
-                        SelectObject(hMemDC, pState->hFontIcon);
-                        SetTextColor(hMemDC, it.isChecked ? accentCol : (it.isEnabled ? textSec : textDis));
                         RECT rcIcon = { rcItemDraw.left + 8, rcItem.top, rcItemDraw.left + 26, rcItem.bottom };
-                        DrawTextW(hMemDC, it.icon.c_str(), -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        if (it.icon == L"\xE73E" || it.icon == L"✓")
+                        {
+                            SelectObject(hMemDC, pState->hFontBold);
+                            SetTextColor(hMemDC, accentCol);
+                            DrawTextW(hMemDC, L"✓", -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        }
+                        else
+                        {
+                            SelectObject(hMemDC, pState->hFontIcon);
+                            SetTextColor(hMemDC, it.isChecked ? accentCol : (it.isEnabled ? textSec : textDis));
+                            DrawTextW(hMemDC, it.icon.c_str(), -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        }
                         leftTextOffset = rcIcon.right + 8;
                     }
                 }
@@ -735,7 +747,7 @@ namespace
                             {
                                 pState->collapsedGroups.insert(it.group);
                             }
-                            RecalculateLayout(pState);
+                            RecalculateLayout(pState, hWnd);
                             InvalidateRect(hWnd, NULL, FALSE);
                             return 0;
                         }

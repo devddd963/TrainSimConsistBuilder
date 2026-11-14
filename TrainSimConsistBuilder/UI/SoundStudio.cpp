@@ -45,6 +45,7 @@
 
 
 static RSSSoundClipboard s_smsClipboard;
+static std::unordered_map<std::wstring, RSSUnitSoundInfo> s_stockSoundCache;
 
 
 
@@ -4938,12 +4939,16 @@ static void PopulateSoundMatrix(RollingStockStudioState* pState, int preferSelUn
 
     BuildDistinctVehicles(pState);
 
+    int savedScrollY = pState->soundMatrixList.GetScrollY();
     pState->displayRows.clear();
     pState->soundMatrixList.Clear();
     pState->totalMissingSounds = 0;
     pState->totalSoundStreams = 0;
 
     bool anyMod = false;
+    std::unordered_set<std::wstring> seenDistinctKeys;
+    int distinctDisplayIndex = 1;
+
     for (size_t uIdx = 0; uIdx < pState->unitsSoundData.size(); ++uIdx)
     {
         auto& u = pState->unitsSoundData[uIdx];
@@ -4954,6 +4959,15 @@ static void PopulateSoundMatrix(RollingStockStudioState* pState, int preferSelUn
 
         if (pState->matrixViewMode == SoundMatrixViewMode::GridView)
         {
+            // Consolidate duplicates: only display distinct vehicles in Grid View
+            std::wstring key = u.folder + L"\\" + u.name + u.ext;
+            std::transform(key.begin(), key.end(), key.begin(), ::towlower);
+            if (seenDistinctKeys.find(key) != seenDistinctKeys.end())
+            {
+                continue; // Skip repeated vehicle rows
+            }
+            seenDistinctKeys.insert(key);
+
             // 1. Parent Unit Row
             RSSDisplayRow parentRow;
             parentRow.rowType = RSS_ROW_UNIT;
@@ -4964,7 +4978,7 @@ static void PopulateSoundMatrix(RollingStockStudioState* pState, int preferSelUn
 
             int totalStreams = (int)(u.wagonSounds.size() + u.engineSounds.size() + u.orts3dCabSounds.size() + u.insideSounds.size());
             std::wstring expandIcon = (totalStreams > 0) ? (u.isExpanded ? L"\x25BE " : L"\x25B8 ") : L"  ";
-            std::wstring col0 = expandIcon + std::to_wstring(u.index);
+            std::wstring col0 = expandIcon + std::to_wstring(distinctDisplayIndex++);
 
             std::wstring wagonSummary = u.wagonCell;
             if (u.wagonSounds.size() > 1 && !u.isExpanded)
@@ -5154,6 +5168,7 @@ static void PopulateSoundMatrix(RollingStockStudioState* pState, int preferSelUn
         pState->soundMatrixList.SetSelectedIndex(targetRow, false);
         UpdateInspectorSelection(pState, targetUnit);
     }
+    pState->soundMatrixList.SetScrollY(savedScrollY);
 
     if (pState->hCanvasWnd && IsWindow(pState->hCanvasWnd))
     {
@@ -5630,7 +5645,7 @@ static void ConfigureSoundMatrixColumns(RollingStockStudioState* pState, int tot
     if (pState->matrixViewMode == SoundMatrixViewMode::GridView)
     {
         int usableW = (totalWidth > 18) ? (totalWidth - 18) : 1000;
-        int col0 = 42;  // #
+        int col0 = 70;  // # (Accent stripe + Checkbox + Index + Chevron)
         int col2 = 68;  // Type
         int col3 = 130; /*
         int col8 = 115; // Status
@@ -5755,32 +5770,42 @@ static bool RSS_NavDrawCellCallback(HDC hdc, int itemIndex, int subItemIndex, co
             rc.bottom -= 2;
         }
 
-        // SubItem 0: Solid Triangle Chevron / Branch / Add Icon
+        // SubItem 0: Checkbox / Number / Expander Chevron / Branch / Add Icon
         if (subItemIndex == 0)
         {
             if (dRow.rowType == RSS_ROW_UNIT)
             {
+                // 1. Checkbox: safely inset from left accent stripe (stripe is at rc.left + 1..5)
+                // Shifted right closer to arrow, giving ample breathing space from the accent stripe
+                int boxSize = 14;
+                int chkY = rc.top + ((rc.bottom - rc.top) - boxSize) / 2;
+                RECT rcBox = { rc.left + 15, chkY, rc.left + 15 + boxSize, chkY + boxSize };
+                UITheme::DrawCheckbox(hdc, rcBox, u.isSelected, isHovered, false, UITheme::ChkAccentBlue, pState->hFontSmallIcons);
+
+                // 2. Unit index number (left = rc.left + 33..47)
+                SelectObject(hdc, pState->hFontBold ? pState->hFontBold : pState->hFontBody);
+                SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(200, 215, 235));
+                RECT rcNum = { rc.left + 33, rc.top, rc.left + 47, rc.bottom };
+                std::wstring numStr = std::to_wstring(u.index);
+                DrawTextW(hdc, numStr.c_str(), -1, &rcNum, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                // 3. Expander arrow on the right, preceding vehicle name (left = rc.left + 48..rc.right)
+                // Rendered larger with hFontHeader for prominent, clear visibility
                 int totalStreams = (int)(u.wagonSounds.size() + u.engineSounds.size() +
                                          u.orts3dCabSounds.size() + u.insideSounds.size());
                 if (totalStreams > 0)
                 {
-                    SelectObject(hdc, pState->hFontBody ? pState->hFontBody : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+                    SelectObject(hdc, pState->hFontHeader ? pState->hFontHeader : (pState->hFontBold ? pState->hFontBold : pState->hFontBody));
                     SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(140, 185, 240));
-                    RECT rcTriangle = { rc.left + 8, rc.top, rc.left + 20, rc.bottom };
+                    RECT rcTriangle = { rc.left + 48, rc.top, rc.right - 2, rc.bottom };
                     DrawTextW(hdc, u.isExpanded ? L"\x25BE" : L"\x25B8", -1, &rcTriangle, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
                 }
-
-                SelectObject(hdc, pState->hFontBold ? pState->hFontBold : pState->hFontBody);
-                SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(200, 215, 235));
-                RECT rcNum = { rc.left + 22, rc.top, rc.right - 2, rc.bottom };
-                std::wstring numStr = std::to_wstring(u.index);
-                DrawTextW(hdc, numStr.c_str(), -1, &rcNum, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
             else if (dRow.rowType == RSS_ROW_STREAM)
             {
                 SelectObject(hdc, pState->hFontBody ? pState->hFontBody : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
                 SetTextColor(hdc, RGB(90, 115, 145));
-                RECT rcBranch = { rc.left + 12, rc.top, rc.right, rc.bottom };
+                RECT rcBranch = { rc.left + 28, rc.top, rc.right, rc.bottom };
                 DrawTextW(hdc, L"\x21B3", -1, &rcBranch, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             }
             SelectObject(hdc, hOldFont);
@@ -5797,7 +5822,83 @@ static bool RSS_NavDrawCellCallback(HDC hdc, int itemIndex, int subItemIndex, co
                 SetTextColor(hdc, isSelected ? RGB(255, 255, 255) : RGB(235, 240, 250));
                 RECT rcName = rc;
                 rcName.left += 6; rcName.right -= 6;
-                DrawTextW(hdc, u.name.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                // Find distinct vehicle multiplier (e.g. "×4 in consist")
+                int unitCount = 1;
+                std::wstring key = u.folder + L"\\" + u.name + u.ext;
+                std::transform(key.begin(), key.end(), key.begin(), ::towlower);
+                for (const auto& dv : pState->distinctVehicles)
+                {
+                    if (dv.key == key)
+                    {
+                        unitCount = (int)dv.unitIndices.size();
+                        break;
+                    }
+                }
+
+                if (unitCount > 1)
+                {
+                    SIZE szName = { 0 };
+                    GetTextExtentPoint32W(hdc, u.name.c_str(), (int)u.name.length(), &szName);
+
+                    // Compute maximum available width for badge
+                    int nameMaxW = rcName.right - rcName.left - 48;
+                    RECT rcDrawName = rcName;
+                    if (szName.cx > nameMaxW)
+                    {
+                        rcDrawName.right = rcDrawName.left + nameMaxW;
+                        szName.cx = nameMaxW;
+                    }
+
+                    DrawTextW(hdc, u.name.c_str(), -1, &rcDrawName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                    int badgeX = rcDrawName.left + szName.cx + 8;
+                    int availBadgeW = rcName.right - badgeX;
+
+                    if (availBadgeW >= 24)
+                    {
+                        std::wstring badgeText = std::to_wstring(unitCount) + L" UNITS";
+                        SelectObject(hdc, pState->hFontSmallIcons ? pState->hFontSmallIcons : pState->hFontBody);
+                        SIZE szBadge;
+                        GetTextExtentPoint32W(hdc, badgeText.c_str(), (int)badgeText.length(), &szBadge);
+
+                        // If space is tight, fall back to "4U"
+                        if (szBadge.cx + 12 > availBadgeW)
+                        {
+                            badgeText = std::to_wstring(unitCount) + L"U";
+                            GetTextExtentPoint32W(hdc, badgeText.c_str(), (int)badgeText.length(), &szBadge);
+                        }
+
+                        int bW = szBadge.cx + 10;
+                        int bH = (rcName.bottom - rcName.top >= 22) ? 18 : 16;
+                        int bY = rcName.top + ((rcName.bottom - rcName.top) - bH) / 2;
+                        RECT rcBadge = { badgeX, bY, badgeX + bW, bY + bH };
+
+                        if (rcBadge.right <= rcName.right)
+                        {
+                            COLORREF bg = isSelected ? RGB(16, 52, 92) : RGB(22, 38, 54);
+                            COLORREF border = isSelected ? RGB(45, 115, 195) : RGB(40, 80, 120);
+                            COLORREF fg = isSelected ? RGB(220, 240, 255) : RGB(105, 185, 255);
+
+                            HBRUSH hbr = CreateSolidBrush(bg);
+                            HPEN hp = CreatePen(PS_SOLID, 1, border);
+                            HGDIOBJ ob = SelectObject(hdc, hbr);
+                            HGDIOBJ op = SelectObject(hdc, hp);
+                            RoundRect(hdc, rcBadge.left, rcBadge.top, rcBadge.right, rcBadge.bottom, 4, 4);
+                            SelectObject(hdc, ob);
+                            SelectObject(hdc, op);
+                            DeleteObject(hbr);
+                            DeleteObject(hp);
+
+                            SetTextColor(hdc, fg);
+                            DrawTextW(hdc, badgeText.c_str(), -1, &rcBadge, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                        }
+                    }
+                }
+                else
+                {
+                    DrawTextW(hdc, u.name.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                }
             }
             else if (dRow.rowType == RSS_ROW_STREAM)
             {
@@ -10157,15 +10258,67 @@ static LRESULT CALLBACK RollingStockStudioProc(HWND hWnd, UINT uMsg, WPARAM wPar
                     {
                         auto& u = pState->unitsSoundData[dRow.unitIndex];
 
+                        // Disk guard: verify if rolling stock file on disk has been updated outside or by mutator
+                        if (!pState->isModified && u.fileFound && !u.fullPath.empty())
+                        {
+                            WIN32_FILE_ATTRIBUTE_DATA fileAttr;
+                            if (GetFileAttributesExW(u.fullPath.c_str(), GetFileExInfoStandard, &fileAttr))
+                            {
+                                if (u.lastFileWriteTime.dwLowDateTime != 0 || u.lastFileWriteTime.dwHighDateTime != 0)
+                                {
+                                    if (CompareFileTime(&fileAttr.ftLastWriteTime, &u.lastFileWriteTime) > 0)
+                                    {
+                                        std::wstring fullStockFolder = pState->basePath;
+                                        if (!fullStockFolder.empty() && fullStockFolder.back() != L'\\') fullStockFolder += L'\\';
+                                        fullStockFolder += L"TRAINS\\TRAINSET\\" + u.folder;
+
+                                        std::unordered_set<std::wstring> visited;
+                                        RSSUnitSoundInfo freshInfo;
+                                        freshInfo.index = u.index;
+                                        freshInfo.name = u.name;
+                                        freshInfo.folder = u.folder;
+                                        freshInfo.ext = u.ext;
+                                        freshInfo.type = u.type;
+                                        freshInfo.fullPath = u.fullPath;
+                                        freshInfo.fileFound = true;
+                                        ParseStockSoundBlocksAndIncludes(u.fullPath, fullStockFolder, pState->basePath, freshInfo, visited, 0);
+                                        freshInfo.lastFileWriteTime = fileAttr.ftLastWriteTime;
+                                        freshInfo.isExpanded = u.isExpanded;
+                                        u = freshInfo;
+
+                                        std::wstring normKey = u.fullPath;
+                                        std::transform(normKey.begin(), normKey.end(), normKey.begin(), ::towlower);
+                                        s_stockSoundCache[normKey] = u;
+
+                                        PopulateSoundMatrix(pState, dRow.unitIndex);
+                                    }
+                                }
+                            }
+                        }
+
                         // In GridView mode:
                         if (pState->matrixViewMode == SoundMatrixViewMode::GridView)
                         {
-                            // 1. If parent row and Col 0 clicked: toggle expansion
+                            // 1. If parent row and Col 0 clicked: handle checkbox or chevron expansion
                             if (dRow.rowType == RSS_ROW_UNIT && col == 0)
                             {
-                                u.isExpanded = !u.isExpanded;
-                                PopulateSoundMatrix(pState, dRow.unitIndex);
-                                return 0;
+                                POINT ptCursor;
+                                GetCursorPos(&ptCursor);
+                                ScreenToClient(pState->soundMatrixList.GetHWND(), &ptCursor);
+
+                                // Col 0 is 70px wide: Checkbox at 0..31, Number at 31..47, Chevron arrow at 48..70
+                                if (ptCursor.x <= 31)
+                                {
+                                    u.isSelected = !u.isSelected;
+                                    pState->soundMatrixList.Invalidate();
+                                    return 0;
+                                }
+                                else
+                                {
+                                    u.isExpanded = !u.isExpanded;
+                                    PopulateSoundMatrix(pState, dRow.unitIndex);
+                                    return 0;
+                                }
                             }
 
                             // 2. If ADD_BUTTON row and cols 4..7 clicked: handle add
@@ -10222,6 +10375,44 @@ static LRESULT CALLBACK RollingStockStudioProc(HWND hWnd, UINT uMsg, WPARAM wPar
                     if (dRow.unitIndex >= 0 && dRow.unitIndex < (int)pState->unitsSoundData.size())
                     {
                         auto& u = pState->unitsSoundData[dRow.unitIndex];
+
+                        // Disk guard: verify if rolling stock file on disk has been updated outside or by mutator
+                        if (!pState->isModified && u.fileFound && !u.fullPath.empty())
+                        {
+                            WIN32_FILE_ATTRIBUTE_DATA fileAttr;
+                            if (GetFileAttributesExW(u.fullPath.c_str(), GetFileExInfoStandard, &fileAttr))
+                            {
+                                if (u.lastFileWriteTime.dwLowDateTime != 0 || u.lastFileWriteTime.dwHighDateTime != 0)
+                                {
+                                    if (CompareFileTime(&fileAttr.ftLastWriteTime, &u.lastFileWriteTime) > 0)
+                                    {
+                                        std::wstring fullStockFolder = pState->basePath;
+                                        if (!fullStockFolder.empty() && fullStockFolder.back() != L'\\') fullStockFolder += L'\\';
+                                        fullStockFolder += L"TRAINS\\TRAINSET\\" + u.folder;
+
+                                        std::unordered_set<std::wstring> visited;
+                                        RSSUnitSoundInfo freshInfo;
+                                        freshInfo.index = u.index;
+                                        freshInfo.name = u.name;
+                                        freshInfo.folder = u.folder;
+                                        freshInfo.ext = u.ext;
+                                        freshInfo.type = u.type;
+                                        freshInfo.fullPath = u.fullPath;
+                                        freshInfo.fileFound = true;
+                                        ParseStockSoundBlocksAndIncludes(u.fullPath, fullStockFolder, pState->basePath, freshInfo, visited, 0);
+                                        freshInfo.lastFileWriteTime = fileAttr.ftLastWriteTime;
+                                        freshInfo.isExpanded = u.isExpanded;
+                                        u = freshInfo;
+
+                                        std::wstring normKey = u.fullPath;
+                                        std::transform(normKey.begin(), normKey.end(), normKey.begin(), ::towlower);
+                                        s_stockSoundCache[normKey] = u;
+
+                                        PopulateSoundMatrix(pState, dRow.unitIndex);
+                                    }
+                                }
+                            }
+                        }
                         if (pState->matrixViewMode == SoundMatrixViewMode::GridView && dRow.rowType == RSS_ROW_UNIT)
                         {
                             u.isExpanded = !u.isExpanded;
@@ -10368,6 +10559,44 @@ static LRESULT CALLBACK RollingStockStudioProc(HWND hWnd, UINT uMsg, WPARAM wPar
                     if (dRow.unitIndex >= 0 && dRow.unitIndex < (int)pState->unitsSoundData.size())
                     {
                         auto& u = pState->unitsSoundData[dRow.unitIndex];
+
+                        // Disk guard: verify if rolling stock file on disk has been updated outside or by mutator
+                        if (!pState->isModified && u.fileFound && !u.fullPath.empty())
+                        {
+                            WIN32_FILE_ATTRIBUTE_DATA fileAttr;
+                            if (GetFileAttributesExW(u.fullPath.c_str(), GetFileExInfoStandard, &fileAttr))
+                            {
+                                if (u.lastFileWriteTime.dwLowDateTime != 0 || u.lastFileWriteTime.dwHighDateTime != 0)
+                                {
+                                    if (CompareFileTime(&fileAttr.ftLastWriteTime, &u.lastFileWriteTime) > 0)
+                                    {
+                                        std::wstring fullStockFolder = pState->basePath;
+                                        if (!fullStockFolder.empty() && fullStockFolder.back() != L'\\') fullStockFolder += L'\\';
+                                        fullStockFolder += L"TRAINS\\TRAINSET\\" + u.folder;
+
+                                        std::unordered_set<std::wstring> visited;
+                                        RSSUnitSoundInfo freshInfo;
+                                        freshInfo.index = u.index;
+                                        freshInfo.name = u.name;
+                                        freshInfo.folder = u.folder;
+                                        freshInfo.ext = u.ext;
+                                        freshInfo.type = u.type;
+                                        freshInfo.fullPath = u.fullPath;
+                                        freshInfo.fileFound = true;
+                                        ParseStockSoundBlocksAndIncludes(u.fullPath, fullStockFolder, pState->basePath, freshInfo, visited, 0);
+                                        freshInfo.lastFileWriteTime = fileAttr.ftLastWriteTime;
+                                        freshInfo.isExpanded = u.isExpanded;
+                                        u = freshInfo;
+
+                                        std::wstring normKey = u.fullPath;
+                                        std::transform(normKey.begin(), normKey.end(), normKey.begin(), ::towlower);
+                                        s_stockSoundCache[normKey] = u;
+
+                                        PopulateSoundMatrix(pState, dRow.unitIndex);
+                                    }
+                                }
+                            }
+                        }
                         if (dRow.rowType == RSS_ROW_STREAM)
                         {
                             RSS_PushUndo(pState, L"Delete Sound Stream");
@@ -10816,171 +11045,96 @@ static LRESULT CALLBACK RollingStockStudioProc(HWND hWnd, UINT uMsg, WPARAM wPar
 
 
             // Right side badges & buttons
-
             int badgeRight = w - 16;
-
             int badgeY = 11;
-
             int badgeH = 22;
 
-
+            // Compute minimum left boundary allowed so right-aligned controls never collide with left pills (toggleX + 230)
+            int minRightBound = 364 + 235;
 
             auto drawPillBadge = [&](const std::wstring& txt, COLORREF bg, COLORREF border, COLORREF fg) {
-
                 SelectObject(hMemDC, pState->hFontBold);
-
                 SIZE sz;
-
                 GetTextExtentPoint32W(hMemDC, txt.c_str(), (int)txt.length(), &sz);
-
                 int bW = sz.cx + 16;
-
                 int bX = badgeRight - bW;
+                if (bX < minRightBound) return; // Skip if no room to prevent overlapping
 
                 RECT rcB = { bX, badgeY, badgeRight, badgeY + badgeH };
 
-
-
                 HBRUSH hbr = CreateSolidBrush(bg);
-
                 HPEN hp = CreatePen(PS_SOLID, 1, border);
-
                 HGDIOBJ ob = SelectObject(hMemDC, hbr);
-
                 HGDIOBJ op = SelectObject(hMemDC, hp);
-
                 RoundRect(hMemDC, rcB.left, rcB.top, rcB.right, rcB.bottom, 4, 4);
-
                 SelectObject(hMemDC, ob);
-
                 SelectObject(hMemDC, op);
-
                 DeleteObject(hbr);
-
                 DeleteObject(hp);
 
-
-
                 SetTextColor(hMemDC, fg);
-
                 DrawTextW(hMemDC, txt.c_str(), -1, &rcB, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
                 badgeRight = bX - 8;
-
             };
 
-
-
             // Draw [ 💾 Save Changes ] button
-
             std::wstring saveLabel = pState->isModified ? L"💾 Save Changes ●" : L"💾 Save Changes";
-
             SelectObject(hMemDC, pState->hFontBold);
-
             SIZE szSave;
-
             GetTextExtentPoint32W(hMemDC, saveLabel.c_str(), (int)saveLabel.length(), &szSave);
-
             int saveW = szSave.cx + 20;
-
             int saveX = badgeRight - saveW;
-
             RECT rcSave = { saveX, badgeY, badgeRight, badgeY + badgeH };
-
             pState->rcBtnSave = rcSave;
 
-
-
             bool isSaveHov = pState->hoverSaveBtn;
-
             COLORREF saveBg, saveBorder, saveFg;
-
             if (pState->isModified)
-
             {
-
                 saveBg = isSaveHov ? RGB(0, 140, 230) : RGB(0, 110, 195);
-
                 saveBorder = isSaveHov ? RGB(60, 180, 255) : RGB(30, 150, 240);
-
                 saveFg = RGB(255, 255, 255);
-
             }
-
             else
-
             {
-
                 saveBg = isSaveHov ? RGB(55, 60, 70) : RGB(40, 44, 52);
-
                 saveBorder = isSaveHov ? RGB(85, 95, 110) : RGB(65, 72, 85);
-
                 saveFg = isSaveHov ? RGB(220, 225, 235) : RGB(160, 168, 180);
-
             }
-
-
 
             HBRUSH hbrSave = CreateSolidBrush(saveBg);
-
             HPEN hpSave = CreatePen(PS_SOLID, 1, saveBorder);
-
             HGDIOBJ obSave = SelectObject(hMemDC, hbrSave);
-
             HGDIOBJ opSave = SelectObject(hMemDC, hpSave);
-
             RoundRect(hMemDC, rcSave.left, rcSave.top, rcSave.right, rcSave.bottom, 4, 4);
-
             SelectObject(hMemDC, obSave);
-
             SelectObject(hMemDC, opSave);
-
             DeleteObject(hbrSave);
-
             DeleteObject(hpSave);
 
-
-
             SetTextColor(hMemDC, saveFg);
-
             DrawTextW(hMemDC, saveLabel.c_str(), -1, &rcSave, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
             badgeRight = saveX - 8;
 
-
-
             if (pState->totalMissingSounds > 0)
-
             {
-
                 drawPillBadge(std::to_wstring(pState->totalMissingSounds) + L" Missing Sounds", RGB(55, 20, 20), RGB(160, 45, 45), RGB(255, 95, 95));
-
             }
-
             else if (!pState->unitsSoundData.empty())
-
             {
-
                 drawPillBadge(L"All Sounds Ready", RGB(20, 48, 25), RGB(45, 125, 55), RGB(90, 225, 120));
-
             }
-
-
 
             if (!pState->unitsSoundData.empty())
-
             {
-
                 std::wstring uStr = std::to_wstring(pState->unitsSoundData.size()) + L" Units";
-
                 drawPillBadge(uStr, RGB(22, 42, 58), RGB(45, 110, 160), RGB(100, 190, 255));
-
             }
-
-
 
             // Draw Expand All / Collapse All buttons (available in BOTH Grid View and Distinct Cards)
             const wchar_t* btnLabels[2] = { L"▾ Expand All", L"▸ Collapse All" };
+            pState->rcBtnExpandAll = { 0, 0, 0, 0 };
+            pState->rcBtnCollapseAll = { 0, 0, 0, 0 };
             for (int b = 1; b >= 0; --b)
             {
                 SelectObject(hMemDC, pState->hFontBold);
@@ -10988,6 +11142,8 @@ static LRESULT CALLBACK RollingStockStudioProc(HWND hWnd, UINT uMsg, WPARAM wPar
                 GetTextExtentPoint32W(hMemDC, btnLabels[b], (int)wcslen(btnLabels[b]), &sz);
                 int bW = sz.cx + 14;
                 int bX = badgeRight - bW;
+                if (bX < minRightBound) continue;
+
                 RECT rcB = { bX, badgeY, badgeRight, badgeY + badgeH };
                 if (b == 0) pState->rcBtnExpandAll = rcB;
                 else pState->rcBtnCollapseAll = rcB;
@@ -11014,6 +11170,8 @@ static LRESULT CALLBACK RollingStockStudioProc(HWND hWnd, UINT uMsg, WPARAM wPar
 
             // Draw [ ↷ Redo ] and [ ↶ Undo ] buttons
             const wchar_t* historyLabels[2] = { L"↶ Undo", L"↷ Redo" };
+            pState->rcBtnUndo = { 0, 0, 0, 0 };
+            pState->rcBtnRedo = { 0, 0, 0, 0 };
             for (int h = 1; h >= 0; --h)
             {
                 bool canPerform = (h == 0) ? !pState->undoStack.empty() : !pState->redoStack.empty();
@@ -11022,6 +11180,8 @@ static LRESULT CALLBACK RollingStockStudioProc(HWND hWnd, UINT uMsg, WPARAM wPar
                 GetTextExtentPoint32W(hMemDC, historyLabels[h], (int)wcslen(historyLabels[h]), &szH);
                 int hW = szH.cx + 16;
                 int hX = badgeRight - hW;
+                if (hX < minRightBound) continue;
+
                 RECT rcH = { hX, badgeY, badgeRight, badgeY + badgeH };
                 if (h == 0) pState->rcBtnUndo = rcH;
                 else pState->rcBtnRedo = rcH;
@@ -11197,10 +11357,6 @@ HWND CreateSoundStudio(HWND hParent, HINSTANCE hInstance, int x, int y, int w, i
     return hWnd;
 
 }
-
-
-
-static std::unordered_map<std::wstring, RSSUnitSoundInfo> s_stockSoundCache;
 
 
 
@@ -11422,6 +11578,12 @@ void SoundStudio_SetConsist(HWND hWnd, const std::wstring& consistName, const st
 
         {
 
+            WIN32_FILE_ATTRIBUTE_DATA fileAttr;
+            if (GetFileAttributesExW(info.fullPath.c_str(), GetFileExInfoStandard, &fileAttr))
+            {
+                info.lastFileWriteTime = fileAttr.ftLastWriteTime;
+            }
+
             std::wstring normKey = info.fullPath;
 
             std::transform(normKey.begin(), normKey.end(), normKey.begin(), ::towlower);
@@ -11533,6 +11695,8 @@ void SoundStudio_SetConsist(HWND hWnd, const std::wstring& consistName, const st
 
 
 
+
+
 void SoundStudio_SetDirectStock(HWND hWnd, const StockItem& item, const std::wstring& basePath)
 
 {
@@ -11635,6 +11799,8 @@ void SoundStudio_SetDirectStock(HWND hWnd, const StockItem& item, const std::wst
     SyncSmsMutatorTargetsIfOpen(pState->unitsSoundData);
 
 }
+
+
 
 
 
@@ -11764,6 +11930,102 @@ void SoundStudio_SetDirectSms(HWND hWnd, const std::wstring& smsFilePath, const 
 }
 
 
+
+void SoundStudio_ReloadConsistSoundData(HWND hWnd)
+{
+    RollingStockStudioState* pState = (RollingStockStudioState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+    if (!pState) return;
+
+    // Clear the stock sound cache to ensure fresh parsing from disk
+    s_stockSoundCache.clear();
+
+    if (pState->isDirectStockMode)
+    {
+        // Re-read single direct stock item
+        SoundStudio_SetDirectStock(hWnd, pState->directStockItem, pState->basePath);
+        return;
+    }
+
+    if (pState->isDirectSmsMode)
+    {
+        // Re-read single direct SMS file
+        SoundStudio_SetDirectSms(hWnd, pState->directSmsPath, pState->basePath);
+        return;
+    }
+
+    if (pState->unitsSoundData.empty()) return;
+
+    std::wstring bp = pState->basePath;
+    if (!bp.empty() && bp.back() != L'\\') bp += L'\\';
+
+    // Re-parse all units directly from disk
+    for (auto& u : pState->unitsSoundData)
+    {
+        if (u.fileFound && !u.fullPath.empty())
+        {
+            std::wstring fullStockFolder = bp + L"TRAINS\\TRAINSET\\" + u.folder;
+            int prevIdx = u.index;
+            bool wasExpanded = u.isExpanded;
+            std::wstring prevName = u.name;
+            std::wstring prevFolder = u.folder;
+            std::wstring prevExt = u.ext;
+            std::wstring prevType = u.type;
+
+            u = RSSUnitSoundInfo();
+            u.index = prevIdx;
+            u.name = prevName;
+            u.folder = prevFolder;
+            u.ext = prevExt;
+            u.type = prevType;
+            u.fullPath = fullStockFolder + L"\\" + u.name + u.ext;
+
+            if (GetFileAttributesW(u.fullPath.c_str()) != INVALID_FILE_ATTRIBUTES)
+            {
+                u.fileFound = true;
+                WIN32_FILE_ATTRIBUTE_DATA fileAttr;
+                if (GetFileAttributesExW(u.fullPath.c_str(), GetFileExInfoStandard, &fileAttr))
+                {
+                    u.lastFileWriteTime = fileAttr.ftLastWriteTime;
+                }
+                std::unordered_set<std::wstring> visited;
+                ParseStockSoundBlocksAndIncludes(u.fullPath, fullStockFolder, bp, u, visited, 0);
+                std::wstring normKey = u.fullPath;
+                std::transform(normKey.begin(), normKey.end(), normKey.begin(), ::towlower);
+                s_stockSoundCache[normKey] = u;
+            }
+            else
+            {
+                u.fileFound = false;
+                u.missingCount = 1;
+            }
+            u.isExpanded = wasExpanded;
+        }
+    }
+
+    pState->savedUnitsSoundData = pState->unitsSoundData;
+    pState->isModified = false;
+    pState->undoStack.clear();
+    pState->redoStack.clear();
+
+    PopulateSoundMatrix(pState);
+
+    if (pState->hSmsEditorWnd && IsWindow(pState->hSmsEditorWnd))
+    {
+        SmsEditorView_SetConsistContext(pState->hSmsEditorWnd, pState->consistName, bp, pState->unitsSoundData);
+    }
+
+    SyncSmsMutatorTargetsIfOpen(pState->unitsSoundData);
+
+    InvalidateRect(pState->hWnd, NULL, TRUE);
+}
+
+void SoundStudio_ReloadSmsIfMatches(HWND hWnd, const std::wstring& mutatedFilePath)
+{
+    RollingStockStudioState* pState = (RollingStockStudioState*)GetWindowLongPtrW(hWnd, GWLP_USERDATA);
+    if (!pState || !pState->hSmsEditorWnd || !IsWindow(pState->hSmsEditorWnd)) return;
+
+    SmsEditorView_ReloadIfPathMatches(pState->hSmsEditorWnd, mutatedFilePath);
+}
 
 void SoundStudio_SetDarkMode(HWND hWnd, BOOL bDark)
 
@@ -12139,41 +12401,135 @@ bool SoundStudio_HandleDragHover(HWND hWnd, POINT ptScreen, const ScannedSoundIt
 
 
 
-    // 2. Check if hovering over Left Consist Rake Navigator
-
+    // 2. Check if hovering over Left Consist Rake Navigator / GridView Matrix
     if (pState->hSoundMatrixListWnd && IsWindow(pState->hSoundMatrixListWnd))
-
     {
-
         RECT rcList;
-
         GetWindowRect(pState->hSoundMatrixListWnd, &rcList);
-
         if (PtInRect(&rcList, ptScreen))
-
         {
-
             POINT ptList = ptScreen;
-
             ScreenToClient(pState->hSoundMatrixListWnd, &ptList);
 
             int hoverRow = pState->soundMatrixList.GetItemIndexFromPoint(ptList);
-            int hoverUnit = -1;
             if (hoverRow >= 0 && hoverRow < (int)pState->displayRows.size())
-                hoverUnit = pState->displayRows[hoverRow].unitIndex;
-
-            if (hoverUnit >= 0 && hoverUnit < (int)pState->unitsSoundData.size())
             {
-                const auto& u = pState->unitsSoundData[hoverUnit];
+                const auto& dRow = pState->displayRows[hoverRow];
+                if (dRow.unitIndex >= 0 && dRow.unitIndex < (int)pState->unitsSoundData.size())
+                {
+                    const auto& u = pState->unitsSoundData[dRow.unitIndex];
 
-                outActionText = L"Assign SMS to " + u.name + L" (Wagon Exterior)";
+                    if (pState->matrixViewMode == SoundMatrixViewMode::GridView)
+                    {
+                        if (dRow.rowType == RSS_ROW_STREAM)
+                        {
+                            std::wstring slotName = (dRow.category == L"Engine") ? L"Engine Cab" :
+                                                    (dRow.category == L"ORTS3DCab") ? L"ORTS 3D Cab" :
+                                                    (dRow.category == L"Inside") ? L"Inside View" : L"Wagon Exterior";
 
-                return true;
+                            outActionText = L"Replace " + slotName + L" (Stream #" + std::to_wstring(dRow.streamIndex + 1) + L"): " + smsName;
+                            return true;
+                        }
+                        else if (dRow.rowType == RSS_ROW_ADD_BUTTON)
+                        {
+                            int curX = 0;
+                            int hitCol = 4;
+                            for (int c = 0; c < 9; ++c)
+                            {
+                                int colW = pState->soundMatrixList.GetColumnWidth(c);
+                                if (ptList.x >= curX && ptList.x < curX + colW)
+                                {
+                                    hitCol = c;
+                                    break;
+                                }
+                                curX += colW;
+                            }
 
+                            std::wstring targetCat = L"Wagon";
+                            if (hitCol == 5) targetCat = L"Engine";
+                            else if (hitCol == 6) targetCat = L"ORTS3DCab";
+                            else if (hitCol == 7) targetCat = L"Inside";
+
+                            if ((targetCat == L"Engine" || targetCat == L"ORTS3DCab") && u.type != L"Engine")
+                            {
+                                outActionText = L"Wagons do not support Cab sounds";
+                                return false;
+                            }
+
+                            std::wstring slotName = (targetCat == L"Engine") ? L"Engine Cab" :
+                                                    (targetCat == L"ORTS3DCab") ? L"ORTS 3D Cab" :
+                                                    (targetCat == L"Inside") ? L"Inside View" : L"Wagon Exterior";
+
+                            outActionText = L"+ Add Stream to " + u.name + L" (" + slotName + L"): " + smsName;
+                            return true;
+                        }
+                        else // RSS_ROW_UNIT
+                        {
+                            int curX = 0;
+                            int hitCol = 4;
+                            for (int c = 0; c < 9; ++c)
+                            {
+                                int colW = pState->soundMatrixList.GetColumnWidth(c);
+                                if (ptList.x >= curX && ptList.x < curX + colW)
+                                {
+                                    hitCol = c;
+                                    break;
+                                }
+                                curX += colW;
+                            }
+
+                            std::wstring targetCat = L"Wagon";
+                            if (hitCol == 5) targetCat = L"Engine";
+                            else if (hitCol == 6) targetCat = L"ORTS3DCab";
+                            else if (hitCol == 7) targetCat = L"Inside";
+
+                            if ((targetCat == L"Engine" || targetCat == L"ORTS3DCab") && u.type != L"Engine")
+                            {
+                                outActionText = L"Wagons do not support Cab sounds";
+                                return false;
+                            }
+
+                            std::wstring slotName = (targetCat == L"Engine") ? L"Engine Cab" :
+                                                    (targetCat == L"ORTS3DCab") ? L"ORTS 3D Cab" :
+                                                    (targetCat == L"Inside") ? L"Inside View" : L"Wagon Exterior";
+
+                            const std::vector<RSSSoundEntry>* pList = (targetCat == L"Engine") ? &u.engineSounds :
+                                                                      (targetCat == L"ORTS3DCab") ? &u.orts3dCabSounds :
+                                                                      (targetCat == L"Inside") ? &u.insideSounds : &u.wagonSounds;
+
+                            // Count selected units if this unit is selected
+                            int selCount = 0;
+                            if (u.isSelected)
+                            {
+                                for (const auto& su : pState->unitsSoundData)
+                                {
+                                    if (su.isSelected) selCount++;
+                                }
+                            }
+
+                            if (selCount > 1)
+                            {
+                                outActionText = L"Assign " + slotName + L" across " + std::to_wstring(selCount) + L" selected units: " + smsName;
+                            }
+                            else if (pList && !pList->empty())
+                            {
+                                outActionText = L"Replace " + u.name + L" " + slotName + L": " + smsName;
+                            }
+                            else
+                            {
+                                outActionText = L"+ Assign " + slotName + L" to " + u.name + L": " + smsName;
+                            }
+                            return true;
+                        }
+                    }
+                    else // DistinctCards mode left rake
+                    {
+                        outActionText = L"Assign SMS to " + u.name + L" (Wagon Exterior)";
+                        return true;
+                    }
+                }
             }
-
         }
-
     }
 
 
@@ -12340,7 +12696,7 @@ bool SoundStudio_HandleDrop(HWND hWnd, POINT ptScreen, const ScannedSoundItem& i
 
 
 
-    // GridView drop handler: drop onto table cells or Add SMS buttons
+    // GridView drop handler: drop onto table cells, stream rows, or Add SMS buttons
     if (pState->matrixViewMode == SoundMatrixViewMode::GridView && pState->hSoundMatrixListWnd && IsWindow(pState->hSoundMatrixListWnd))
     {
         POINT ptList = ptScreen;
@@ -12354,16 +12710,19 @@ bool SoundStudio_HandleDrop(HWND hWnd, POINT ptScreen, const ScannedSoundItem& i
                 auto& u = pState->unitsSoundData[dRow.unitIndex];
 
                 std::wstring dropCat = L"Wagon";
+                int targetStreamIdx = -1; // -1 = append or replace slot primary
+                bool isExplicitAppend = (dRow.rowType == RSS_ROW_ADD_BUTTON);
+
                 if (dRow.rowType == RSS_ROW_STREAM)
                 {
                     dropCat = dRow.category;
+                    targetStreamIdx = dRow.streamIndex;
                 }
                 else
                 {
                     int curX = 0;
-                    int hitCol = -1;
-                    int colCount = 9;
-                    for (int c = 0; c < colCount; ++c)
+                    int hitCol = 4;
+                    for (int c = 0; c < 9; ++c)
                     {
                         int w = pState->soundMatrixList.GetColumnWidth(c);
                         if (ptList.x >= curX && ptList.x < curX + w)
@@ -12393,29 +12752,113 @@ bool SoundStudio_HandleDrop(HWND hWnd, POINT ptScreen, const ScannedSoundItem& i
 
                 if (pTargetList)
                 {
-                    // Drag and drop onto existing sound file or Add button APPENDS the SMS (does not replace)
-                    if (!pTargetList->empty() && !s_bSuppressMultiSmsWarning)
+                    RSS_PushUndo(pState, L"Assign Sound to Unit");
+                    RSSSoundEntry newEntry = CreateSoundEntryFromScanned(item, dropCat, pState->basePath);
+
+                    if (isExplicitAppend)
                     {
-                        bool bDontShowAgain = false;
-                        ShowModernMessageBoxWithCheckbox(
-                            pState->hWnd,
-                            L"Multiple sound files in a single sound block (separated by spaces) are only supported in Open Rails Testing / Unstable versions (and upcoming Open Rails 1.7+).\r\n\r\nStable releases of Open Rails will only play the first sound stream and ignore subsequent streams.",
-                            L"Open Rails Compatibility Notice",
-                            L"Do not show this warning again",
-                            &bDontShowAgain,
-                            MB_OK | MB_ICONINFORMATION
-                        );
-                        if (bDontShowAgain)
+                        // Append stream
+                        if (!pTargetList->empty() && !s_bSuppressMultiSmsWarning)
                         {
-                            s_bSuppressMultiSmsWarning = true;
+                            bool bDontShowAgain = false;
+                            ShowModernMessageBoxWithCheckbox(
+                                pState->hWnd,
+                                L"Multiple sound files in a single sound block (separated by spaces) are only supported in Open Rails Testing / Unstable versions (and upcoming Open Rails 1.7+).\r\n\r\nStable releases of Open Rails will only play the first sound stream and ignore subsequent streams.",
+                                L"Open Rails Compatibility Notice",
+                                L"Do not show this warning again",
+                                &bDontShowAgain,
+                                MB_OK | MB_ICONINFORMATION
+                            );
+                            if (bDontShowAgain)
+                            {
+                                s_bSuppressMultiSmsWarning = true;
+                            }
+                        }
+                        pTargetList->push_back(newEntry);
+                        u.isExpanded = true;
+                        u.isModified = true;
+                    }
+                    else if (targetStreamIdx >= 0 && targetStreamIdx < (int)pTargetList->size())
+                    {
+                        // Replace exact stream
+                        (*pTargetList)[targetStreamIdx] = newEntry;
+                        u.isExpanded = true;
+                        u.isModified = true;
+                    }
+                    else
+                    {
+                        // Check if multi-unit drop applies (if target unit was selected and other units are selected)
+                        std::vector<int> targetUnitIndices;
+                        if (u.isSelected)
+                        {
+                            for (size_t ui = 0; ui < pState->unitsSoundData.size(); ++ui)
+                            {
+                                if (pState->unitsSoundData[ui].isSelected)
+                                {
+                                    targetUnitIndices.push_back((int)ui);
+                                }
+                            }
+                        }
+                        if (targetUnitIndices.empty())
+                        {
+                            targetUnitIndices.push_back(dRow.unitIndex);
+                        }
+
+                        // Apply mutation to target units
+                        for (int unitIdx : targetUnitIndices)
+                        {
+                            if (unitIdx < 0 || unitIdx >= (int)pState->unitsSoundData.size()) continue;
+                            auto& targetU = pState->unitsSoundData[unitIdx];
+
+                            if ((dropCat == L"Engine" || dropCat == L"ORTS3DCab") && targetU.type != L"Engine")
+                                continue;
+
+                            std::vector<RSSSoundEntry>* pCurList = nullptr;
+                            if (dropCat == L"Engine") pCurList = &targetU.engineSounds;
+                            else if (dropCat == L"ORTS3DCab") pCurList = &targetU.orts3dCabSounds;
+                            else if (dropCat == L"Inside") pCurList = &targetU.insideSounds;
+                            else pCurList = &targetU.wagonSounds;
+
+                            if (pCurList)
+                            {
+                                if (!pCurList->empty())
+                                {
+                                    (*pCurList)[0] = newEntry;
+                                }
+                                else
+                                {
+                                    pCurList->push_back(newEntry);
+                                }
+                                targetU.isModified = true;
+                            }
+                        }
+
+                        // Synchronize any duplicates in the consist that share the same vehicle file
+                        for (int unitIdx : targetUnitIndices)
+                        {
+                            if (unitIdx < 0 || unitIdx >= (int)pState->unitsSoundData.size()) continue;
+                            const auto& baseU = pState->unitsSoundData[unitIdx];
+                            std::wstring key = baseU.folder + L"\\" + baseU.name + baseU.ext;
+                            std::transform(key.begin(), key.end(), key.begin(), ::towlower);
+
+                            for (size_t dup = 0; dup < pState->unitsSoundData.size(); ++dup)
+                            {
+                                if ((int)dup == unitIdx) continue;
+                                auto& otherU = pState->unitsSoundData[dup];
+                                std::wstring otherKey = otherU.folder + L"\\" + otherU.name + otherU.ext;
+                                std::transform(otherKey.begin(), otherKey.end(), otherKey.begin(), ::towlower);
+                                if (otherKey == key)
+                                {
+                                    otherU.wagonSounds = baseU.wagonSounds;
+                                    otherU.engineSounds = baseU.engineSounds;
+                                    otherU.orts3dCabSounds = baseU.orts3dCabSounds;
+                                    otherU.insideSounds = baseU.insideSounds;
+                                    otherU.isModified = true;
+                                }
+                            }
                         }
                     }
 
-                    RSS_PushUndo(pState, L"Assign Sound to Unit");
-                    RSSSoundEntry newEntry = CreateSoundEntryFromScanned(item, dropCat, pState->basePath);
-                    pTargetList->push_back(newEntry);
-                    u.isExpanded = true;
-                    u.isModified = true;
                     pState->isModified = true;
 
                     PopulateSoundMatrix(pState, dRow.unitIndex);

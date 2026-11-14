@@ -129,6 +129,12 @@
     <ClInclude Include="UI\SmsAssetConsolidatorDlg.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="UI\SetConsistParametersDlg.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\ModernEditControl.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="SRC\TrainSimConsistBuilder.cpp">
@@ -267,6 +273,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UI\SmsAssetConsolidatorDlg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\SetConsistParametersDlg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\ModernEditControl.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

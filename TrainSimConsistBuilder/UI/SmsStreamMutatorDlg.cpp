@@ -10,6 +10,8 @@
 #include "../SRC/StockSpecReader.h"
 #include "../SRC/DatabaseManager.h"
 #include "../SRC/AppLogging.h"
+#include "../SRC/TrainSimConsistBuilder.h"
+#include "SoundStudio.h"
 #include <windowsx.h>
 #include <commctrl.h>
 #include <commdlg.h>
@@ -22,17 +24,65 @@
 #include <algorithm>
 #include <sstream>
 #include <fstream>
+#include "ModernContextMenu.h"
+#include "FluentDragGhost.h"
+#include <filesystem>
+#include <set>
+#include <gdiplus.h>
+
+namespace fs = std::filesystem;
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "gdiplus.lib")
 
 #ifndef DWMWA_BORDER_COLOR
 #define DWMWA_BORDER_COLOR 34
 #endif
 
 static HWND g_hSmsStreamMutatorDlg = NULL;
+
+static ULONG_PTR s_smsGdiplusToken = 0;
+static int s_smsGdiplusRefCount = 0;
+
+static void EnsureGdiPlus()
+{
+    if (s_smsGdiplusRefCount == 0)
+    {
+        Gdiplus::GdiplusStartupInput gsi;
+        Gdiplus::GdiplusStartup(&s_smsGdiplusToken, &gsi, NULL);
+    }
+    s_smsGdiplusRefCount++;
+}
+
+static void ReleaseGdiPlus()
+{
+    s_smsGdiplusRefCount--;
+    if (s_smsGdiplusRefCount <= 0)
+    {
+        s_smsGdiplusRefCount = 0;
+        if (s_smsGdiplusToken)
+        {
+            Gdiplus::GdiplusShutdown(s_smsGdiplusToken);
+            s_smsGdiplusToken = 0;
+        }
+    }
+}
+
+static void AddRoundedRectPath(Gdiplus::GraphicsPath& path, Gdiplus::RectF rc, Gdiplus::REAL radius)
+{
+    Gdiplus::REAL d = radius * 2.0f;
+    if (d > rc.Width) d = rc.Width;
+    if (d > rc.Height) d = rc.Height;
+
+    path.AddArc(rc.X, rc.Y, d, d, 180.0f, 90.0f);
+    path.AddArc(rc.X + rc.Width - d, rc.Y, d, d, 270.0f, 90.0f);
+    path.AddArc(rc.X + rc.Width - d, rc.Y + rc.Height - d, d, d, 0.0f, 90.0f);
+    path.AddArc(rc.X, rc.Y + rc.Height - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+}
 
 namespace
 {
@@ -192,45 +242,7 @@ namespace
 
     static void DrawCustomCheckbox(HDC hdc, const RECT& rcBox, bool isChecked, bool isHovered, HFONT hFontBold = NULL, bool isIndeterminate = false)
     {
-        COLORREF bg = isChecked ? RGB(0, 120, 215) : (isHovered ? RGB(48, 52, 66) : RGB(28, 30, 38));
-        COLORREF border = isChecked ? RGB(80, 160, 255) : (isHovered ? RGB(100, 140, 200) : RGB(60, 65, 80));
-
-        HBRUSH hbr = CreateSolidBrush(bg);
-        HPEN hpen = CreatePen(PS_SOLID, 1, border);
-        HBRUSH holdBr = (HBRUSH)SelectObject(hdc, hbr);
-        HPEN holdPen = (HPEN)SelectObject(hdc, hpen);
-        RoundRect(hdc, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 3, 3);
-        SelectObject(hdc, holdBr);
-        SelectObject(hdc, holdPen);
-        DeleteObject(hbr);
-        DeleteObject(hpen);
-
-        if (isIndeterminate)
-        {
-            HPEN hpDash = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));
-            HGDIOBJ oldDash = SelectObject(hdc, hpDash);
-            int midY = (rcBox.top + rcBox.bottom) / 2;
-            MoveToEx(hdc, rcBox.left + 4, midY, NULL);
-            LineTo(hdc, rcBox.right - 4, midY);
-            SelectObject(hdc, oldDash);
-            DeleteObject(hpDash);
-        }
-        else if (isChecked)
-        {
-            static HFONT s_hFontBoldChk = NULL;
-            if (!s_hFontBoldChk)
-            {
-                s_hFontBoldChk = CreateCustomFont(10, FW_BOLD, L"Segoe UI");
-            }
-
-            HFONT fontToUse = hFontBold ? hFontBold : s_hFontBoldChk;
-            HGDIOBJ oldF = SelectObject(hdc, fontToUse);
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(255, 255, 255));
-            RECT rcGlyph = rcBox;
-            DrawTextW(hdc, L"✓", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            SelectObject(hdc, oldF);
-        }
+        UITheme::DrawCheckbox(hdc, rcBox, isChecked, isHovered, isIndeterminate);
     }
 
     static void DrawCustomRadioButton(HDC hdc, const RECT& rcCircle, bool isSelected, bool isHovered)
@@ -618,6 +630,23 @@ static LRESULT CALLBACK StreamInputModalProc(HWND hWnd, UINT uMsg, WPARAM wParam
     return DefWindowProcW(hWnd, uMsg, wParam, lParam);
 }
 
+static void RestoreParentWindowFocus(HWND hParent)
+{
+    if (hParent && IsWindow(hParent))
+    {
+        EnableWindow(hParent, TRUE);
+        if (IsIconic(hParent))
+        {
+            ShowWindow(hParent, SW_RESTORE);
+        }
+        SetWindowPos(hParent, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        SetForegroundWindow(hParent);
+        SetActiveWindow(hParent);
+        BringWindowToTop(hParent);
+        SetFocus(hParent);
+    }
+}
+
 static bool PromptStreamText(HWND hParent, const std::wstring& title, const std::wstring& prompt, const std::wstring& defaultVal, std::wstring& outVal)
 {
     static bool s_reg = false;
@@ -802,6 +831,66 @@ struct SmsStreamMutatorState
     HFONT hFontIconSmall = NULL;
 
     // ----------------- TAB 0: Stream Presets Library -----------------
+    // Splitter state for resizable left sidebar
+    int sidebarWidth = 280;
+    bool isDraggingSplitter = false;
+    int dragSplitterStartX = 0;
+    int dragSidebarStartW = 280;
+    RECT rcSplitter = { 0 };
+
+    // Sandboxed File/Preset Tree Explorer State
+    struct TreeExplorerItem
+    {
+        enum ItemType { ITEM_FOLDER, ITEM_PRESET };
+        ItemType type = ITEM_FOLDER;
+
+        std::wstring name;
+        std::wstring category;
+        std::wstring relPath;
+        std::wstring fullPath;
+        int depth = 0;
+        int presetCardIndex = -1;
+        int presetCount = 0;
+
+        bool isExpanded = true;
+        bool isSelected = false;
+        bool isCut = false;
+
+        RECT rcRow = { 0 };
+        RECT rcChevron = { 0 };
+    };
+    std::vector<TreeExplorerItem> treeItems;
+    int hoveredTreeItemIdx = -1;
+    std::set<std::wstring> collapsedCategories;
+    std::wstring selectedCategory = L"AI_HORNS";
+
+    // Sidebar toolbar button rects
+    RECT rcBtnTreeNewPreset = { 0 };
+    RECT rcBtnTreeNewFolder = { 0 };
+    RECT rcBtnTreeToggleAll = { 0 };
+    RECT rcBtnTreeSync = { 0 };
+    RECT rcBtnTreeOpenFolder = { 0 };
+
+    // Tree drag & drop state
+    bool isPotentialTreeDrag = false;
+    bool isTreeDragging = false;
+    POINT ptTreeDragStart = { 0, 0 };
+    int draggedTreeItemIdx = -1;
+    int dropTargetTreeFolderIdx = -1;
+
+    // Tree clipboard state
+    enum ClipboardOp { CLIP_NONE = 0, CLIP_CUT, CLIP_COPY };
+    ClipboardOp clipboardOp = CLIP_NONE;
+    bool clipIsPreset = false;
+    std::wstring clipSourcePath;
+    std::wstring clipName;
+
+    // Sidebar scroll
+    CustomScrollBar m_sidebarScroll;
+    int sidebarScrollY = 0;
+    int totalSidebarH = 0;
+
+    RECT rcBtnOpenCategoryFolder = { 0 };
     std::vector<StreamPresetCard> presetCards;
     CustomScrollBar m_vScrollTab0;
     int scrollYTab0 = 0;
@@ -913,6 +1002,445 @@ struct SmsStreamMutatorState
 };
 
 static const wchar_t* SMS_STREAM_MUTATOR_WNDCLASS = L"TSCB_SmsStreamMutatorDialog";
+
+// ------------------------------------------------------------------------------------------------
+// Tree Explorer & Context Menu Helpers for Presets
+// ------------------------------------------------------------------------------------------------
+static void BuildPresetTreeExplorer(SmsStreamMutatorState* pState)
+{
+    pState->treeItems.clear();
+    std::wstring root = DatabaseManager::GetSmsPresetsRootDir();
+
+    std::set<std::wstring> allCategories;
+
+    // Discover existing subdirectories on disk
+    try
+    {
+        if (fs::exists(root))
+        {
+            for (const auto& entry : fs::recursive_directory_iterator(root))
+            {
+                if (entry.is_directory())
+                {
+                    try
+                    {
+                        std::wstring rel = fs::relative(entry.path(), root).wstring();
+                        if (!rel.empty() && rel != L".")
+                        {
+                            allCategories.insert(rel);
+                        }
+                    }
+                    catch (...) {}
+                }
+            }
+        }
+    }
+    catch (...) {}
+
+    // Also include categories declared in loaded preset cards
+    for (auto& card : pState->presetCards)
+    {
+        if (card.category.empty()) card.category = L"AI_HORNS";
+        allCategories.insert(card.category);
+        size_t slashPos = 0;
+        while ((slashPos = card.category.find(L'\\', slashPos)) != std::wstring::npos)
+        {
+            allCategories.insert(card.category.substr(0, slashPos));
+            slashPos++;
+        }
+    }
+    if (allCategories.empty()) allCategories.insert(L"AI_HORNS");
+
+    std::vector<std::wstring> sortedCats(allCategories.begin(), allCategories.end());
+
+    // Folders and categorized presets
+    for (const auto& cat : sortedCats)
+    {
+        bool isAncestorCollapsed = false;
+        size_t slashPos = 0;
+        while ((slashPos = cat.find(L'\\', slashPos)) != std::wstring::npos)
+        {
+            std::wstring parentPrefix = cat.substr(0, slashPos);
+            if (pState->collapsedCategories.count(parentPrefix) > 0)
+            {
+                isAncestorCollapsed = true;
+                break;
+            }
+            slashPos++;
+        }
+        if (isAncestorCollapsed) continue;
+
+        int depth = 0;
+        for (wchar_t ch : cat) { if (ch == L'\\') depth++; }
+
+        bool isExpanded = (pState->collapsedCategories.count(cat) == 0);
+        bool isFolderSelected = (pState->selectedCategory == cat && pState->selectedPresetCardIdx < 0);
+
+        std::wstring leafName = cat;
+        size_t lastSlash = cat.rfind(L'\\');
+        if (lastSlash != std::wstring::npos) leafName = cat.substr(lastSlash + 1);
+
+        int catCount = 0;
+        std::vector<size_t> directPresets;
+        for (size_t c = 0; c < pState->presetCards.size(); ++c)
+        {
+            if (pState->presetCards[c].category == cat)
+            {
+                catCount++;
+                directPresets.push_back(c);
+            }
+        }
+
+        SmsStreamMutatorState::TreeExplorerItem fItem;
+        fItem.type = SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER;
+        fItem.name = leafName;
+        fItem.category = cat;
+        fItem.relPath = cat;
+        fItem.fullPath = root + L"\\" + cat;
+        fItem.depth = depth;
+        fItem.presetCount = catCount;
+        fItem.isExpanded = isExpanded;
+        fItem.isSelected = isFolderSelected;
+        fItem.isCut = (pState->clipboardOp == SmsStreamMutatorState::CLIP_CUT && pState->clipSourcePath == fItem.fullPath);
+        pState->treeItems.push_back(fItem);
+
+        if (isExpanded)
+        {
+            for (size_t cIdx : directPresets)
+            {
+                const auto& card = pState->presetCards[cIdx];
+                SmsStreamMutatorState::TreeExplorerItem pItem;
+                pItem.type = SmsStreamMutatorState::TreeExplorerItem::ITEM_PRESET;
+                pItem.name = card.name;
+                pItem.category = cat;
+                pItem.relPath = card.relativePath;
+                pItem.fullPath = card.filePath;
+                pItem.depth = depth + 1;
+                pItem.presetCardIndex = (int)cIdx;
+                pItem.isSelected = ((int)cIdx == pState->selectedPresetCardIdx);
+                pItem.isCut = (pState->clipboardOp == SmsStreamMutatorState::CLIP_CUT && pState->clipSourcePath == pItem.fullPath);
+                pState->treeItems.push_back(pItem);
+            }
+        }
+    }
+}
+
+static void ExecutePresetTreePaste(HWND hWnd, SmsStreamMutatorState* pState, const std::wstring& targetCategory)
+{
+    if (pState->clipboardOp == SmsStreamMutatorState::CLIP_NONE || pState->clipSourcePath.empty())
+        return;
+
+    if (targetCategory.empty())
+    {
+        MessageBoxW(hWnd, L"Please select a category folder. Presets cannot be placed directly in the root directory.", L"Invalid Location", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    std::wstring root = DatabaseManager::GetSmsPresetsRootDir();
+    std::wstring targetDir = root + L"\\" + targetCategory;
+    try
+    {
+        fs::create_directories(targetDir);
+        fs::path srcP(pState->clipSourcePath);
+        if (!fs::exists(srcP)) return;
+
+        std::wstring leaf = srcP.filename().wstring();
+        fs::path destP = fs::path(targetDir) / leaf;
+
+        if (pState->clipboardOp == SmsStreamMutatorState::CLIP_COPY)
+        {
+            if (fs::exists(destP))
+            {
+                int copyIdx = 1;
+                std::wstring stem = srcP.stem().wstring();
+                std::wstring ext = srcP.extension().wstring();
+                while (fs::exists(destP))
+                {
+                    std::wstring newLeaf = stem + (copyIdx == 1 ? L" - Copy" : (L" - Copy (" + std::to_wstring(copyIdx) + L")")) + ext;
+                    destP = fs::path(targetDir) / newLeaf;
+                    copyIdx++;
+                }
+            }
+            fs::copy(srcP, destP, fs::copy_options::recursive);
+        }
+        else if (pState->clipboardOp == SmsStreamMutatorState::CLIP_CUT)
+        {
+            if (fs::exists(destP) && fs::canonical(srcP) != fs::canonical(destP))
+            {
+                int copyIdx = 1;
+                std::wstring stem = srcP.stem().wstring();
+                std::wstring ext = srcP.extension().wstring();
+                while (fs::exists(destP))
+                {
+                    std::wstring newLeaf = stem + (copyIdx == 1 ? L" - Moved" : (L" - Moved (" + std::to_wstring(copyIdx) + L")")) + ext;
+                    destP = fs::path(targetDir) / newLeaf;
+                    copyIdx++;
+                }
+            }
+            if (fs::canonical(srcP) != fs::canonical(destP))
+            {
+                fs::rename(srcP, destP);
+            }
+            pState->clipboardOp = SmsStreamMutatorState::CLIP_NONE;
+            pState->clipSourcePath.clear();
+        }
+
+        DatabaseManager::LoadStreamPresets(pState->presetCards);
+        pState->selectedCategory = targetCategory;
+        InvalidateRect(hWnd, NULL, FALSE);
+    }
+    catch (...) {}
+}
+
+static void HandlePresetTreeContextMenuCmd(HWND hWnd, SmsStreamMutatorState* pState, int cmd, int itemIdx)
+{
+    std::wstring root = DatabaseManager::GetSmsPresetsRootDir();
+    if (cmd == 101) // Duplicate / Clone Preset
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            int cardIdx = pState->treeItems[itemIdx].presetCardIndex;
+            if (cardIdx >= 0 && cardIdx < (int)pState->presetCards.size())
+            {
+                const auto& cur = pState->presetCards[cardIdx];
+                std::wstring newName;
+                if (PromptStreamText(hWnd, L"Clone Stream Preset", L"Enter new preset name:", cur.name + L" (Copy)", newName) && !newName.empty())
+                {
+                    StreamPresetCard cloned = cur;
+                    cloned.id = (int)pState->presetCards.size() + 1;
+                    cloned.name = newName;
+                    cloned.filePath.clear();
+                    pState->presetCards.push_back(cloned);
+                    DatabaseManager::SaveStreamPresets(pState->presetCards);
+                    DatabaseManager::LoadStreamPresets(pState->presetCards);
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+        }
+    }
+    else if (cmd == 102) // Cut Preset
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            pState->clipboardOp = SmsStreamMutatorState::CLIP_CUT;
+            pState->clipIsPreset = true;
+            pState->clipSourcePath = pState->treeItems[itemIdx].fullPath;
+            pState->clipName = pState->treeItems[itemIdx].name;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+    else if (cmd == 103) // Copy Preset
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            pState->clipboardOp = SmsStreamMutatorState::CLIP_COPY;
+            pState->clipIsPreset = true;
+            pState->clipSourcePath = pState->treeItems[itemIdx].fullPath;
+            pState->clipName = pState->treeItems[itemIdx].name;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+    else if (cmd == 104) // Rename Preset
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            int cardIdx = pState->treeItems[itemIdx].presetCardIndex;
+            if (cardIdx >= 0 && cardIdx < (int)pState->presetCards.size())
+            {
+                auto& card = pState->presetCards[cardIdx];
+                std::wstring newName;
+                if (PromptStreamText(hWnd, L"Rename Preset", L"Enter new preset name:", card.name, newName) && !newName.empty() && newName != card.name)
+                {
+                    card.name = newName;
+                    DatabaseManager::SaveStreamPresets(pState->presetCards);
+                    DatabaseManager::LoadStreamPresets(pState->presetCards);
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+        }
+    }
+    else if (cmd == 105) // Delete Preset
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            int cardIdx = pState->treeItems[itemIdx].presetCardIndex;
+            if (cardIdx >= 0 && cardIdx < (int)pState->presetCards.size())
+            {
+                const auto& cur = pState->presetCards[cardIdx];
+                int res = ShowModernMessageBox(hWnd, (L"Are you sure you want to permanently delete preset '" + cur.name + L"'?").c_str(), L"Delete Preset", MB_YESNO | MB_ICONWARNING);
+                if (res == IDYES)
+                {
+                    DatabaseManager::DeleteStreamPresetFile(cur);
+                    pState->presetCards.erase(pState->presetCards.begin() + cardIdx);
+                    DatabaseManager::SaveStreamPresets(pState->presetCards);
+                    DatabaseManager::LoadStreamPresets(pState->presetCards);
+                    pState->selectedPresetCardIdx = -1;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+        }
+    }
+    else if (cmd == 106) // Reveal Preset on Disk
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            std::wstring fp = pState->treeItems[itemIdx].fullPath;
+            if (fs::exists(fp))
+            {
+                std::wstring param = L"/select,\"" + fp + L"\"";
+                ShellExecuteW(NULL, L"open", L"explorer.exe", param.c_str(), NULL, SW_SHOWNORMAL);
+            }
+        }
+    }
+    else if (cmd == 201 || cmd == 301) // New Preset
+    {
+        std::wstring cat = pState->selectedCategory;
+        if (cat.empty())
+        {
+            MessageBoxW(hWnd, L"Please select or create a category folder first. Presets cannot be placed directly in the root directory.", L"Invalid Location", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        std::wstring newName;
+        if (PromptStreamText(hWnd, L"New Stream Preset Card", L"Enter preset name:", L"Custom Sound Streams", newName) && !newName.empty())
+        {
+            StreamPresetCard newCard;
+            newCard.id = (int)pState->presetCards.size() + 1;
+            newCard.name = newName;
+            newCard.category = cat;
+            pState->presetCards.push_back(newCard);
+            DatabaseManager::SaveStreamPresets(pState->presetCards);
+            DatabaseManager::LoadStreamPresets(pState->presetCards);
+            pState->selectedCategory = cat;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+    else if (cmd == 202) // New Subfolder under right-clicked folder
+    {
+        std::wstring parentCat = (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size()) ? pState->treeItems[itemIdx].category : L"";
+        std::wstring newFolder;
+        std::wstring promptMsg = parentCat.empty() ? L"Enter new folder name:" : (L"Enter new subfolder name under '" + parentCat + L"':");
+        if (PromptStreamText(hWnd, L"New Subfolder", promptMsg.c_str(), L"", newFolder) && !newFolder.empty())
+        {
+            std::replace(newFolder.begin(), newFolder.end(), L'/', L'\\');
+            std::wstring fullRel = parentCat.empty() ? newFolder : (parentCat + L"\\" + newFolder);
+            std::wstring folderDir = root + L"\\" + fullRel;
+            try { fs::create_directories(folderDir); } catch (...) {}
+            DatabaseManager::LoadStreamPresets(pState->presetCards);
+            pState->selectedCategory = fullRel;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+    else if (cmd == 302) // New Folder directly under SMS_Stream_Presets root
+    {
+        std::wstring newFolder;
+        std::wstring promptMsg = L"Enter new folder name:\n(To create a subfolder, use Path\\Subpath or right-click a folder -> 'New Subfolder...')";
+        if (PromptStreamText(hWnd, L"New Category Folder", promptMsg.c_str(), L"", newFolder) && !newFolder.empty())
+        {
+            std::replace(newFolder.begin(), newFolder.end(), L'/', L'\\');
+            std::wstring folderDir = root + L"\\" + newFolder;
+            try { fs::create_directories(folderDir); } catch (...) {}
+            DatabaseManager::LoadStreamPresets(pState->presetCards);
+            pState->selectedCategory = newFolder;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+    else if (cmd == 203) // Cut Folder
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            pState->clipboardOp = SmsStreamMutatorState::CLIP_CUT;
+            pState->clipIsPreset = false;
+            pState->clipSourcePath = pState->treeItems[itemIdx].fullPath;
+            pState->clipName = pState->treeItems[itemIdx].name;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+    else if (cmd == 204) // Copy Folder
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            pState->clipboardOp = SmsStreamMutatorState::CLIP_COPY;
+            pState->clipIsPreset = false;
+            pState->clipSourcePath = pState->treeItems[itemIdx].fullPath;
+            pState->clipName = pState->treeItems[itemIdx].name;
+            InvalidateRect(hWnd, NULL, FALSE);
+        }
+    }
+    else if (cmd == 205 || cmd == 303) // Paste
+    {
+        std::wstring targetCat = (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size() && pState->treeItems[itemIdx].type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER)
+            ? pState->treeItems[itemIdx].category : pState->selectedCategory;
+        ExecutePresetTreePaste(hWnd, pState, targetCat);
+    }
+    else if (cmd == 206) // Rename Folder
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            const auto& item = pState->treeItems[itemIdx];
+            std::wstring newName;
+            if (PromptStreamText(hWnd, L"Rename Folder", L"Enter new folder name:", item.name, newName) && !newName.empty() && newName != item.name)
+            {
+                try
+                {
+                    fs::path oldP(item.fullPath);
+                    fs::path newP = oldP.parent_path() / newName;
+                    if (fs::exists(oldP))
+                    {
+                        fs::rename(oldP, newP);
+                    }
+                }
+                catch (...) {}
+                DatabaseManager::LoadStreamPresets(pState->presetCards);
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+        }
+    }
+    else if (cmd == 207) // Delete Folder
+    {
+        if (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size())
+        {
+            const auto& item = pState->treeItems[itemIdx];
+            int res = ShowModernMessageBox(hWnd, (L"Are you sure you want to delete folder '" + item.name + L"' and all presets inside it?").c_str(), L"Delete Folder", MB_YESNO | MB_ICONWARNING);
+            if (res == IDYES)
+            {
+                try
+                {
+                    fs::path p(item.fullPath);
+                    if (fs::exists(p)) fs::remove_all(p);
+                }
+                catch (...) {}
+                DatabaseManager::LoadStreamPresets(pState->presetCards);
+                pState->selectedCategory.clear();
+                InvalidateRect(hWnd, NULL, FALSE);
+            }
+        }
+    }
+    else if (cmd == 208 || cmd == 307) // Reveal Folder in Explorer
+    {
+        std::wstring p = (itemIdx >= 0 && itemIdx < (int)pState->treeItems.size()) ? pState->treeItems[itemIdx].fullPath : root;
+        try { if (!fs::exists(p)) fs::create_directories(p); } catch (...) {}
+        ShellExecuteW(NULL, L"explore", p.c_str(), NULL, NULL, SW_SHOWNORMAL);
+    }
+    else if (cmd == 304) // Expand All
+    {
+        pState->collapsedCategories.clear();
+        InvalidateRect(hWnd, NULL, FALSE);
+    }
+    else if (cmd == 305) // Collapse All
+    {
+        for (const auto& it : pState->treeItems)
+        {
+            if (it.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER)
+                pState->collapsedCategories.insert(it.category);
+        }
+        InvalidateRect(hWnd, NULL, FALSE);
+    }
+    else if (cmd == 306) // Rescan
+    {
+        DatabaseManager::LoadStreamPresets(pState->presetCards);
+        InvalidateRect(hWnd, NULL, FALSE);
+    }
+}
 
 // ------------------------------------------------------------------------------------------------
 // Persistence for Stream Presets
@@ -1028,8 +1556,12 @@ static void AddSmsFileTarget(SmsStreamMutatorState* pState, const std::wstring& 
 
     for (auto& t : pState->targetFiles)
     {
-        if (t.section == section && _wcsicmp(t.fullPath.c_str(), path.c_str()) == 0)
+        if (_wcsicmp(t.fullPath.c_str(), path.c_str()) == 0)
         {
+            if (section == TargetSection::Engine && t.section != TargetSection::Engine)
+            {
+                t.section = TargetSection::Engine;
+            }
             if (pUsage)
             {
                 bool exists = false;
@@ -1243,34 +1775,50 @@ static LRESULT CALLBACK StreamMutatorEditSubclassProc(
                 COLORREF clrBg = focused ? RGB(30, 30, 30) : (hovered ? RGB(45, 45, 45) : RGB(38, 38, 38));
                 COLORREF clrBorder = focused ? RGB(70, 70, 70) : (hovered ? RGB(85, 95, 110) : RGB(50, 50, 50));
 
-                HBRUSH hbrBg = CreateSolidBrush(clrBg);
-                HPEN hPen = CreatePen(PS_SOLID, 1, clrBorder);
-                HGDIOBJ hOldBr = SelectObject(hMemDC, hbrBg);
-                HGDIOBJ hOldP = SelectObject(hMemDC, hPen);
+                EnsureGdiPlus();
+                Gdiplus::Graphics g(hMemDC);
+                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
 
-                RoundRect(hMemDC, rc.left, rc.top, rc.right, rc.bottom, 6, 6);
+                Gdiplus::RectF rcBox(0.5f, 0.5f, (Gdiplus::REAL)width - 1.0f, (Gdiplus::REAL)height - 1.0f);
+                Gdiplus::GraphicsPath boxPath;
+                AddRoundedRectPath(boxPath, rcBox, 4.0f);
 
-                SelectObject(hMemDC, hOldP);
-                SelectObject(hMemDC, hOldBr);
-                DeleteObject(hPen);
-                DeleteObject(hbrBg);
+                Gdiplus::SolidBrush brBg(Gdiplus::Color(255, GetRValue(clrBg), GetGValue(clrBg), GetBValue(clrBg)));
+                g.FillPath(&brBg, &boxPath);
 
                 // 3. Render edit control text onto memory DC (clipped cleanly within rounded boundaries)
-                HRGN hRgnClip = CreateRoundRectRgn(rc.left + 1, rc.top + 1, rc.right, rc.bottom, 6, 6);
+                RECT rcClip = { rc.left + 2, rc.top + 1, rc.right - 2, rc.bottom - 2 };
+                HRGN hRgnClip = CreateRectRgnIndirect(&rcClip);
                 SelectClipRgn(hMemDC, hRgnClip);
                 DefSubclassProc(hWnd, WM_PRINTCLIENT, (WPARAM)hMemDC, PRF_CLIENT);
                 SelectClipRgn(hMemDC, NULL);
                 DeleteObject(hRgnClip);
 
-                // 4. Draw focused accent blue bottom line (RGB(0, 120, 215))
-                if (focused)
+                // 4. Draw anti-aliased border around edit box
+                Gdiplus::Pen penBorder(Gdiplus::Color(255, GetRValue(clrBorder), GetGValue(clrBorder), GetBValue(clrBorder)), 1.0f);
+                g.DrawPath(&penBorder, &boxPath);
+
+                // 5. Draw focused accent light blue bottom line (Windows 11 Fluent edit highlight with 45-degree chamfered corners)
+                bool isReadOnly = (GetWindowLongPtr(hWnd, GWL_STYLE) & ES_READONLY) != 0;
+                if (focused && !isReadOnly)
                 {
-                    HPEN hAccent = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
-                    HGDIOBJ hOldA = SelectObject(hMemDC, hAccent);
-                    MoveToEx(hMemDC, rc.left + 4, rc.bottom - 2, NULL);
-                    LineTo(hMemDC, rc.right - 4, rc.bottom - 2);
-                    SelectObject(hMemDC, hOldA);
-                    DeleteObject(hAccent);
+                    Gdiplus::GraphicsPath accentPath;
+                    Gdiplus::REAL r = 4.0f;
+                    if (r * 2.0f > (Gdiplus::REAL)width) r = (Gdiplus::REAL)width / 2.0f;
+                    if (r * 2.0f > (Gdiplus::REAL)height) r = (Gdiplus::REAL)height / 2.0f;
+                    Gdiplus::REAL d = r * 2.0f;
+                    Gdiplus::REAL accentY = (Gdiplus::REAL)height - 1.5f;
+                    Gdiplus::REAL arcY = accentY - d;
+
+                    accentPath.AddArc(0.5f, arcY, d, d, 135.0f, -45.0f);
+                    accentPath.AddLine(0.5f + r, accentY, (Gdiplus::REAL)width - 0.5f - r, accentY);
+                    accentPath.AddArc((Gdiplus::REAL)width - 0.5f - d, arcY, d, d, 90.0f, -45.0f);
+
+                    Gdiplus::Pen penAccent(Gdiplus::Color(255, 96, 205, 255), 2.0f);
+                    penAccent.SetStartCap(Gdiplus::LineCapFlat);
+                    penAccent.SetEndCap(Gdiplus::LineCapFlat);
+                    g.DrawPath(&penAccent, &accentPath);
                 }
 
                 BitBlt(hdc, 0, 0, width, height, hMemDC, 0, 0, SRCCOPY);
@@ -1349,9 +1897,16 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
         }
 
         LoadStreamPresetsFromFile(pState);
-        if (!pState->presetCards.empty() && pState->selectedPresetCardIdx < 0)
+        if (pState->selectedCategory.empty())
         {
-            pState->selectedPresetCardIdx = 0;
+            if (!pState->presetCards.empty())
+            {
+                pState->selectedCategory = pState->presetCards[0].category.empty() ? L"AI_HORNS" : pState->presetCards[0].category;
+            }
+            else
+            {
+                pState->selectedCategory = L"AI_HORNS";
+            }
         }
 
         pState->hEditInsertAfter = CreateWindowExW(
@@ -1523,10 +2078,21 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
         if (pState)
         {
             int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hWnd, &pt);
+
             if (pState->activeTab == 0)
             {
-                pState->m_vScrollTab0.OnMouseWheel(delta, 50, hWnd);
-                pState->scrollYTab0 = pState->m_vScrollTab0.GetPos();
+                if (pt.x < pState->sidebarWidth)
+                {
+                    pState->m_sidebarScroll.OnMouseWheel(delta, 50, hWnd);
+                    pState->sidebarScrollY = pState->m_sidebarScroll.GetPos();
+                }
+                else
+                {
+                    pState->m_vScrollTab0.OnMouseWheel(delta, 50, hWnd);
+                    pState->scrollYTab0 = pState->m_vScrollTab0.GetPos();
+                }
             }
             else
             {
@@ -1539,6 +2105,27 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
         break;
     }
 
+    case WM_SETCURSOR:
+    {
+        if (pState && pState->activeTab == 0)
+        {
+            POINT pt;
+            GetCursorPos(&pt);
+            ScreenToClient(hWnd, &pt);
+            if (pState->isDraggingSplitter || PtInRect(&pState->rcSplitter, pt))
+            {
+                SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                return TRUE;
+            }
+            if (pState->isTreeDragging)
+            {
+                SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                return TRUE;
+            }
+        }
+        break;
+    }
+
     case WM_MOUSEMOVE:
     {
         if (pState)
@@ -1546,19 +2133,118 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             pState->ptMouse = pt;
 
-            bool sbCh = false;
             if (pState->activeTab == 0)
             {
-                sbCh = pState->m_vScrollTab0.OnMouseMove(pt, hWnd);
-                if (sbCh) pState->scrollYTab0 = pState->m_vScrollTab0.GetPos();
+                // 1. Check splitter dragging
+                if (pState->isDraggingSplitter)
+                {
+                    int deltaX = pt.x - pState->dragSplitterStartX;
+                    int newW = pState->dragSidebarStartW + deltaX;
+                    RECT rcClient;
+                    GetClientRect(hWnd, &rcClient);
+                    int minW = 200;
+                    int maxW = (std::max<int>)(280, (int)rcClient.right - 460);
+                    if (newW < minW) newW = minW;
+                    if (newW > maxW) newW = maxW;
+
+                    if (newW != pState->sidebarWidth)
+                    {
+                        pState->sidebarWidth = newW;
+                        InvalidateRect(hWnd, NULL, FALSE);
+                    }
+                    return 0;
+                }
+
+                // 2. Potential tree drag initiation (threshold 4px)
+                if (pState->isPotentialTreeDrag && !pState->isTreeDragging)
+                {
+                    if (abs(pt.x - pState->ptTreeDragStart.x) > 4 || abs(pt.y - pState->ptTreeDragStart.y) > 4)
+                    {
+                        pState->isTreeDragging = true;
+                        SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+
+                        std::vector<DragGhostItem> ghostItems;
+                        if (pState->draggedTreeItemIdx >= 0 && pState->draggedTreeItemIdx < (int)pState->treeItems.size())
+                        {
+                            const auto& item = pState->treeItems[pState->draggedTreeItemIdx];
+                            DragGhostItem gItem;
+                            gItem.type = GhostItemType::SoundFile;
+                            gItem.name = item.name;
+                            gItem.subtitle = (item.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER)
+                                ? (std::to_wstring(item.presetCount) + L" Presets")
+                                : (item.presetCardIndex >= 0 && item.presetCardIndex < (int)pState->presetCards.size()
+                                    ? std::to_wstring(pState->presetCards[item.presetCardIndex].streams.size()) + L" Streams"
+                                    : L"Preset");
+                            gItem.isEngine = true;
+                            ghostItems.push_back(gItem);
+                        }
+
+                        POINT ptScreen = pt;
+                        ClientToScreen(hWnd, &ptScreen);
+                        FluentDragGhost::Show(hWnd, ptScreen, ghostItems);
+                    }
+                }
+
+                // 3. Active tree dragging motion & drop targeting
+                if (pState->isTreeDragging)
+                {
+                    SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+                    POINT ptScreen = pt;
+                    ClientToScreen(hWnd, &ptScreen);
+
+                    int targetFolder = -1;
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        if (pState->treeItems[i].type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER &&
+                            PtInRect(&pState->treeItems[i].rcRow, pt))
+                        {
+                            targetFolder = (int)i;
+                            break;
+                        }
+                    }
+                    pState->dropTargetTreeFolderIdx = targetFolder;
+
+                    FluentDragGhost::Move(ptScreen, targetFolder >= 0, L"Move into Folder");
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
+                }
+
+                // 4. Hover detection for tree rows
+                int newHover = -1;
+                if (pt.x < pState->sidebarWidth && pt.y > 112)
+                {
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        if (PtInRect(&pState->treeItems[i].rcRow, pt))
+                        {
+                            newHover = (int)i;
+                            break;
+                        }
+                    }
+                }
+                if (newHover != pState->hoveredTreeItemIdx)
+                {
+                    pState->hoveredTreeItemIdx = newHover;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+
+                bool sbCh1 = pState->m_sidebarScroll.OnMouseMove(pt, hWnd);
+                if (sbCh1) pState->sidebarScrollY = pState->m_sidebarScroll.GetPos();
+
+                bool sbCh0 = pState->m_vScrollTab0.OnMouseMove(pt, hWnd);
+                if (sbCh0) pState->scrollYTab0 = pState->m_vScrollTab0.GetPos();
+
+                if (sbCh1 || sbCh0) InvalidateRect(hWnd, NULL, FALSE);
             }
             else
             {
-                sbCh = pState->m_vScrollTab1.OnMouseMove(pt, hWnd);
-                if (sbCh) pState->scrollYTab1 = pState->m_vScrollTab1.GetPos();
+                bool sbCh = pState->m_vScrollTab1.OnMouseMove(pt, hWnd);
+                if (sbCh)
+                {
+                    pState->scrollYTab1 = pState->m_vScrollTab1.GetPos();
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
             }
-
-            if (sbCh) InvalidateRect(hWnd, NULL, FALSE);
         }
         break;
     }
@@ -1570,6 +2256,106 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             if (pState->activeTab == 0)
             {
+                // 1. Splitter initiation
+                if (PtInRect(&pState->rcSplitter, pt))
+                {
+                    pState->isDraggingSplitter = true;
+                    pState->dragSplitterStartX = pt.x;
+                    pState->dragSidebarStartW = pState->sidebarWidth;
+                    SetCapture(hWnd);
+                    SetCursor(LoadCursor(NULL, IDC_SIZEWE));
+                    InvalidateRect(hWnd, &pState->rcSplitter, FALSE);
+                    return 0;
+                }
+
+                // 2. Sidebar scrollbar
+                if (pState->m_sidebarScroll.OnLButtonDown(pt, hWnd))
+                {
+                    pState->sidebarScrollY = pState->m_sidebarScroll.GetPos();
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
+                }
+
+                // 3. Sidebar toolbar buttons
+                if (PtInRect(&pState->rcBtnTreeNewPreset, pt))
+                {
+                    HandlePresetTreeContextMenuCmd(hWnd, pState, 201, -1);
+                    return 0;
+                }
+                if (PtInRect(&pState->rcBtnTreeNewFolder, pt))
+                {
+                    HandlePresetTreeContextMenuCmd(hWnd, pState, 302, -1);
+                    return 0;
+                }
+                if (PtInRect(&pState->rcBtnTreeToggleAll, pt))
+                {
+                    if (pState->collapsedCategories.empty())
+                    {
+                        for (const auto& item : pState->treeItems)
+                        {
+                            if (item.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER)
+                                pState->collapsedCategories.insert(item.category);
+                        }
+                    }
+                    else
+                    {
+                        pState->collapsedCategories.clear();
+                    }
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
+                }
+                if (PtInRect(&pState->rcBtnTreeSync, pt))
+                {
+                    HandlePresetTreeContextMenuCmd(hWnd, pState, 306, -1);
+                    return 0;
+                }
+                if (PtInRect(&pState->rcBtnTreeOpenFolder, pt))
+                {
+                    HandlePresetTreeContextMenuCmd(hWnd, pState, 307, -1);
+                    return 0;
+                }
+
+                // 4. Tree item chevron & row click
+                if (pt.x < pState->sidebarWidth && pt.y > 112)
+                {
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        auto& item = pState->treeItems[i];
+                        if (item.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER && PtInRect(&item.rcChevron, pt))
+                        {
+                            if (pState->collapsedCategories.count(item.category) > 0)
+                                pState->collapsedCategories.erase(item.category);
+                            else
+                                pState->collapsedCategories.insert(item.category);
+                            InvalidateRect(hWnd, NULL, FALSE);
+                            return 0;
+                        }
+                        else if (PtInRect(&item.rcRow, pt))
+                        {
+                            if (item.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER)
+                            {
+                                pState->selectedCategory = item.category;
+                                pState->selectedPresetCardIdx = -1;
+                            }
+                            else if (item.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_PRESET)
+                            {
+                                pState->selectedPresetCardIdx = item.presetCardIndex;
+                                pState->selectedCategory = item.category;
+                                if (item.presetCardIndex >= 0 && item.presetCardIndex < (int)pState->presetCards.size())
+                                {
+                                    pState->presetCards[item.presetCardIndex].isCollapsed = false;
+                                }
+                            }
+                            pState->isPotentialTreeDrag = true;
+                            pState->draggedTreeItemIdx = (int)i;
+                            pState->ptTreeDragStart = pt;
+                            InvalidateRect(hWnd, NULL, FALSE);
+                            return 0;
+                        }
+                    }
+                }
+
+                // 5. Right canvas scrollbar
                 if (pState->m_vScrollTab0.OnLButtonDown(pt, hWnd))
                 {
                     pState->scrollYTab0 = pState->m_vScrollTab0.GetPos();
@@ -1599,7 +2385,103 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             if (pState->activeTab == 0)
             {
+                pState->m_sidebarScroll.OnLButtonUp(pt, hWnd);
                 pState->m_vScrollTab0.OnLButtonUp(pt, hWnd);
+
+                if (pState->isDraggingSplitter)
+                {
+                    pState->isDraggingSplitter = false;
+                    if (GetCapture() == hWnd) ReleaseCapture();
+                    SetCursor(LoadCursor(NULL, IDC_ARROW));
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
+                }
+
+                if (pState->isTreeDragging)
+                {
+                    pState->isTreeDragging = false;
+                    pState->isPotentialTreeDrag = false;
+                    FluentDragGhost::Hide();
+                    SetCursor(LoadCursor(NULL, IDC_ARROW));
+                    if (GetCapture() == hWnd) ReleaseCapture();
+
+                    int srcIdx = pState->draggedTreeItemIdx;
+                    int dstFolderIdx = pState->dropTargetTreeFolderIdx;
+
+                    if (srcIdx >= 0 && srcIdx < (int)pState->treeItems.size() &&
+                        dstFolderIdx >= 0 && dstFolderIdx < (int)pState->treeItems.size())
+                    {
+                        const auto& srcItem = pState->treeItems[srcIdx];
+                        const auto& dstItem = pState->treeItems[dstFolderIdx];
+
+                        if (dstItem.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER)
+                        {
+                            std::wstring root = DatabaseManager::GetSmsPresetsRootDir();
+                            std::wstring targetCat = dstItem.category;
+                            std::wstring targetDir = root + (targetCat.empty() ? L"" : (L"\\" + targetCat));
+
+                            try
+                            {
+                                fs::path srcP(srcItem.fullPath);
+                                if (fs::exists(srcP))
+                                {
+                                    std::wstring leaf = srcP.filename().wstring();
+                                    fs::path destP = fs::path(targetDir) / leaf;
+
+                                    if (srcItem.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_PRESET)
+                                    {
+                                        if (srcP.parent_path() != fs::path(targetDir))
+                                        {
+                                            if (fs::exists(destP))
+                                            {
+                                                int copyIdx = 1;
+                                                std::wstring stem = srcP.stem().wstring();
+                                                std::wstring ext = srcP.extension().wstring();
+                                                while (fs::exists(destP))
+                                                {
+                                                    std::wstring newLeaf = stem + L"_" + std::to_wstring(copyIdx) + ext;
+                                                    destP = fs::path(targetDir) / newLeaf;
+                                                    copyIdx++;
+                                                }
+                                            }
+                                            fs::rename(srcP, destP);
+                                            DatabaseManager::LoadStreamPresets(pState->presetCards);
+                                            pState->selectedCategory = targetCat;
+                                            InvalidateRect(hWnd, NULL, FALSE);
+                                        }
+                                    }
+                                    else if (srcItem.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER)
+                                    {
+                                        if (targetCat.find(srcItem.category) != 0 && srcP != fs::path(targetDir))
+                                        {
+                                            if (fs::exists(destP))
+                                            {
+                                                int copyIdx = 1;
+                                                while (fs::exists(destP))
+                                                {
+                                                    std::wstring newLeaf = leaf + L"_" + std::to_wstring(copyIdx);
+                                                    destP = fs::path(targetDir) / newLeaf;
+                                                    copyIdx++;
+                                                }
+                                            }
+                                            fs::rename(srcP, destP);
+                                            DatabaseManager::LoadStreamPresets(pState->presetCards);
+                                            pState->selectedCategory = targetCat + L"\\" + leaf;
+                                            InvalidateRect(hWnd, NULL, FALSE);
+                                        }
+                                    }
+                                }
+                            }
+                            catch (...) {}
+                        }
+                    }
+
+                    pState->draggedTreeItemIdx = -1;
+                    pState->dropTargetTreeFolderIdx = -1;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                    return 0;
+                }
+                pState->isPotentialTreeDrag = false;
             }
             else
             {
@@ -1611,16 +2493,33 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
             {
                 if (PtInRect(&pState->rcBtnNewPresetCard, pt))
                 {
+                    std::wstring cat = pState->selectedCategory;
+                    if (cat.empty())
+                    {
+                        MessageBoxW(hWnd, L"Please select or create a category folder first. Presets cannot be placed directly in the root directory.", L"Invalid Location", MB_OK | MB_ICONWARNING);
+                        return 0;
+                    }
                     std::wstring newName;
-                    if (PromptStreamText(hWnd, L"New Stream Preset Card", L"Enter group name:", L"Custom Sound Streams", newName) && !newName.empty())
+                    if (PromptStreamText(hWnd, L"New Stream Preset Card", L"Enter preset group name:", L"Custom Sound Streams", newName) && !newName.empty())
                     {
                         StreamPresetCard newCard;
                         newCard.id = (int)pState->presetCards.size() + 1;
                         newCard.name = newName;
+                        newCard.category = cat;
                         pState->presetCards.push_back(newCard);
-                        SaveStreamPresetsToFile(pState);
+                        DatabaseManager::SaveStreamPresets(pState->presetCards);
+                        DatabaseManager::LoadStreamPresets(pState->presetCards);
+                        pState->selectedCategory = cat;
                         InvalidateRect(hWnd, NULL, FALSE);
                     }
+                    return 0;
+                }
+                else if (PtInRect(&pState->rcBtnOpenCategoryFolder, pt))
+                {
+                    std::wstring root = DatabaseManager::GetSmsPresetsRootDir();
+                    std::wstring target = pState->selectedCategory.empty() ? root : (root + L"\\" + pState->selectedCategory);
+                    try { if (!fs::exists(target)) fs::create_directories(target); } catch (...) {}
+                    ShellExecuteW(NULL, L"explore", target.c_str(), NULL, NULL, SW_SHOWNORMAL);
                     return 0;
                 }
                 else if (PtInRect(&pState->rcBtnExpandAllTab0, pt))
@@ -1673,8 +2572,11 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                     {
                         if (ShowModernMessageBox(hWnd, (L"Delete preset card '" + card.name + L"'?").c_str(), L"Delete Preset", MB_YESNO | MB_ICONQUESTION) == IDYES)
                         {
+                            DatabaseManager::DeleteStreamPresetFile(card);
                             pState->presetCards.erase(pState->presetCards.begin() + cIdx);
-                            SaveStreamPresetsToFile(pState);
+                            DatabaseManager::SaveStreamPresets(pState->presetCards);
+                            DatabaseManager::LoadStreamPresets(pState->presetCards);
+                            pState->selectedPresetCardIdx = -1;
                             InvalidateRect(hWnd, NULL, FALSE);
                         }
                         return 0;
@@ -2025,15 +2927,79 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                         }
                         else
                         {
-                            for (size_t i = 0; i < pState->presetCards.size(); ++i)
+                            std::set<std::wstring> allFolders;
+                            std::map<std::wstring, std::vector<size_t>> directCards;
+
+                            // 1. Collect all categories from loaded cards
+                            for (size_t cIdx = 0; cIdx < pState->presetCards.size(); ++cIdx)
                             {
-                                const auto& card = pState->presetCards[i];
-                                std::wstring sec = std::to_wstring(card.streams.size()) + L" stream" + (card.streams.size() == 1 ? L"" : L"s");
-                                presetItems.push_back(DropDownItem::Action((int)i + 1, L"\xE8D6", card.name, sec, (int)i == pState->selectedPresetCardIdx));
+                                const auto& card = pState->presetCards[cIdx];
+                                std::wstring cat = card.category.empty() ? L"AI_HORNS" : card.category;
+                                directCards[cat].push_back(cIdx);
+                                allFolders.insert(cat);
+
+                                size_t pos = 0;
+                                while ((pos = cat.find(L'\\', pos)) != std::wstring::npos)
+                                {
+                                    std::wstring parentPrefix = cat.substr(0, pos);
+                                    if (!parentPrefix.empty()) allFolders.insert(parentPrefix);
+                                    pos++;
+                                }
+                            }
+
+                            // 2. Also include physical category folders on disk
+                            auto diskCats = DatabaseManager::GetSmsPresetCategories();
+                            for (const auto& dc : diskCats)
+                            {
+                                if (!dc.empty())
+                                {
+                                    allFolders.insert(dc);
+                                    size_t pos = 0;
+                                    while ((pos = dc.find(L'\\', pos)) != std::wstring::npos)
+                                    {
+                                        std::wstring parentPrefix = dc.substr(0, pos);
+                                        if (!parentPrefix.empty()) allFolders.insert(parentPrefix);
+                                        pos++;
+                                    }
+                                }
+                            }
+
+                            std::vector<std::wstring> sortedFolders(allFolders.begin(), allFolders.end());
+                            std::sort(sortedFolders.begin(), sortedFolders.end());
+
+                            for (const auto& folder : sortedFolders)
+                            {
+                                size_t lastSlash = folder.rfind(L'\\');
+                                std::wstring parentGroup = (lastSlash != std::wstring::npos) ? folder.substr(0, lastSlash) : L"";
+                                std::wstring leafName = (lastSlash != std::wstring::npos) ? folder.substr(lastSlash + 1) : folder;
+                                int indent = 0;
+                                for (wchar_t ch : folder) { if (ch == L'\\') indent++; }
+
+                                int totalInBranch = 0;
+                                for (const auto& card : pState->presetCards)
+                                {
+                                    std::wstring cCat = card.category.empty() ? L"AI_HORNS" : card.category;
+                                    if (cCat == folder || cCat.rfind(folder + L"\\", 0) == 0) totalInBranch++;
+                                }
+
+                                std::wstring secText = std::to_wstring(totalInBranch) + L" Preset" + (totalInBranch == 1 ? L"" : L"s");
+                                presetItems.push_back(DropDownItem::GroupHeader(leafName, L"\xE8B7", totalInBranch, true /* collapsed by default */, 0, false, false, secText, parentGroup, indent, folder));
+
+                                if (directCards.find(folder) != directCards.end())
+                                {
+                                    for (size_t cIdx : directCards[folder])
+                                    {
+                                        const auto& card = pState->presetCards[cIdx];
+                                        bool isCurrent = ((int)cIdx == pState->selectedPresetCardIdx);
+                                        std::wstring sec = std::to_wstring(card.streams.size()) + L" stream" + (card.streams.size() == 1 ? L"" : L"s");
+                                        presetItems.push_back(DropDownItem::Action((int)cIdx + 1, isCurrent ? L"\xE73E" : L"\xE8D6", card.name, sec, isCurrent, true, folder, folder, indent + 1));
+                                    }
+                                }
                             }
                         }
+
                         int curSel = (pState->selectedPresetCardIdx >= 0) ? (pState->selectedPresetCardIdx + 1) : -1;
-                        int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, pState->rcPickerPreset, presetItems, curSel, 320);
+                        int chosen = CustomDropDownMenu::ShowSingleSelect(hWnd, pState->rcPickerPreset, presetItems, curSel, 340);
                         int idx = chosen - 1;
                         if (idx >= 0 && idx < (int)pState->presetCards.size())
                         {
@@ -2105,7 +3071,12 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                 if (PtInRect(&pState->rcBtnPreviewDryRun, pt))
                 {
                     int selCount = 0;
-                    for (const auto& t : pState->targetFiles) if (t.isSelected) ++selCount;
+                    for (const auto& t : pState->targetFiles)
+                    {
+                        if (pState->targetFilter == TargetFilterMode::EnginesOnly && t.section != TargetSection::Engine) continue;
+                        if (pState->targetFilter == TargetFilterMode::WagonsOnly && t.section != TargetSection::Wagon) continue;
+                        if (t.isSelected) ++selCount;
+                    }
                     if (selCount == 0)
                     {
                         ShowModernMessageBox(hWnd, L"No SMS files selected. Please check at least one SMS file.", L"Dry Run", MB_OK | MB_ICONWARNING);
@@ -2159,7 +3130,12 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                 else if (PtInRect(&pState->rcBtnApplyMutation, pt))
                 {
                     int selCount = 0;
-                    for (const auto& t : pState->targetFiles) if (t.isSelected) ++selCount;
+                    for (const auto& t : pState->targetFiles)
+                    {
+                        if (pState->targetFilter == TargetFilterMode::EnginesOnly && t.section != TargetSection::Engine) continue;
+                        if (pState->targetFilter == TargetFilterMode::WagonsOnly && t.section != TargetSection::Wagon) continue;
+                        if (t.isSelected) ++selCount;
+                    }
                     if (selCount == 0)
                     {
                         ShowModernMessageBox(hWnd, L"No SMS files selected. Please select at least one file.", L"Apply Mutation", MB_OK | MB_ICONWARNING);
@@ -2186,6 +3162,8 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                     std::unordered_set<std::wstring> processedPaths;
                     for (auto& tgt : pState->targetFiles)
                     {
+                        if (pState->targetFilter == TargetFilterMode::EnginesOnly && tgt.section != TargetSection::Engine) continue;
+                        if (pState->targetFilter == TargetFilterMode::WagonsOnly && tgt.section != TargetSection::Wagon) continue;
                         if (!tgt.isSelected || !tgt.isLoaded) continue;
                         if (processedPaths.find(tgt.fullPath) != processedPaths.end()) continue;
                         processedPaths.insert(tgt.fullPath);
@@ -2405,11 +3383,242 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                         }
                     }
 
+                    // Notify Sound Studio and SMS Editor to reload any mutated SMS files live
+                    HWND hStudio = GetSoundStudioWindow();
+                    if (hStudio && IsWindow(hStudio))
+                    {
+                        for (const auto& path : processedPaths)
+                        {
+                            SoundStudio_ReloadSmsIfMatches(hStudio, path);
+                        }
+                    }
+
                     std::wstring resMsg = L"Successfully mutated " + std::to_wstring(successCount) + L" SMS file(s)!";
                     ShowModernMessageBox(hWnd, resMsg.c_str(), L"Mutation Complete", MB_OK | MB_ICONINFORMATION);
                     InvalidateRect(hWnd, NULL, FALSE);
                     return 0;
                 }
+            }
+        }
+        break;
+    }
+
+    case WM_RBUTTONUP:
+    {
+        if (pState && pState->activeTab == 0)
+        {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            int topY = 112;
+            if (pt.x < pState->sidebarWidth && pt.y > topY)
+            {
+                int hitIdx = -1;
+                for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                {
+                    if (PtInRect(&pState->treeItems[i].rcRow, pt))
+                    {
+                        hitIdx = (int)i;
+                        break;
+                    }
+                }
+
+                POINT ptScreen = pt;
+                ClientToScreen(hWnd, &ptScreen);
+
+                if (hitIdx >= 0)
+                {
+                    const auto& item = pState->treeItems[hitIdx];
+                    if (item.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_PRESET)
+                    {
+                        pState->selectedPresetCardIdx = item.presetCardIndex;
+                        pState->selectedCategory = item.category;
+                        InvalidateRect(hWnd, NULL, FALSE);
+
+                        std::vector<ContextMenuItem> mItems;
+                        mItems.push_back(ContextMenuItem::Action(101, L"\xE8C8", L"Duplicate / Clone"));
+                        mItems.push_back(ContextMenuItem::Separator());
+                        mItems.push_back(ContextMenuItem::Action(102, L"\xE8C6", L"Cut Preset", L"Ctrl+X"));
+                        mItems.push_back(ContextMenuItem::Action(103, L"\xE8C8", L"Copy Preset", L"Ctrl+C"));
+                        mItems.push_back(ContextMenuItem::Action(104, L"\xE70F", L"Rename...", L"F2"));
+                        mItems.push_back(ContextMenuItem::Separator());
+                        mItems.push_back(ContextMenuItem::Action(105, L"\xE74D", L"Delete Preset...", L"Del"));
+                        mItems.push_back(ContextMenuItem::Separator());
+                        mItems.push_back(ContextMenuItem::Action(106, L"\xE838", L"Reveal on Disk"));
+
+                        int cmd = ModernContextMenu::Show(hWnd, ptScreen.x, ptScreen.y, mItems, TRUE, 220);
+                        if (IsWindow(hWnd)) { SetActiveWindow(hWnd); SetForegroundWindow(hWnd); }
+                        HandlePresetTreeContextMenuCmd(hWnd, pState, cmd, hitIdx);
+                        return 0;
+                    }
+                    else if (item.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER)
+                    {
+                        pState->selectedCategory = item.category;
+                        pState->selectedPresetCardIdx = -1;
+                        InvalidateRect(hWnd, NULL, FALSE);
+
+                        std::vector<ContextMenuItem> mItems;
+                        mItems.push_back(ContextMenuItem::Action(201, L"\xE710", L"New Preset Here..."));
+                        mItems.push_back(ContextMenuItem::Action(202, L"\xE8F4", L"New Subfolder..."));
+                        mItems.push_back(ContextMenuItem::Separator());
+                        mItems.push_back(ContextMenuItem::Action(203, L"\xE8C6", L"Cut Folder", L"Ctrl+X"));
+                        mItems.push_back(ContextMenuItem::Action(204, L"\xE8C8", L"Copy Folder", L"Ctrl+C"));
+                        bool canPaste = (pState->clipboardOp != SmsStreamMutatorState::CLIP_NONE && !pState->clipSourcePath.empty());
+                        mItems.push_back(ContextMenuItem::Action(205, L"\xE77F", L"Paste", L"Ctrl+V", canPaste));
+                        mItems.push_back(ContextMenuItem::Separator());
+                        mItems.push_back(ContextMenuItem::Action(206, L"\xE70F", L"Rename Folder...", L"F2"));
+                        mItems.push_back(ContextMenuItem::Action(207, L"\xE74D", L"Delete Folder...", L"Del"));
+                        mItems.push_back(ContextMenuItem::Separator());
+                        mItems.push_back(ContextMenuItem::Action(208, L"\xE838", L"Open in Windows Explorer"));
+
+                        int cmd = ModernContextMenu::Show(hWnd, ptScreen.x, ptScreen.y, mItems, TRUE, 220);
+                        if (IsWindow(hWnd)) { SetActiveWindow(hWnd); SetForegroundWindow(hWnd); }
+                        HandlePresetTreeContextMenuCmd(hWnd, pState, cmd, hitIdx);
+                        return 0;
+                    }
+                }
+                else
+                {
+                    std::vector<ContextMenuItem> mItems;
+                    mItems.push_back(ContextMenuItem::Action(301, L"\xE710", L"New Stream Preset..."));
+                    mItems.push_back(ContextMenuItem::Action(302, L"\xE8F4", L"New Folder..."));
+                    bool canPaste = (pState->clipboardOp != SmsStreamMutatorState::CLIP_NONE && !pState->clipSourcePath.empty());
+                    mItems.push_back(ContextMenuItem::Action(303, L"\xE77F", L"Paste", L"Ctrl+V", canPaste));
+                    mItems.push_back(ContextMenuItem::Separator());
+                    mItems.push_back(ContextMenuItem::Action(304, L"\xE8D5", L"Expand All"));
+                    mItems.push_back(ContextMenuItem::Action(305, L"\xE8D5", L"Collapse All"));
+                    mItems.push_back(ContextMenuItem::Action(306, L"\xE72C", L"Rescan from Disk"));
+                    mItems.push_back(ContextMenuItem::Action(307, L"\xE838", L"Open Presets Folder"));
+
+                    int cmd = ModernContextMenu::Show(hWnd, ptScreen.x, ptScreen.y, mItems, TRUE, 220);
+                    if (IsWindow(hWnd)) { SetActiveWindow(hWnd); SetForegroundWindow(hWnd); }
+                    HandlePresetTreeContextMenuCmd(hWnd, pState, cmd, -1);
+                    return 0;
+                }
+            }
+        }
+        break;
+    }
+
+    case WM_KEYDOWN:
+    {
+        if (pState && pState->activeTab == 0)
+        {
+            bool isCtrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (wParam == VK_F2)
+            {
+                if (pState->selectedPresetCardIdx >= 0)
+                {
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        if (pState->treeItems[i].type == SmsStreamMutatorState::TreeExplorerItem::ITEM_PRESET &&
+                            pState->treeItems[i].presetCardIndex == pState->selectedPresetCardIdx)
+                        {
+                            HandlePresetTreeContextMenuCmd(hWnd, pState, 104, (int)i);
+                            break;
+                        }
+                    }
+                }
+                else if (!pState->selectedCategory.empty())
+                {
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        if (pState->treeItems[i].type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER &&
+                            pState->treeItems[i].category == pState->selectedCategory)
+                        {
+                            HandlePresetTreeContextMenuCmd(hWnd, pState, 206, (int)i);
+                            break;
+                        }
+                    }
+                }
+                return 0;
+            }
+            else if (wParam == VK_DELETE)
+            {
+                if (pState->selectedPresetCardIdx >= 0)
+                {
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        if (pState->treeItems[i].type == SmsStreamMutatorState::TreeExplorerItem::ITEM_PRESET &&
+                            pState->treeItems[i].presetCardIndex == pState->selectedPresetCardIdx)
+                        {
+                            HandlePresetTreeContextMenuCmd(hWnd, pState, 105, (int)i);
+                            break;
+                        }
+                    }
+                }
+                else if (!pState->selectedCategory.empty())
+                {
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        if (pState->treeItems[i].type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER &&
+                            pState->treeItems[i].category == pState->selectedCategory)
+                        {
+                            HandlePresetTreeContextMenuCmd(hWnd, pState, 207, (int)i);
+                            break;
+                        }
+                    }
+                }
+                return 0;
+            }
+            else if (isCtrl && (wParam == 'C' || wParam == 'c'))
+            {
+                if (pState->selectedPresetCardIdx >= 0)
+                {
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        if (pState->treeItems[i].type == SmsStreamMutatorState::TreeExplorerItem::ITEM_PRESET &&
+                            pState->treeItems[i].presetCardIndex == pState->selectedPresetCardIdx)
+                        {
+                            HandlePresetTreeContextMenuCmd(hWnd, pState, 103, (int)i);
+                            break;
+                        }
+                    }
+                }
+                else if (!pState->selectedCategory.empty())
+                {
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        if (pState->treeItems[i].type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER &&
+                            pState->treeItems[i].category == pState->selectedCategory)
+                        {
+                            HandlePresetTreeContextMenuCmd(hWnd, pState, 204, (int)i);
+                            break;
+                        }
+                    }
+                }
+                return 0;
+            }
+            else if (isCtrl && (wParam == 'X' || wParam == 'x'))
+            {
+                if (pState->selectedPresetCardIdx >= 0)
+                {
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        if (pState->treeItems[i].type == SmsStreamMutatorState::TreeExplorerItem::ITEM_PRESET &&
+                            pState->treeItems[i].presetCardIndex == pState->selectedPresetCardIdx)
+                        {
+                            HandlePresetTreeContextMenuCmd(hWnd, pState, 102, (int)i);
+                            break;
+                        }
+                    }
+                }
+                else if (!pState->selectedCategory.empty())
+                {
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        if (pState->treeItems[i].type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER &&
+                            pState->treeItems[i].category == pState->selectedCategory)
+                        {
+                            HandlePresetTreeContextMenuCmd(hWnd, pState, 203, (int)i);
+                            break;
+                        }
+                    }
+                }
+                return 0;
+            }
+            else if (isCtrl && (wParam == 'V' || wParam == 'v'))
+            {
+                ExecutePresetTreePaste(hWnd, pState, pState->selectedCategory);
+                return 0;
             }
         }
         break;
@@ -2430,6 +3639,8 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
         HBRUSH bgBrush = CreateSolidBrush(UITheme::DarkBackground);
         FillRect(memDC, &rcClient, bgBrush);
         DeleteObject(bgBrush);
+
+        SetBkMode(memDC, TRANSPARENT);
 
         if (pState)
         {
@@ -2464,22 +3675,259 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                     pState->bEditHovered = false;
                 }
 
-                pState->rcBtnNewPresetCard = { 24, btnY, 210, btnY + 32 };
-                pState->rcBtnExpandAllTab0 = { 220, btnY, 335, btnY + 32 };
-                pState->rcBtnCollapseAllTab0 = { 345, btnY, 465, btnY + 32 };
+                int topY = toolbarY + toolbarH; // 112px
+                int sidebarW = pState->sidebarWidth;
+                int h = rcClient.bottom;
+
+                // =========================================================================
+                // 1. Burgundy Ribbon Info Header & Action Buttons (Y = 66 to 112)
+                // =========================================================================
+                SetBkMode(memDC, TRANSPARENT);
+
+                SelectObject(memDC, pState->hFontIcon);
+                SetTextColor(memDC, RGB(255, 200, 210));
+                RECT rcRibbonIcon = { 20, toolbarY, 44, toolbarY + toolbarH };
+                DrawTextW(memDC, L"\xE8D6", -1, &rcRibbonIcon, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+                int rBtnX = rcClient.right - 480;
+                RECT rcRibbonText = { 48, toolbarY, rBtnX - 16, toolbarY + toolbarH };
+
+                SelectObject(memDC, pState->hFontBold);
+                SetTextColor(memDC, RGB(245, 245, 245));
+                std::wstring rText = L"SMS Stream Presets Explorer";
+                if (!pState->selectedCategory.empty())
+                {
+                    rText += L"  \x2022  Folder: " + pState->selectedCategory;
+                }
+                if (pState->selectedPresetCardIdx >= 0 && pState->selectedPresetCardIdx < (int)pState->presetCards.size())
+                {
+                    rText += L"  \x2022  " + pState->presetCards[pState->selectedPresetCardIdx].name + L" (" + std::to_wstring(pState->presetCards[pState->selectedPresetCardIdx].streams.size()) + L" Streams)";
+                }
+                else
+                {
+                    rText += L"  \x2022  " + std::to_wstring(pState->presetCards.size()) + L" Presets Available";
+                }
+                DrawTextW(memDC, rText.c_str(), -1, &rcRibbonText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                // Ribbon action buttons on the right side
+                pState->rcBtnNewPresetCard = { rBtnX, btnY, rBtnX + 150, btnY + 32 };
+                rBtnX += 156;
+                pState->rcBtnExpandAllTab0 = { rBtnX, btnY, rBtnX + 95, btnY + 32 };
+                rBtnX += 101;
+                pState->rcBtnCollapseAllTab0 = { rBtnX, btnY, rBtnX + 95, btnY + 32 };
+                rBtnX += 101;
+                pState->rcBtnOpenCategoryFolder = { rBtnX, btnY, rBtnX + 105, btnY + 32 };
 
                 DrawModernButton(memDC, pState->rcBtnNewPresetCard, L"New Preset Card", PtInRect(&pState->rcBtnNewPresetCard, pState->ptMouse), false, true, pState->hFontBold, pState->hFontIcon, L"\xE710");
                 DrawModernButton(memDC, pState->rcBtnExpandAllTab0, L"Expand All", PtInRect(&pState->rcBtnExpandAllTab0, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
                 DrawModernButton(memDC, pState->rcBtnCollapseAllTab0, L"Collapse All", PtInRect(&pState->rcBtnCollapseAllTab0, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
+                DrawModernButton(memDC, pState->rcBtnOpenCategoryFolder, L"Open Folder", PtInRect(&pState->rcBtnOpenCategoryFolder, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE838");
 
-                // Cards Scrollable Area
-                RECT rcCanvas = { 24, toolbarY + toolbarH + 10, rcClient.right - 24, rcClient.bottom - 20 };
+                // =========================================================================
+                // 2. UNIFIED LEFT SIDEBAR (Explorer Tree)
+                // =========================================================================
+                RECT rcSidebar = { 0, topY, sidebarW, h };
+                HBRUSH hbrSide = CreateSolidBrush(RGB(22, 24, 28));
+                FillRect(memDC, &rcSidebar, hbrSide);
+                DeleteObject(hbrSide);
+
+                // Splitter Bar (clean double-line splitter)
+                int splitterW = 6;
+                pState->rcSplitter = { sidebarW, topY, sidebarW + splitterW, h };
+                HBRUSH hbrSplitter = CreateSolidBrush(RGB(22, 24, 28));
+                FillRect(memDC, &pState->rcSplitter, hbrSplitter);
+                DeleteObject(hbrSplitter);
+
+                COLORREF clrSplitter = pState->isDraggingSplitter ? RGB(0, 160, 255) : RGB(46, 46, 46);
+                HPEN hPenSplitter = CreatePen(PS_SOLID, 1, clrSplitter);
+                HPEN hOldP3 = (HPEN)SelectObject(memDC, hPenSplitter);
+
+                MoveToEx(memDC, pState->rcSplitter.left, pState->rcSplitter.top, NULL);
+                LineTo(memDC, pState->rcSplitter.left, pState->rcSplitter.bottom);
+
+                MoveToEx(memDC, pState->rcSplitter.right - 1, pState->rcSplitter.top, NULL);
+                LineTo(memDC, pState->rcSplitter.right - 1, pState->rcSplitter.bottom);
+
+                SelectObject(memDC, hOldP3);
+                DeleteObject(hPenSplitter);
+
+                // Sidebar Toolbar ([+ Preset], [+ Folder], [Expand/Collapse], [Sync], [Explorer])
+                int tbY = topY + 8;
+                int btnH = 28;
+                int curTbX = 8;
+
+                pState->rcBtnTreeNewPreset = { curTbX, tbY, curTbX + 76, tbY + btnH };
+                DrawModernButton(memDC, pState->rcBtnTreeNewPreset, L"Preset", PtInRect(&pState->rcBtnTreeNewPreset, pState->ptMouse), false, true, pState->hFontBold, pState->hFontIconSmall, L"\xE710");
+                curTbX += 80;
+
+                pState->rcBtnTreeNewFolder = { curTbX, tbY, curTbX + 80, tbY + btnH };
+                DrawModernButton(memDC, pState->rcBtnTreeNewFolder, L"Folder", PtInRect(&pState->rcBtnTreeNewFolder, pState->ptMouse), false, false, pState->hFontBold, pState->hFontIconSmall, L"\xE8F4");
+                curTbX += 84;
+
+                pState->rcBtnTreeToggleAll = { curTbX, tbY, curTbX + 30, tbY + btnH };
+                DrawModernButton(memDC, pState->rcBtnTreeToggleAll, L"", PtInRect(&pState->rcBtnTreeToggleAll, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE8D5");
+                curTbX += 34;
+
+                pState->rcBtnTreeSync = { curTbX, tbY, curTbX + 30, tbY + btnH };
+                DrawModernButton(memDC, pState->rcBtnTreeSync, L"", PtInRect(&pState->rcBtnTreeSync, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE72C");
+                curTbX += 34;
+
+                pState->rcBtnTreeOpenFolder = { curTbX, tbY, curTbX + 30, tbY + btnH };
+                DrawModernButton(memDC, pState->rcBtnTreeOpenFolder, L"", PtInRect(&pState->rcBtnTreeOpenFolder, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE838");
+
+                // Tree Explorer Items
+                BuildPresetTreeExplorer(pState);
+
+                int contentY = tbY + btnH + 8;
+                int contentH = h - contentY;
+                RECT rcSidebarClip = { 0, contentY, sidebarW, h };
+
+                int rowH = 28;
+                int totalTreeH = (int)pState->treeItems.size() * rowH + 20;
+                pState->totalSidebarH = totalTreeH;
+
+                RECT rcSidebarScroll = { sidebarW - 10, contentY + 2, sidebarW - 2, h - 2 };
+                pState->m_sidebarScroll.SetBounds(rcSidebarScroll);
+                pState->m_sidebarScroll.SetRange(0, (std::max)(0, totalTreeH - 1), contentH);
+                pState->sidebarScrollY = pState->m_sidebarScroll.GetPos();
+
+                HRGN hRgnSidebarClip = CreateRectRgn(rcSidebarClip.left, rcSidebarClip.top, rcSidebarClip.right, rcSidebarClip.bottom);
+                SelectClipRgn(memDC, hRgnSidebarClip);
+
+                if (pState->treeItems.empty())
+                {
+                    SelectObject(memDC, pState->hFontSmall);
+                    SetTextColor(memDC, RGB(130, 130, 130));
+                    RECT rcEmpty = { 20, contentY + 30, sidebarW - 20, contentY + 160 };
+                    DrawTextW(memDC, L"No presets found.\n\nClick [+ Preset] or [+ Folder] above to start organizing.", -1, &rcEmpty, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+                }
+                else
+                {
+                    int itemY = contentY - pState->sidebarScrollY + 4;
+                    for (size_t i = 0; i < pState->treeItems.size(); ++i)
+                    {
+                        auto& item = pState->treeItems[i];
+                        item.rcRow = { 6, itemY, sidebarW - 12, itemY + rowH - 2 };
+
+                        if (item.rcRow.bottom >= contentY && item.rcRow.top <= h)
+                        {
+                            bool isDropTarget = (pState->isTreeDragging && pState->dropTargetTreeFolderIdx == (int)i);
+                            COLORREF bgRow = item.isSelected ? RGB(0, 120, 215) : (isDropTarget ? RGB(50, 75, 110) : (pState->hoveredTreeItemIdx == (int)i ? RGB(36, 38, 44) : RGB(22, 22, 25)));
+                            COLORREF bdrRow = item.isSelected ? RGB(0, 120, 215) : (isDropTarget ? RGB(20, 140, 235) : (item.isCut ? RGB(140, 140, 60) : RGB(46, 46, 46)));
+
+                            HBRUSH hbrRow = CreateSolidBrush(bgRow);
+                            HPEN hpenRow = CreatePen(item.isCut ? PS_DOT : PS_SOLID, 1, bdrRow);
+                            HGDIOBJ holdB = SelectObject(memDC, hbrRow);
+                            HGDIOBJ holdP = SelectObject(memDC, hpenRow);
+                            RoundRect(memDC, item.rcRow.left, item.rcRow.top, item.rcRow.right, item.rcRow.bottom, 4, 4);
+                            SelectObject(memDC, holdB);
+                            SelectObject(memDC, holdP);
+                            DeleteObject(hbrRow);
+                            DeleteObject(hpenRow);
+
+                            int indentX = item.rcRow.left + item.depth * 14 + 4;
+
+                            if (item.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_FOLDER)
+                            {
+                                RECT rcChev = { indentX, item.rcRow.top, indentX + 16, item.rcRow.bottom };
+                                item.rcChevron = rcChev;
+
+                                int midX = (rcChev.left + rcChev.right) / 2;
+                                int midY = (rcChev.top + rcChev.bottom) / 2;
+                                COLORREF triCol = item.isSelected ? RGB(255, 255, 255) : RGB(175, 180, 190);
+                                HBRUSH hbrTri = CreateSolidBrush(triCol);
+                                HPEN hpenTri = CreatePen(PS_SOLID, 1, triCol);
+                                HGDIOBJ holdBT = SelectObject(memDC, hbrTri);
+                                HGDIOBJ holdPT = SelectObject(memDC, hpenTri);
+
+                                if (item.isExpanded)
+                                {
+                                    POINT pts[3] = { { midX - 4, midY - 2 }, { midX + 4, midY - 2 }, { midX, midY + 3 } };
+                                    Polygon(memDC, pts, 3);
+                                }
+                                else
+                                {
+                                    POINT pts[3] = { { midX - 2, midY - 4 }, { midX - 2, midY + 4 }, { midX + 3, midY } };
+                                    Polygon(memDC, pts, 3);
+                                }
+
+                                SelectObject(memDC, holdBT);
+                                SelectObject(memDC, holdPT);
+                                DeleteObject(hbrTri);
+                                DeleteObject(hpenTri);
+
+                                SelectObject(memDC, pState->hFontIconSmall);
+                                SetTextColor(memDC, item.isSelected ? RGB(255, 255, 255) : RGB(225, 185, 75));
+                                RECT rcIcon = { indentX + 18, item.rcRow.top, indentX + 36, item.rcRow.bottom };
+                                DrawTextW(memDC, L"\xE8B7", -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                                SelectObject(memDC, pState->hFontBold);
+                                SetTextColor(memDC, item.isSelected ? RGB(255, 255, 255) : (item.isCut ? RGB(160, 160, 160) : RGB(240, 240, 240)));
+                                RECT rcName = { indentX + 38, item.rcRow.top, item.rcRow.right - 34, item.rcRow.bottom };
+                                DrawTextW(memDC, item.name.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                                if (item.presetCount > 0)
+                                {
+                                    SelectObject(memDC, pState->hFontSmall);
+                                    SetTextColor(memDC, item.isSelected ? RGB(220, 235, 255) : RGB(130, 130, 130));
+                                    RECT rcCnt = { item.rcRow.right - 32, item.rcRow.top, item.rcRow.right - 4, item.rcRow.bottom };
+                                    DrawTextW(memDC, std::to_wstring(item.presetCount).c_str(), -1, &rcCnt, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                                }
+                            }
+                            else if (item.type == SmsStreamMutatorState::TreeExplorerItem::ITEM_PRESET)
+                            {
+                                SelectObject(memDC, pState->hFontIconSmall);
+                                SetTextColor(memDC, item.isSelected ? RGB(255, 255, 255) : RGB(80, 175, 250));
+                                RECT rcIcon = { indentX + 10, item.rcRow.top, indentX + 28, item.rcRow.bottom };
+                                DrawTextW(memDC, L"\xE8D6", -1, &rcIcon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                                SelectObject(memDC, pState->hFontSmall);
+                                SetTextColor(memDC, item.isSelected ? RGB(255, 255, 255) : (item.isCut ? RGB(160, 160, 160) : RGB(240, 240, 240)));
+                                RECT rcName = { indentX + 30, item.rcRow.top, item.rcRow.right - 54, item.rcRow.bottom };
+                                DrawTextW(memDC, item.name.c_str(), -1, &rcName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+                                if (item.presetCardIndex >= 0 && item.presetCardIndex < (int)pState->presetCards.size())
+                                {
+                                    const auto& pc = pState->presetCards[item.presetCardIndex];
+                                    std::wstring badge = std::to_wstring(pc.streams.size()) + L"s";
+                                    SelectObject(memDC, pState->hFontSmall);
+                                    SetTextColor(memDC, item.isSelected ? RGB(210, 230, 255) : RGB(180, 180, 180));
+                                    RECT rcBadge = { item.rcRow.right - 52, item.rcRow.top, item.rcRow.right - 4, item.rcRow.bottom };
+                                    DrawTextW(memDC, badge.c_str(), -1, &rcBadge, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                                }
+                            }
+                        }
+
+                        itemY += rowH;
+                    }
+                }
+
+                SelectClipRgn(memDC, NULL);
+                DeleteObject(hRgnSidebarClip);
+                pState->m_sidebarScroll.Paint(memDC, CLR_INVALID, RGB(22, 24, 28));
+
+                // =========================================================================
+                // 3. RIGHT PRESET CARDS CANVAS (Filtered by selectedCategory)
+                // =========================================================================
+                int rightX = sidebarW + splitterW + 16;
+                int rightW = rcClient.right - rightX - 16;
+                RECT rcCanvas = { rightX, topY + 10, rcClient.right - 16, rcClient.bottom - 16 };
                 HRGN clipRgn = CreateRectRgn(rcCanvas.left, rcCanvas.top, rcCanvas.right, rcCanvas.bottom);
                 SelectClipRgn(memDC, clipRgn);
 
                 int curY = rcCanvas.top + 6 - pState->scrollYTab0;
 
-                if (pState->presetCards.empty())
+                std::vector<int> visibleCards;
+                for (int c = 0; c < (int)pState->presetCards.size(); ++c)
+                {
+                    const auto& card = pState->presetCards[c];
+                    if (pState->selectedCategory.empty() || card.category == pState->selectedCategory)
+                    {
+                        visibleCards.push_back(c);
+                    }
+                }
+
+                if (visibleCards.empty())
                 {
                     RECT rcEmpty = { rcCanvas.left + 40, rcCanvas.top + 50, rcCanvas.right - 40, rcCanvas.top + 210 };
                     HBRUSH hbrEmpty = CreateSolidBrush(RGB(24, 24, 24));
@@ -2498,18 +3946,19 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                     SelectObject(memDC, pState->hFontTitle);
                     SetTextColor(memDC, RGB(255, 255, 255));
                     RECT rcETitle = { rcEmpty.left + 20, rcEmpty.top + 60, rcEmpty.right - 20, rcEmpty.top + 86 };
-                    DrawTextW(memDC, L"No Stream Preset Cards Created Yet", -1, &rcETitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    std::wstring emptyTitle = pState->selectedCategory.empty() ? L"No Stream Preset Cards Found" : (L"Folder '" + pState->selectedCategory + L"' is Empty");
+                    DrawTextW(memDC, emptyTitle.c_str(), -1, &rcETitle, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                     SelectObject(memDC, pState->hFontSmall);
                     SetTextColor(memDC, RGB(160, 160, 160));
                     RECT rcEDesc = { rcEmpty.left + 30, rcEmpty.top + 90, rcEmpty.right - 30, rcEmpty.top + 130 };
-                    DrawTextW(memDC, L"Click '+ New Preset Card' in the toolbar above to create your first stream preset group (e.g., Horns, Switchgear, Brakes).", -1, &rcEDesc, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+                    DrawTextW(memDC, L"Click '+ New Preset Card' in the toolbar above to create a preset here, or drag and drop presets into this folder from the left sidebar.", -1, &rcEDesc, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
                 }
                 else
                 {
-                    for (int c = 0; c < (int)pState->presetCards.size(); ++c)
+                    for (int cIdx : visibleCards)
                     {
-                        auto& card = pState->presetCards[c];
+                        auto& card = pState->presetCards[cIdx];
                         int streamCount = (int)card.streams.size();
                         int entriesAreaH = (streamCount == 0) ? 42 : (12 + ((streamCount + 1) / 2) * 32 + 6);
                         int cardH = card.isCollapsed ? 34 : (42 + entriesAreaH + 36);
@@ -2517,60 +3966,60 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                         RECT rcCard = { rcCanvas.left, curY, rcCanvas.right - 14, curY + cardH };
                         curY += cardH + 12;
 
-                        // Card Background (Continuous, standard dark theme)
+                        bool isSelectedCard = (cIdx == pState->selectedPresetCardIdx);
                         HBRUSH cBr = CreateSolidBrush(PoolTheme::CardBackground);
-                        HPEN cPen = CreatePen(PS_SOLID, 1, PoolTheme::CardBorder);
+                        HPEN cPen = CreatePen(PS_SOLID, isSelectedCard ? 2 : 1, isSelectedCard ? RGB(0, 140, 240) : PoolTheme::CardBorder);
                         HGDIOBJ oB = SelectObject(memDC, cBr);
                         HGDIOBJ oP = SelectObject(memDC, cPen);
                         RoundRect(memDC, rcCard.left, rcCard.top, rcCard.right, rcCard.bottom, 8, 8);
                         SelectObject(memDC, oB); SelectObject(memDC, oP);
                         DeleteObject(cBr); DeleteObject(cPen);
 
-                        // Card Header Row (No separate wine/burgundy box!)
+                        // Card Header Row
                         RECT rcCardHdr = { rcCard.left, rcCard.top, rcCard.right, rcCard.top + 34 };
 
                         SmsStreamMutatorState::CardHit ch;
-                        ch.cardIdx = c;
+                        ch.cardIdx = cIdx;
                         ch.rcCard = rcCard;
                         ch.rcHeader = rcCardHdr;
 
-                        // Header collapse chevron button (width 22, height 24)
+                        // Header collapse chevron button
                         ch.rcChevron = { rcCard.left + 8, rcCard.top + 5, rcCard.left + 30, rcCard.top + 29 };
                         DrawModernButton(memDC, ch.rcChevron, L"", PtInRect(&ch.rcChevron, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, card.isCollapsed ? L"__TRI_DOWN__" : L"__TRI_UP__");
 
                         // Card Title: "#1  {Name}"
                         RECT rcTitle = { rcCard.left + 36, rcCard.top, rcCard.right - 260, rcCard.top + 34 };
                         SelectObject(memDC, pState->hFontBold);
-                        SetTextColor(memDC, PoolTheme::TextPrimary);
-                        std::wstring titleText = L"#" + std::to_wstring(c + 1) + L"  " + card.name;
+                        SetTextColor(memDC, isSelectedCard ? RGB(80, 180, 255) : PoolTheme::TextPrimary);
+                        std::wstring titleText = L"#" + std::to_wstring(cIdx + 1) + L"  " + card.name;
                         DrawTextW(memDC, titleText.c_str(), -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-                        // Action buttons on card header right (from right to left, hBtnH = 24)
+                        // Action buttons on card header right (from right to left)
                         int hBtnR = rcCard.right - 8;
                         int hBtnY = rcCard.top + 5;
                         int hBtnH = 24;
 
-                        // [ 🗑 Delete ]
+                        // [ Delete ]
                         hBtnR -= 28;
                         ch.rcBtnDelete = { hBtnR, hBtnY, hBtnR + 26, hBtnY + hBtnH };
                         DrawModernButton(memDC, ch.rcBtnDelete, L"", PtInRect(&ch.rcBtnDelete, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE74D");
 
-                        // [ ▼ Down ]
+                        // [ Down ]
                         hBtnR -= 26;
                         ch.rcBtnMoveDown = { hBtnR, hBtnY, hBtnR + 24, hBtnY + hBtnH };
                         DrawModernButton(memDC, ch.rcBtnMoveDown, L"", PtInRect(&ch.rcBtnMoveDown, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_DOWN__");
 
-                        // [ ▲ Up ]
+                        // [ Up ]
                         hBtnR -= 26;
                         ch.rcBtnMoveUp = { hBtnR, hBtnY, hBtnR + 24, hBtnY + hBtnH };
                         DrawModernButton(memDC, ch.rcBtnMoveUp, L"", PtInRect(&ch.rcBtnMoveUp, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"__TRI_UP__");
 
-                        // [ 📋 Clone ] (Width = 80, Gap = 4)
+                        // [ Clone ]
                         hBtnR -= 84;
                         ch.rcBtnClone = { hBtnR, hBtnY, hBtnR + 80, hBtnY + hBtnH };
                         DrawModernButton(memDC, ch.rcBtnClone, L"Clone", PtInRect(&ch.rcBtnClone, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE8C8");
 
-                        // [ ✏ Rename ] (Width = 88, Gap = 4)
+                        // [ Rename ]
                         hBtnR -= 92;
                         ch.rcBtnRename = { hBtnR, hBtnY, hBtnR + 88, hBtnY + hBtnH };
                         DrawModernButton(memDC, ch.rcBtnRename, L"Rename", PtInRect(&ch.rcBtnRename, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE70F");
@@ -2578,7 +4027,6 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                         // Render streams inside card when expanded
                         if (!card.isCollapsed)
                         {
-                            // Inner container box
                             int boxY = rcCard.top + 38;
                             RECT rcBox = { rcCard.left + 14, boxY, rcCard.right - 14, boxY + entriesAreaH };
 
@@ -2598,84 +4046,65 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                             else
                             {
                                 int colTotalW = (rcBox.right - rcBox.left - 24) / 2;
-                                int chipH = 26;
                                 for (int s = 0; s < streamCount; ++s)
                                 {
-                                    auto& st = card.streams[s];
+                                    const auto& st = card.streams[s];
                                     int col = s % 2;
                                     int row = s / 2;
-                                    int colX = rcBox.left + 8 + col * (colTotalW + 8);
-                                    int chipY = rcBox.top + 8 + row * (chipH + 6);
-                                    RECT rcChip = { colX, chipY, colX + colTotalW, chipY + chipH };
+                                    int chipX = rcBox.left + 8 + col * (colTotalW + 8);
+                                    int chipY = rcBox.top + 6 + row * 32;
 
-                                    HBRUSH chipBr = CreateSolidBrush(PoolTheme::ChipBackground);
-                                    HPEN chipPen = CreatePen(PS_SOLID, 1, PoolTheme::ChipBorder);
-                                    oB = SelectObject(memDC, chipBr); oP = SelectObject(memDC, chipPen);
+                                    RECT rcChip = { chipX, chipY, chipX + colTotalW, chipY + 28 };
+
+                                    HBRUSH hbrChip = CreateSolidBrush(RGB(32, 34, 42));
+                                    HPEN hpenChip = CreatePen(PS_SOLID, 1, RGB(48, 52, 64));
+                                    oB = SelectObject(memDC, hbrChip); oP = SelectObject(memDC, hpenChip);
                                     RoundRect(memDC, rcChip.left, rcChip.top, rcChip.right, rcChip.bottom, 4, 4);
                                     SelectObject(memDC, oB); SelectObject(memDC, oP);
-                                    DeleteObject(chipBr); DeleteObject(chipPen);
+                                    DeleteObject(hbrChip); DeleteObject(hpenChip);
 
-                                    // Audio Glyph
-                                    SelectObject(memDC, pState->hFontIconSmall ? pState->hFontIconSmall : pState->hFontIcon);
+                                    // Audio Icon
+                                    SelectObject(memDC, pState->hFontIconSmall);
                                     SetTextColor(memDC, RGB(96, 205, 255));
-                                    RECT rcGlyph = { rcChip.left + 6, rcChip.top, rcChip.left + 22, rcChip.bottom };
-                                    DrawTextW(memDC, L"\xE8D6", -1, &rcGlyph, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                                    RECT rcAudio = { rcChip.left + 6, rcChip.top, rcChip.left + 22, rcChip.bottom };
+                                    DrawTextW(memDC, L"\xE8D6", -1, &rcAudio, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-                                    // Stream Name & WAV path
-                                    SelectObject(memDC, pState->hFontBold);
-                                    SetTextColor(memDC, PoolTheme::TextPrimary);
-                                    RECT rcStName = { rcChip.left + 26, rcChip.top, rcChip.left + 160, rcChip.bottom };
-                                    DrawTextW(memDC, st.name.c_str(), -1, &rcStName, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-
-                                    std::wstring wavFile = st.primaryWav;
-                                    if (wavFile.empty())
-                                    {
-                                        for (const auto& tr : st.triggers)
-                                        {
-                                            for (const auto& f : tr.files)
-                                            {
-                                                if (!f.fileName.empty())
-                                                {
-                                                    wavFile = f.fileName;
-                                                    break;
-                                                }
-                                            }
-                                            if (!wavFile.empty()) break;
-                                        }
-                                    }
-
+                                    // Stream Title / Primary Wav
                                     SelectObject(memDC, pState->hFontSmall);
-                                    SetTextColor(memDC, PoolTheme::TextSecondary);
-                                    RECT rcWav = { rcChip.left + 165, rcChip.top, rcChip.right - 28, rcChip.bottom };
-                                    std::wstring metaInfo = L"Pri: " + std::to_wstring(st.priority) + L" | " + std::to_wstring((int)(st.volume * 100)) + L"%";
-                                    if (!wavFile.empty())
-                                    {
-                                        metaInfo += L" | " + wavFile;
-                                    }
-                                    DrawTextW(memDC, metaInfo.c_str(), -1, &rcWav, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+                                    SetTextColor(memDC, RGB(240, 240, 240));
+                                    std::wstring streamLabel = st.name.empty() ? st.primaryWav : st.name;
+                                    RECT rcChipText = { rcChip.left + 24, rcChip.top, rcChip.right - 80, rcChip.bottom };
+                                    DrawTextW(memDC, streamLabel.c_str(), -1, &rcChipText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-                                    // Remove [🗑 Delete] button
-                                    RECT rcRem = { rcChip.right - 24, rcChip.top + 2, rcChip.right - 4, rcChip.bottom - 2 };
-                                    bool hovRem = PtInRect(&rcRem, pState->ptMouse);
-                                    DrawModernButton(memDC, rcRem, L"", hovRem, false, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE74D");
+                                    // Priority & Volume Badge
+                                    std::wstring badgeText = L"P:" + std::to_wstring(st.priority) + L" V:" + std::to_wstring((int)(st.volume * 100)) + L"%";
+                                    SelectObject(memDC, pState->hFontBadge);
+                                    SetTextColor(memDC, RGB(160, 170, 185));
+                                    RECT rcBadge = { rcChip.right - 78, rcChip.top, rcChip.right - 26, rcChip.bottom };
+                                    DrawTextW(memDC, badgeText.c_str(), -1, &rcBadge, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-                                    SmsStreamMutatorState::StreamChipHit sc;
-                                    sc.cardIdx = c;
-                                    sc.streamIdx = s;
-                                    sc.rcChip = rcChip;
-                                    sc.rcBtnRemove = rcRem;
-                                    pState->chipHits.push_back(sc);
+                                    // Delete stream button
+                                    RECT rcChipDel = { rcChip.right - 24, rcChip.top + 3, rcChip.right - 4, rcChip.bottom - 3 };
+                                    DrawModernButton(memDC, rcChipDel, L"", PtInRect(&rcChipDel, pState->ptMouse), false, false, pState->hFontBadge, pState->hFontIconSmall, L"\xE711");
+
+                                    SmsStreamMutatorState::StreamChipHit scHit;
+                                    scHit.cardIdx = cIdx;
+                                    scHit.streamIdx = s;
+                                    scHit.rcChip = rcChip;
+                                    scHit.rcBtnRemove = rcChipDel;
+                                    pState->chipHits.push_back(scHit);
                                 }
                             }
 
-                            // Bottom toolbar inside card: [+ Add Stream], [📋 Paste Stream], [🗑 Clear All]
-                            int actY = boxY + entriesAreaH + 6;
+                            // Card Bottom Action Buttons
+                            int actY = rcBox.bottom + 6;
                             int actX = rcCard.left + 14;
 
                             ch.rcBtnAddStream = { actX, actY, actX + 115, actY + 24 };
                             DrawModernButton(memDC, ch.rcBtnAddStream, L"Add Stream", PtInRect(&ch.rcBtnAddStream, pState->ptMouse), false, true, pState->hFontSmall, pState->hFontIconSmall, L"\xE710");
                             actX += 122;
 
+                            bool hasClipboard = !SmsClipboard_Get().streams.empty();
                             ch.rcBtnPasteStream = { actX, actY, actX + 115, actY + 24 };
                             DrawModernButton(memDC, ch.rcBtnPasteStream, L"Paste Stream", PtInRect(&ch.rcBtnPasteStream, pState->ptMouse), false, false, pState->hFontSmall, pState->hFontIconSmall, L"\xE77F");
                             actX += 122;
@@ -2697,7 +4126,6 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                 pState->m_vScrollTab0.SetRange(0, pState->totalHeightTab0, rcCanvas.bottom - rcCanvas.top);
                 pState->m_vScrollTab0.Paint(memDC);
             }
-
             // ---------------- TAB 1: Batch Stream Mutator ----------------
             if (pState->activeTab == 1)
             {
@@ -3001,22 +4429,26 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
                                         slotIcon = L"💺";
                                     }
 
-                                    RECT rcSlotBadge = { rcHdr.left + 220, rcHdr.top + 5, rcHdr.left + 335, rcHdr.top + 25 };
+                                    SelectObject(memDC, pState->hFontSmall);
+                                    std::wstring slotTxt = std::wstring(slotIcon) + L" " + slotLabel;
+                                    SIZE szSlot = { 0, 0 };
+                                    GetTextExtentPoint32W(memDC, slotTxt.c_str(), (int)slotTxt.length(), &szSlot);
+                                    int badgeW = max(90, szSlot.cx + 18);
+                                    RECT rcSlotBadge = { rcHdr.left + 220, rcHdr.top + 5, rcHdr.left + 220 + badgeW, rcHdr.top + 25 };
+
                                     HBRUSH sBBr = CreateSolidBrush(slotBg); HPEN sBPn = CreatePen(PS_SOLID, 1, slotBdr);
                                     HGDIOBJ sOB = SelectObject(memDC, sBBr); HGDIOBJ sOP = SelectObject(memDC, sBPn);
                                     RoundRect(memDC, rcSlotBadge.left, rcSlotBadge.top, rcSlotBadge.right, rcSlotBadge.bottom, 3, 3);
                                     SelectObject(memDC, sOB); SelectObject(memDC, sOP);
                                     DeleteObject(sBBr); DeleteObject(sBPn);
 
-                                    SelectObject(memDC, pState->hFontSmall);
                                     SetTextColor(memDC, slotFg);
-                                    std::wstring slotTxt = std::wstring(slotIcon) + L" " + slotLabel;
                                     DrawTextW(memDC, slotTxt.c_str(), -1, &rcSlotBadge, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
                                     // Line 1: Trainset Subfolder
                                     SelectObject(memDC, pState->hFontSmall);
                                     SetTextColor(memDC, RGB(140, 160, 185));
-                                    RECT rcFolder = { rcHdr.left + 342, rcHdr.top + 3, rcHdr.right - 140, rcHdr.top + 27 };
+                                    RECT rcFolder = { rcSlotBadge.right + 10, rcHdr.top + 3, rcHdr.right - 140, rcHdr.top + 27 };
                                     DrawTextW(memDC, tgt.folderName.c_str(), -1, &rcFolder, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
                                     // Line 1: Stream Count badge
@@ -3349,10 +4781,29 @@ static LRESULT CALLBACK SmsStreamMutatorProc(HWND hWnd, UINT uMsg, WPARAM wParam
         return 0;
     }
 
+    case WM_SYSCOMMAND:
+    {
+        if ((wParam & 0xFFF0) == SC_CLOSE)
+        {
+            RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
+            DestroyWindow(hWnd);
+            return 0;
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+    {
+        RestoreParentWindowFocus(pState ? pState->hParent : GetWindow(hWnd, GW_OWNER));
+        DestroyWindow(hWnd);
+        return 0;
+    }
+
     case WM_DESTROY:
     {
         if (pState)
         {
+            RestoreParentWindowFocus(pState->hParent ? pState->hParent : GetWindow(hWnd, GW_OWNER));
             SaveStreamPresetsToFile(pState);
             if (pState->hFontBody) DeleteObject(pState->hFontBody);
             if (pState->hFontBold) DeleteObject(pState->hFontBold);
@@ -3383,7 +4834,8 @@ void ShowSmsStreamMutatorDialog(
     const std::vector<std::wstring>& initialEngineSmsFiles,
     const std::vector<std::wstring>& initialWagonSmsFiles,
     const std::vector<SmsCategorizedTargetInput>& initialEngineTargetsWithUsage,
-    const std::vector<SmsCategorizedTargetInput>& initialWagonTargetsWithUsage
+    const std::vector<SmsCategorizedTargetInput>& initialWagonTargetsWithUsage,
+    const std::wstring& initialFocusedSms
 )
 {
     if (g_hSmsStreamMutatorDlg && IsWindow(g_hSmsStreamMutatorDlg))
