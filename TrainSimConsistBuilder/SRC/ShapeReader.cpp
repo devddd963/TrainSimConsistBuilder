@@ -1466,80 +1466,18 @@ bool ShapeReader::IsShapeCorrupted(const std::wstring& shapeFilePath) {
         CloseHandle(hFile);
         return false;
     }
-
-    if (liSize.QuadPart < 16) {
-        CloseHandle(hFile);
-        std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
-        s_corruptedShapeCache.insert(lowerPath);
-        return true;
-    }
-
-    uint8_t header[64] = { 0 };
-    DWORD bytesRead = 0;
-    if (!ReadFile(hFile, header, sizeof(header), &bytesRead, NULL) || bytesRead < 16) {
-        CloseHandle(hFile);
-        std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
-        s_corruptedShapeCache.insert(lowerPath);
-        return true;
-    }
     CloseHandle(hFile);
 
-    bool isUtf16 = (bytesRead >= 2 && header[0] == 0xFF && header[1] == 0xFE);
-    bool isCompressed = false;
-    bool isSimisa = false;
-
-    if (isUtf16) {
-        const wchar_t* pw = (const wchar_t*)(header + 2);
-        size_t wlen = (bytesRead - 2) / sizeof(wchar_t);
-        if (wlen >= 8 && std::wcsncmp(pw, L"SIMISA@F", 8) == 0) {
-            isCompressed = true;
-            isSimisa = true;
-        } else if (wlen >= 8 && std::wcsncmp(pw, L"SIMISA@@", 8) == 0) {
-            isSimisa = true;
-        }
-    } else {
-        if (bytesRead >= 8 && std::memcmp(header, "SIMISA@F", 8) == 0) {
-            isCompressed = true;
-            isSimisa = true;
-        } else if (bytesRead >= 8 && std::memcmp(header, "SIMISA@@", 8) == 0) {
-            isSimisa = true;
-        }
-    }
-
-    if (isCompressed) {
-        bool foundZlib = false;
-        for (size_t i = (isUtf16 ? 16u : 8u); i + 1 < (size_t)bytesRead; ++i) {
-            uint8_t cmf = header[i];
-            uint8_t flg = header[i + 1];
-            // Universal RFC 1950 check:
-            // 1. Compression method must be 8 (deflate)
-            // 2. Window size info <= 7 (32K window max)
-            // 3. (CMF * 256 + FLG) % 31 == 0 (header checksum)
-            if ((cmf & 0x0F) == 8 && (cmf >> 4) <= 7 && (((uint32_t)cmf * 256 + (uint32_t)flg) % 31 == 0)) {
-                foundZlib = true;
-                break;
-            }
-        }
-        if (!foundZlib) {
-            std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
-            s_corruptedShapeCache.insert(lowerPath);
-            return true;
-        }
-    } else if (!isSimisa) {
-        std::string rawStr((const char*)header, bytesRead);
-        std::string lowerStr = rawStr;
-        for (char& c : lowerStr) c = (char)tolower((unsigned char)c);
-        if (lowerStr.find("shape") == std::string::npos) {
-            std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
-            s_corruptedShapeCache.insert(lowerPath);
-            return true;
-        }
-    }
-
-    {
+    // Only flag corrupted if 0 bytes or negative (unreadable disk sector)
+    if (liSize.QuadPart <= 0) {
         std::lock_guard<std::mutex> lock(s_shapeCacheMutex);
-        s_validShapeCache.insert(lowerPath);
+        s_corruptedShapeCache.insert(lowerPath);
+        return true;
     }
+
+    // Do NOT prematurely fail valid shapes via rigid 64-byte magic header checks.
+    // Let SafeExecuteParseShapeInternal decompress and parse the mesh geometry;
+    // if decompression fails or a memory violation occurs, MarkShapeCorrupted will be invoked safely.
     return false;
 }
 

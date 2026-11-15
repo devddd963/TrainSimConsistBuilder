@@ -110,6 +110,35 @@ namespace StockSpecReader
         return res;
     }
 
+    static bool HasValidSTFStockStructure(const std::string& rawData, const std::wstring& ext)
+    {
+        if (rawData.empty()) return false;
+        
+        // Fast scan for required blocks.
+        // A .wag must contain wagon ( ... ) or include (
+        // An .eng must contain engine ( ... ) or wagon ( ... ) or include (
+        std::string lower = ToLowerAscii(rawData);
+
+        bool hasInclude = (lower.find("include") != std::string::npos);
+        if (hasInclude) return true; // OpenRails modular stock file
+
+        bool hasWagon = (lower.find("wagon") != std::string::npos);
+        bool hasEngine = (lower.find("engine") != std::string::npos);
+
+        if (ext == L".wag")
+        {
+            return hasWagon;
+        }
+        else if (ext == L".eng")
+        {
+            // Valid .eng files usually have both wagon(...) and engine(...), or at least one of them
+            return (hasEngine || hasWagon);
+        }
+
+        // Default fallback for any other stock spec files (.inc etc)
+        return (hasWagon || hasEngine || lower.find("simisa") != std::string::npos);
+    }
+
     bool IsStockCorrupted(const std::wstring& stockFilePath)
     {
         if (stockFilePath.empty()) return false;
@@ -143,20 +172,8 @@ namespace StockSpecReader
             return false;
         }
 
-        // A valid .eng or .wag file must have some minimal tokens, e.g. at least 16 bytes
-        if (liSize.QuadPart < 16)
-        {
-            CloseHandle(hFile);
-            std::lock_guard<std::mutex> lock(s_stockCacheMutex);
-            s_corruptedStockCache.insert(lowerPath);
-            return true;
-        }
-
-        // Read the first chunk (up to 4096 bytes) to verify it's a valid text STF file containing basic keywords
-        DWORD toRead = (DWORD)min((LONGLONG)4096, liSize.QuadPart);
-        std::vector<uint8_t> buf(toRead + 2, 0);
-        DWORD bytesRead = 0;
-        if (!ReadFile(hFile, buf.data(), toRead, &bytesRead, NULL) || bytesRead < 16)
+        // A file is only corrupted if it is completely empty (0 bytes) or unreadable
+        if (liSize.QuadPart <= 0)
         {
             CloseHandle(hFile);
             std::lock_guard<std::mutex> lock(s_stockCacheMutex);
@@ -165,49 +182,23 @@ namespace StockSpecReader
         }
         CloseHandle(hFile);
 
-        // Check content: .eng and .wag can be UTF-16 LE (BOM 0xFF 0xFE) or ASCII/UTF-8
-        std::string textAscii;
-        if (bytesRead >= 2 && buf[0] == 0xFF && buf[1] == 0xFE)
+        // Read raw content safely
+        std::string rawData = ReadFileRawBytes(stockFilePath);
+        if (rawData.empty() && liSize.QuadPart > 0)
         {
-            // UTF-16LE
-            const wchar_t* pw = (const wchar_t*)(buf.data() + 2);
-            size_t wlen = (bytesRead - 2) / sizeof(wchar_t);
-            for (size_t i = 0; i < wlen; ++i)
-            {
-                wchar_t wc = pw[i];
-                if (wc < 128) textAscii.push_back((char)tolower((int)wc));
-                else textAscii.push_back(' ');
-            }
-        }
-        else
-        {
-            // ASCII / UTF-8
-            for (DWORD i = 0; i < bytesRead; ++i)
-            {
-                textAscii.push_back((char)tolower((int)buf[i]));
-            }
+            // Could not read bytes from non-empty file -> corrupted disk sector / access fault
+            std::lock_guard<std::mutex> lock(s_stockCacheMutex);
+            s_corruptedStockCache.insert(lowerPath);
+            return true;
         }
 
-        // Check for essential stock keywords anywhere in the first 4KB:
-        // "wagon", "engine", "wagonshape", "simisa", "include"
-        bool hasStockKeyword = (textAscii.find("wagon") != std::string::npos ||
-                                textAscii.find("engine") != std::string::npos ||
-                                textAscii.find("wagonshape") != std::string::npos ||
-                                textAscii.find("simisa") != std::string::npos ||
-                                textAscii.find("include") != std::string::npos);
+        // Extract extension
+        std::wstring ext;
+        size_t dotPos = lowerPath.find_last_of(L'.');
+        if (dotPos != std::wstring::npos) ext = lowerPath.substr(dotPos);
 
-        if (!hasStockKeyword && liSize.QuadPart > 4096)
-        {
-            // Check full file if first 4KB didn't match (e.g. large comment header)
-            std::string fullRaw = ReadFileRawBytes(stockFilePath);
-            std::string lowerFull = ToLowerAscii(fullRaw);
-            hasStockKeyword = (lowerFull.find("wagon") != std::string::npos ||
-                               lowerFull.find("engine") != std::string::npos ||
-                               lowerFull.find("wagonshape") != std::string::npos ||
-                               lowerFull.find("include") != std::string::npos);
-        }
-
-        if (!hasStockKeyword)
+        // Check for basic block structure or include directive
+        if (!HasValidSTFStockStructure(rawData, ext))
         {
             std::lock_guard<std::mutex> lock(s_stockCacheMutex);
             s_corruptedStockCache.insert(lowerPath);
@@ -687,7 +678,7 @@ namespace StockSpecReader
             }
 
             // Wagon name
-            if (lowerTok == "wagon" && blockStack.empty())
+            if (lowerTok == "wagon")
             {
                 blockStack.push_back("wagon");
                 STFToken nameTok;
@@ -702,7 +693,7 @@ namespace StockSpecReader
             }
 
             // Engine name
-            if (lowerTok == "engine" && (blockStack.empty() || blockStack.back() == "wagon"))
+            if (lowerTok == "engine")
             {
                 blockStack.push_back("engine");
                 STFToken nameTok;
@@ -1503,7 +1494,7 @@ namespace StockSpecReader
     // =========================================================================
     // Public API Implementation
     // =========================================================================
-    StockSpec ReadFullSpec(const std::wstring& filePath, const std::wstring& trainsetBasePath)
+    static bool SafeReadFullSpecInternal(const std::wstring& filePath, const std::wstring& trainsetBasePath, StockSpec& outSpec)
     {
         StockSpec spec;
         spec.filePath = filePath;
@@ -1532,22 +1523,11 @@ namespace StockSpecReader
             {
                 spec.isCorruptedStock = true;
                 spec.isValid = false;
-                return spec;
+                outSpec = spec;
+                return false;
             }
 
             ParseSTFStream(filePath, spec, 0, trainsetBasePath);
-
-            if (spec.wagonName.empty() && spec.engineName.empty() && spec.mainShapeFile.empty() && spec.resolvedIncludes.empty())
-            {
-                // Only mark corrupted if IsStockCorrupted also confirmed failure (e.g. invalid bytes, missing keywords).
-                // If the file has valid stock tokens or structure, do not falsely flag as corrupted stock.
-                if (IsStockCorrupted(filePath))
-                {
-                    spec.isCorruptedStock = true;
-                    spec.isValid = false;
-                    return spec;
-                }
-            }
 
             spec.isValid = true;
         }
@@ -1625,6 +1605,11 @@ namespace StockSpecReader
             {
                 LOG_WARN_W(L"[StockSpecReader] Primary shape '%ls' referenced in '%ls' not found on disk", spec.mainShapeFile.c_str(), spec.fileName.c_str());
             }
+            else
+            {
+                // Shape file is resolved and exists on disk -> this stock is definitely not corrupted
+                spec.isCorruptedStock = false;
+            }
         }
 
         // Locate Freight Animation Shapes on Disk (supports ./, //, ../, subfolders, trainset shared folders)
@@ -1639,6 +1624,41 @@ namespace StockSpecReader
         }
 
         spec.isValid = true;
+        outSpec = spec;
+        return true;
+    }
+
+    static bool SafeExecuteParseStockInternal(
+        const std::wstring& filePath,
+        const std::wstring& trainsetBasePath,
+        StockSpec& outSpec
+    ) {
+        __try {
+            return SafeReadFullSpecInternal(filePath, trainsetBasePath, outSpec);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+    }
+
+    StockSpec ReadFullSpec(const std::wstring& filePath, const std::wstring& trainsetBasePath)
+    {
+        StockSpec spec;
+        bool ok = SafeExecuteParseStockInternal(filePath, trainsetBasePath, spec);
+        if (!ok)
+        {
+            LOG_ERROR("StockSpecReader: Hardware exception/access violation intercepted while parsing stock '%ls'", filePath.c_str());
+            StockSpec errSpec;
+            errSpec.filePath = filePath;
+            errSpec.isCorruptedStock = true;
+            errSpec.isValid = false;
+            std::wstring lower = filePath;
+            for (wchar_t& c : lower) c = towlower(c);
+            std::lock_guard<std::mutex> lock(s_stockCacheMutex);
+            s_corruptedStockCache.insert(lower);
+            s_validStockCache.erase(lower);
+            return errSpec;
+        }
         return spec;
     }
 
