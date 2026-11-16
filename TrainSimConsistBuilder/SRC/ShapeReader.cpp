@@ -1016,11 +1016,13 @@ static bool ParseBinaryShape(const uint8_t* pData, size_t dataLen, ParsedShape& 
     if (pCancelToken && *pCancelToken) return false;
     if (!pData || dataLen < 24) return false;
 
-    // Locate tok_shape (0x0047) header within the first 64 bytes
+    // Locate tok_shape (0x0047) header (scanning up to 512 bytes for custom tool headers)
     size_t subHeaderOffset = 16;
-    for (size_t off = 0; off + 8 <= dataLen && off <= 64; ++off) {
+    bool foundTokShape = false;
+    for (size_t off = 0; off + 8 <= dataLen && off <= 512; ++off) {
         if (pData[off] == 0x47 && pData[off + 1] == 0x00) {
             subHeaderOffset = off;
+            foundTokShape = true;
             break;
         }
     }
@@ -1170,8 +1172,8 @@ static bool ParseBinaryShape(const uint8_t* pData, size_t dataLen, ParsedShape& 
                         int dlCount = r.ReadI32();
                         for (int dl = 0; dl < dlCount; ++dl) {
                             BinaryShapeBlock dlb = BinaryShapeBlock::ReadSubBlock(r);
-                            if (dl == 0) {
-                                // Highest detail level (LOD 0)
+                            // Load LOD level if we haven't acquired geometry yet (supports multi-LOD fallbacks like TSRE5)
+                            if (outShape.vertices.empty()) {
                                 while (!dlb.EndOfBlock(r)) {
                                     BinaryShapeBlock dlbSub = BinaryShapeBlock::ReadSubBlock(r);
                                     if (dlbSub.id == tok_distance_level_header) {
@@ -1222,7 +1224,13 @@ static bool ParseBinaryShape(const uint8_t* pData, size_t dataLen, ParsedShape& 
                                                         uint32_t c1 = r.ReadU32(), c2 = r.ReadU32();
                                                         BinaryShapeBlock uvb = BinaryShapeBlock::ReadSubBlock(r);
                                                         int uvCount = r.ReadI32();
-                                                        if (uvCount > 0) subVertices[vi].uvIdx = r.ReadI32();
+                                                        if (uvCount > 0) {
+                                                            subVertices[vi].uvIdx = r.ReadI32();
+                                                            // Drain any extra UV channel indices safely (just like TSRE5)
+                                                            for (int uvi = 1; uvi < uvCount; ++uvi) {
+                                                                r.ReadI32();
+                                                            }
+                                                        }
                                                         uvb.Skip(r);
                                                         vertb.Skip(r);
                                                     }
@@ -1586,11 +1594,14 @@ static bool ParseShapeFileInternal(
 
     if (isCompressed) {
         size_t zlibStart = (isUtf16 ? 34 : 16);
-        for (size_t i = (isUtf16 ? 16u : 8u); i < (isUtf16 ? 64u : 32u) && i + 1 < (size_t)fileSize; ++i) {
+        bool foundValidZlib = false;
+        // Scan up to 512 bytes for zlib header or multi-offset fallbacks (Archibald, SFM, Route-Riter)
+        for (size_t i = (isUtf16 ? 16u : 8u); i < (isUtf16 ? 256u : 512u) && i + 1 < (size_t)fileSize; ++i) {
             uint8_t cmf = pRawBytes[i];
             uint8_t flg = pRawBytes[i + 1];
             if ((cmf & 0x0F) == 8 && (cmf >> 4) <= 7 && (((uint32_t)cmf * 256 + (uint32_t)flg) % 31 == 0)) {
                 zlibStart = i;
+                foundValidZlib = true;
                 break;
             }
         }
@@ -1602,7 +1613,23 @@ static bool ParseShapeFileInternal(
             return false;
         }
 
-        if (!FastZlib::DecompressZlib(pRawBytes + zlibStart, fileSize - zlibStart, decompressedBytes)) {
+        bool decompSuccess = FastZlib::DecompressZlib(pRawBytes + zlibStart, fileSize - zlibStart, decompressedBytes);
+        // Fallback: If primary offset fails, scan for next potential zlib header
+        if (!decompSuccess) {
+            for (size_t i = zlibStart + 1; i < (isUtf16 ? 256u : 512u) && i + 1 < (size_t)fileSize; ++i) {
+                uint8_t cmf = pRawBytes[i];
+                uint8_t flg = pRawBytes[i + 1];
+                if ((cmf & 0x0F) == 8 && (cmf >> 4) <= 7 && (((uint32_t)cmf * 256 + (uint32_t)flg) % 31 == 0)) {
+                    if (FastZlib::DecompressZlib(pRawBytes + i, fileSize - i, decompressedBytes)) {
+                        zlibStart = i;
+                        decompSuccess = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!decompSuccess) {
             LOG_SHAPE_ERROR("FastZlib decompression failed for compressed shape '%ls' (Offset: %zu, Size: %zu)", shapeFilePath.c_str(), zlibStart, fileSize);
             UnmapViewOfFile(pRawBytes);
             CloseHandle(hMap);
@@ -2696,23 +2723,22 @@ void ShapeReader::ClassifySubMeshMaterial(
     ShapeSubMesh& sm,
     bool hasTexAlpha,
     bool hasSmoothAlpha,
-    const std::wstring& texName
+    const std::wstring& /*texName*/
 ) {
     std::string lowerShader = sm.shaderName;
     for (char& c : lowerShader) c = (char)tolower((unsigned char)c);
+    // Trim trailing and leading whitespace so matching is exact regardless of exporter spaces (e.g. "BlendATexDiff ")
+    while (!lowerShader.empty() && isspace((unsigned char)lowerShader.back())) {
+        lowerShader.pop_back();
+    }
+    size_t firstNonSpace = lowerShader.find_first_not_of(" \t\r\n");
+    if (firstNonSpace != std::string::npos && firstNonSpace > 0) {
+        lowerShader = lowerShader.substr(firstNonSpace);
+    }
 
-    std::wstring lowerTex = texName;
-    for (wchar_t& c : lowerTex) c = towlower(c);
-    bool isGlassTex = (lowerTex.find(L"glass") != std::wstring::npos ||
-                       lowerTex.find(L"window") != std::wstring::npos ||
-                       lowerTex.find(L"winplane") != std::wstring::npos ||
-                       lowerTex.find(L"doorwin") != std::wstring::npos ||
-                       lowerTex.find(L"mirror") != std::wstring::npos ||
-                       lowerTex.find(L"trans")  != std::wstring::npos);
-
-    // 1. Group 1: Explicit Solid / Opaque Shader Tokens (Open Rails Specification)
+    // 1. Group 1: Explicit Solid / Opaque Shader Tokens (Open Rails & TSRE5 Specification)
     // TexDiff, Tex, OptAmbient, OptSpecular, LoShine, HiShine, OptLoShine, OptHiShine, Gloss, Solid, Flat
-    // In MSTS / Open Rails, Tex and TexDiff completely ignore alpha and render in Pass 1 (Opaque with Z-Write).
+    // In MSTS / Open Rails / TSRE5, Tex and TexDiff completely ignore texture alpha and render solid opaque in Pass 1.
     bool isExplicitOpaqueShader = (
         lowerShader == "texdiff" ||
         lowerShader == "tex" ||
@@ -2735,47 +2761,18 @@ void ShapeReader::ClassifySubMeshMaterial(
 
     if (isExplicitOpaqueShader) {
         sm.isTransparent = false;
-        sm.isAlphaTest = false; // Pass 1: Opaque (Writes Depth)
+        sm.isAlphaTest = false; // Pass 1: Opaque Solid (Writes Depth)
         return;
     }
 
-    // 2. Group 3: Smooth Alpha-Blended / Translucent Shader Tokens (Open Rails Specification)
-    // TransNorm, TransDiff, TransLoop, BlendNorm, AddATex, AddATexDiff, SubATex, SubATexDiff, Glass, Window
-    // Used strictly for transparent cabin glass windows, headlights, and smoke with Read-Only depth (Pass 3).
-    bool isExplicitBlendShader = (
-        lowerShader == "transnorm" ||
-        lowerShader == "transdiff" ||
-        lowerShader == "transloop" ||
-        lowerShader == "blendnorm" ||
-        lowerShader == "addatex" ||
-        lowerShader == "addatexdiff" ||
-        lowerShader == "subatex" ||
-        lowerShader == "subatexdiff" ||
-        lowerShader == "glass" ||
-        lowerShader == "translucent" ||
-        lowerShader.find("transnorm") != std::string::npos ||
-        lowerShader.find("transdiff") != std::string::npos ||
-        lowerShader.find("blendnorm") != std::string::npos ||
-        lowerShader.find("addatex") != std::string::npos ||
-        isGlassTex
-    );
-
-    if (isExplicitBlendShader) {
-        if (!hasTexAlpha) {
-            sm.isTransparent = false;
-            sm.isAlphaTest = false;
-        } else {
-            sm.isTransparent = true;
-            sm.isAlphaTest = false; // Pass 3: Smooth Alpha Blend (Glass, Read-Only Depth)
-        }
-        return;
-    }
-
-    // 3. Group 2: Alpha-Test Cutout Shader Tokens (Open Rails Specification)
-    // AlphATex, AlphATexDiff, BlendATex, BlendATexDiff, Cutout, AlphaTest, Alph1, Alph2
-    // Open Rails Specification: BlendATexDiff and AlphATexDiff are strictly Alpha-Tested materials
-    // with Depth Writing (Z-Write) ENABLED (Pass 2) for locomotive bodies, grilles, pantographs, and decals.
-    // They are only routed to Pass 3 (Z-Write = OFF) if the texture is explicitly glass/window.
+    // 2. Group 2: Alpha-Test Cutout & Decal Shaders (Open Rails & TSRE5 Specification)
+    // BlendATexDiff, BlendATex, AlphATexDiff, AlphATex, Cutout, AlphaTest, Alph1, Alph2
+    // Open Rails Specification:
+    // - If the texture has 1-bit / mask alpha (SmoothAlpha == false), it is an Alpha-Test Cutout material
+    //   with Depth Writing (Z-Write) ENABLED (Pass 2) for locomotive bodies, grilles, pantographs, and decals.
+    // - If the texture has continuous / smooth alpha gradients (SmoothAlpha == true), such as Glass.ace or
+    //   tinted cabin windshields, it is smooth translucent glass (Pass 3: Read-Only Depth)
+    //   so that interior geometry, seats, and destination boards are fully visible through the glass!
     bool isExplicitAlphaTestShader = (
         lowerShader == "blendatexdiff" ||
         lowerShader == "blendatex" ||
@@ -2794,28 +2791,52 @@ void ShapeReader::ClassifySubMeshMaterial(
     );
 
     if (isExplicitAlphaTestShader) {
-        if (hasTexAlpha) {
-            if (isGlassTex) {
-                sm.isTransparent = true;
-                sm.isAlphaTest = false; // Pass 3: Smooth Glass Blend (Read-Only Depth)
-            } else {
-                sm.isTransparent = true;
-                sm.isAlphaTest = true;  // Pass 2: AlphaTest Cutout (Writes Depth!)
-            }
+        if (hasSmoothAlpha) {
+            sm.isTransparent = true;
+            sm.isAlphaTest = false; // Pass 3: Smooth Glass Blend (Read-Only Depth, soft window glass)
         } else {
-            sm.isTransparent = false;
-            sm.isAlphaTest = false; // Pass 1: Opaque
+            sm.isTransparent = true;
+            sm.isAlphaTest = true;  // Pass 2: AlphaTest Cutout (Writes Depth, Discards alpha < cutoff)
         }
         return;
     }
 
-    // 4. Fallback / Unspecified Shaders: Open Rails Auto-detection
+    // 3. Group 3: Explicit Translucent / Glass Shaders (Open Rails & MSTS Specification)
+    // TransNorm, TransDiff, TransLoop, BlendNorm, AddATex, AddATexDiff, SubATex, SubATexDiff, Glass, Window
+    // Modelers explicitly choose these shaders specifically for transparent cabin glass windows, headlights, and smoke.
+    // They are rendered with Depth Read-Only (Pass 3) so geometry behind the glass remains visible.
+    bool isExplicitBlendShader = (
+        lowerShader == "transnorm" ||
+        lowerShader == "transdiff" ||
+        lowerShader == "transloop" ||
+        lowerShader == "blendnorm" ||
+        lowerShader == "addatex" ||
+        lowerShader == "addatexdiff" ||
+        lowerShader == "subatex" ||
+        lowerShader == "subatexdiff" ||
+        lowerShader == "glass" ||
+        lowerShader == "translucent" ||
+        lowerShader.find("transnorm") != std::string::npos ||
+        lowerShader.find("transdiff") != std::string::npos ||
+        lowerShader.find("blendnorm") != std::string::npos ||
+        lowerShader.find("addatex") != std::string::npos
+    );
+
+    if (isExplicitBlendShader) {
+        sm.isTransparent = true;
+        sm.isAlphaTest = false; // Pass 3: Smooth Glass Blend (Read-Only Depth)
+        return;
+    }
+
+    // 4. Fallback / Unspecified Shaders: Auto-detect from texture alpha presence
+    // If unspecified, models with smooth alpha gradients are treated as Smooth Glass Blend (Pass 3),
+    // and 1-bit alpha textures are treated as AlphaTest Cutout with Depth Writing ENABLED (Pass 2).
     if (!hasTexAlpha) {
         sm.isTransparent = false;
         sm.isAlphaTest = false; // Pass 1: Opaque Solid
-    } else if (isGlassTex) {
+    } else if (hasSmoothAlpha) {
         sm.isTransparent = true;
-        sm.isAlphaTest = false; // Pass 3: Smooth Glass Blend
+        sm.isAlphaTest = false; // Pass 3: Smooth Glass Blend (Read-Only Depth)
     } else {
         sm.isTransparent = true;
         sm.isAlphaTest = true;  // Pass 2: AlphaTest Cutout (Writes Depth)
