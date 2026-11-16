@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Train Sim Consist Builder</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0d1117;
+      --card-bg: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-muted: #8b949e;
+      --primary: #238636;
+      --primary-hover: #2ea043;
+      --accent: #58a6ff;
+      --accent-hover: #79c0ff;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 1.25rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(22, 27, 34, 0.8);
+      backdrop-filter: blur(8px);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .logo {
+      font-size: 1.25rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      color: #fff;
+      text-decoration: none;
+    }
+    .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-weight: 500;
+      margin-left: 1.5rem;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover {
+      color: var(--accent);
+    }
+    .hero {
+      text-align: center;
+      padding: 5rem 1.5rem 3rem;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      background: rgba(88, 166, 255, 0.15);
+      border: 1px solid rgba(88, 166, 255, 0.4);
+      color: var(--accent);
+      padding: 0.35rem 0.9rem;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+    }
+    h1 {
+      font-size: 3rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      margin-bottom: 1.25rem;
+      background: linear-gradient(135deg, #fff 40%, var(--accent) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      margin-bottom: 2.5rem;
+      max-width: 720px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .cta-group {
+      display: flex;
+      justify-content: center;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-bottom: 3.5rem;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.2s;
+      cursor: pointer;
+    }
+    .btn-primary {
+      background-color: var(--primary);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      box-shadow: 0 4px 14px rgba(35, 134, 54, 0.3);
+    }
+    .btn-primary:hover {
+      background-color: var(--primary-hover);
+      transform: translateY(-1px);
+    }
+    .btn-secondary {
+      background-color: var(--card-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover {
+      background-color: #21262d;
+      border-color: #8b949e;
+      color: #fff;
+    }
+    .preview-container {
+      max-width: 1100px;
+      margin: 0 auto 5rem;
+      padding: 0 1.5rem;
+    }
+    .preview-frame {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+      background: var(--card-bg);
+    }
+    .preview-frame img {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+    .features {
+      max-width: 1100px;
+      margin: 0 auto 5rem;
+      padding: 0 1.5rem;
+    }
+    .section-title {
+      text-align: center;
+      font-size: 2rem;
+      font-weight: 700;
+      margin-bottom: 2.5rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 1.5rem;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.75rem;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+    .card:hover {
+      transform: translateY(-3px);
+      border-color: var(--accent);
+    }
+    .card-icon {
+      font-size: 1.8rem;
+      margin-bottom: 1rem;
+    }
+    .card h3 {
+      font-size: 1.25rem;
+      margin-bottom: 0.5rem;
+      color: #fff;
+    }
+    .card p {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+    footer {
+      margin-top: auto;
+      border-top: 1px solid var(--border);
+      padding: 2rem 1.5rem;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      background: var(--card-bg);
+    }
+    footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    footer a:hover {
+      text-decoration: underline;
+    }
+    @media (max-width: 600px) {
+      h1 { font-size: 2.2rem; }
+      .subtitle { font-size: 1.05rem; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="#" class="logo">
+      <span>🚆</span>
+      <span>Train Sim Consist Builder</span>
+    </a>
+    <nav class="nav-links">
+      <a href="https://github.com/devddd963/TrainSimConsistBuilder" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/devddd963/TrainSimConsistBuilder/releases" target="_blank" rel="noopener">Releases</a>
+      <a href="Version.json" target="_blank">Version.json</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="badge" id="versionBadge">Loading Version...</div>
+      <h1>Train Sim Consist Builder</h1>
+      <p class="subtitle">
+        A high-performance, native Win32/C++ consist and activity editor for <strong>Open Rails (ORTS)</strong> and <strong>MSTS</strong>.
+        Engineered with direct Kernel32 indexing, real-time physics metrics, and integrated 3D Visual Studio.
+      </p>
+      <div class="cta-group">
+        <a id="downloadBtn" href="https://github.com/devddd963/TrainSimConsistBuilder/releases/latest" class="btn btn-primary" target="_blank" rel="noopener">
+          <span>⬇</span> Download Latest Release
+        </a>
+        <a href="https://github.com/devddd963/TrainSimConsistBuilder" class="btn btn-secondary" target="_blank" rel="noopener">
+          <span>★</span> View on GitHub
+        </a>
+      </div>
+    </section>
+
+    <section class="preview-container">
+      <div class="preview-frame">
+        <img src="PREVIEWS/1.jpg" alt="Train Sim Consist Builder Main Interface" loading="lazy">
+      </div>
+    </section>
+
+    <section class="features">
+      <h2 class="section-title">Engineered for Performance & Speed</h2>
+      <div class="grid">
+        <div class="card">
+          <div class="card-icon">⚡</div>
+          <h3>Native C++ Performance</h3>
+          <p>Zero electron bloat, zero Java/runtime overhead. Built purely in native Win32 C++ for instant startup and lightning-fast file parsing.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🎮</div>
+          <h3>Integrated 3D Visual Studio</h3>
+          <p>Real-time hardware-accelerated DirectX shape rendering with authentic material classification, specular highlights, and smooth alpha blending.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">📊</div>
+          <h3>Live Physics & Metrics</h3>
+          <p>Live automated calculations for train length, combined mass in tonnes, horsepower (HP/kW), and unit composition breakdown.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🎲</div>
+          <h3>Consist Pool Generator</h3>
+          <p>Rule-based pool engine supporting sequential or randomized stock picking, orientation enforcement, and one-click bulk consist generation.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🔍</div>
+          <h3>Health & Integrity Scanner</h3>
+          <p>Automated detection of broken consist files, missing shape assets, invalid texture paths, and circular wagon linkages.</p>
+        </div>
+        <div class="card">
+          <div class="card-icon">🔄</div>
+          <h3>Reliable Built-in Updater</h3>
+          <p>Automatic update verification powered directly by GitHub Pages CDN edge distribution with atomic in-place updates.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Train Sim Consist Builder &copy; 2026 devddd963. Released under the GPL-3.0 License.</p>
+    <p style="margin-top: 0.5rem;">
+      <a href="https://github.com/devddd963/TrainSimConsistBuilder" target="_blank" rel="noopener">Source Code</a> &bull;
+      <a href="Version.json">Version Manifest</a> &bull;
+      <a href="https://github.com/devddd963/TrainSimConsistBuilder/issues" target="_blank" rel="noopener">Report Issue</a>
+    </p>
+  </footer>
+
+  <script>
+    // Dynamically fetch and display latest version from Version.json
+    fetch('Version.json?t=' + Date.now())
+      .then(res => res.json())
+      .then(data => {
+        if (data.version) {
+          const badge = document.getElementById('versionBadge');
+          badge.textContent = `Latest Release: v${data.version} (Build ${data.build})`;
+          if (data.download_url) {
+            document.getElementById('downloadBtn').href = data.download_url;
+          }
+        }
+      })
+      .catch(err => {
+        document.getElementById('versionBadge').textContent = 'Latest: v9.3.6';
+      });
+  </script>
+</body>
+</html>

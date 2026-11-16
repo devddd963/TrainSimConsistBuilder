@@ -18,8 +18,9 @@
 
 namespace Updater
 {
-    static const wchar_t VERSION_JSON_PRIMARY_URL[] = L"https://raw.githubusercontent.com/devddd963/TrainSimConsistBuilder/main/Version.json";
-    static const wchar_t VERSION_JSON_FALLBACK_URL[] = L"https://github.com/devddd963/TrainSimConsistBuilder/raw/main/Version.json";
+    static const wchar_t VERSION_JSON_PRIMARY_URL[] = L"https://devddd963.github.io/TrainSimConsistBuilder/Version.json";
+    static const wchar_t VERSION_JSON_FALLBACK_URL1[] = L"https://cdn.jsdelivr.net/gh/devddd963/TrainSimConsistBuilder@main/Version.json";
+    static const wchar_t VERSION_JSON_FALLBACK_URL2[] = L"https://raw.githubusercontent.com/devddd963/TrainSimConsistBuilder/main/Version.json";
 
     int GetCurrentBuildNumber()
     {
@@ -135,6 +136,90 @@ namespace Updater
         return result;
     }
 
+    static bool DownloadStringWinHttp(const std::wstring& url, std::string& outContent)
+    {
+        outContent.clear();
+        URL_COMPONENTSW urlComp = { sizeof(urlComp) };
+        wchar_t hostName[256] = { 0 };
+        wchar_t urlPath[2048] = { 0 };
+        urlComp.lpszHostName = hostName;
+        urlComp.dwHostNameLength = ARRAYSIZE(hostName);
+        urlComp.lpszUrlPath = urlPath;
+        urlComp.dwUrlPathLength = ARRAYSIZE(urlPath);
+
+        if (!WinHttpCrackUrl(url.c_str(), (DWORD)url.length(), 0, &urlComp))
+        {
+            LOG_ERROR("WinHttpCrackUrl failed for URL: %ls", url.c_str());
+            return false;
+        }
+
+        HINTERNET hSession = WinHttpOpen(L"TrainSimConsistBuilder-Updater/2.0",
+            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+            WINHTTP_NO_PROXY_NAME,
+            WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession) return false;
+
+        // Resilient timeouts: 8s connect, 8s send, 10s receive
+        WinHttpSetTimeouts(hSession, 8000, 8000, 10000, 15000);
+
+        HINTERNET hConnect = WinHttpConnect(hSession, hostName, urlComp.nPort, 0);
+        if (!hConnect)
+        {
+            WinHttpCloseHandle(hSession);
+            return false;
+        }
+
+        DWORD dwFlags = (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", urlPath, NULL,
+            WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, dwFlags);
+        if (!hRequest)
+        {
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return false;
+        }
+
+        DWORD redirectOption = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+        WinHttpSetOption(hRequest, WINHTTP_OPTION_REDIRECT_POLICY, &redirectOption, sizeof(redirectOption));
+
+        LPCWSTR headers = L"Cache-Control: no-cache, no-store, must-revalidate\r\nPragma: no-cache\r\nAccept: application/json, */*\r\n";
+        BOOL bSend = WinHttpSendRequest(hRequest, headers, (DWORD)-1, NULL, 0, 0, 0);
+        if (!bSend || !WinHttpReceiveResponse(hRequest, NULL))
+        {
+            WinHttpCloseHandle(hRequest);
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return false;
+        }
+
+        DWORD statusCode = 0;
+        DWORD statusSize = sizeof(statusCode);
+        WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
+
+        if (statusCode != 200)
+        {
+            LOG_WARN("Download HTTP status code: %u for %ls", statusCode, url.c_str());
+            WinHttpCloseHandle(hRequest);
+            WinHttpCloseHandle(hConnect);
+            WinHttpCloseHandle(hSession);
+            return false;
+        }
+
+        char buffer[4096];
+        DWORD bytesRead = 0;
+        while (WinHttpReadData(hRequest, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0)
+        {
+            outContent.append(buffer, bytesRead);
+        }
+
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+
+        return !outContent.empty();
+    }
+
     static bool DownloadFileWinHttp(const std::wstring& url, const std::wstring& destFilePath)
     {
         URL_COMPONENTSW urlComp = { sizeof(urlComp) };
@@ -206,7 +291,7 @@ namespace Updater
             return false;
         }
 
-        HANDLE hFile = CreateFileW(destFilePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        HANDLE hFile = CreateFileW(destFilePath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE)
         {
             WinHttpCloseHandle(hRequest);
@@ -242,16 +327,8 @@ namespace Updater
         return true;
     }
 
-    static bool ParseVersionJsonFile(const std::wstring& filePath, UpdateInfo& outInfo)
+    static bool ParseVersionJsonString(const std::string& json, UpdateInfo& outInfo)
     {
-        std::ifstream file(filePath, std::ios::in | std::ios::binary);
-        if (!file.is_open()) return false;
-
-        std::stringstream ss;
-        ss << file.rdbuf();
-        file.close();
-
-        std::string json = ss.str();
         if (json.empty()) return false;
 
         std::string version = ExtractJsonString(json, "version");
@@ -288,6 +365,18 @@ namespace Updater
         }
 
         return true;
+    }
+
+    static bool ParseVersionJsonFile(const std::wstring& filePath, UpdateInfo& outInfo)
+    {
+        std::ifstream file(filePath, std::ios::in | std::ios::binary);
+        if (!file.is_open()) return false;
+
+        std::stringstream ss;
+        ss << file.rdbuf();
+        file.close();
+
+        return ParseVersionJsonString(ss.str(), outInfo);
     }
 
     void CleanupOldUpdateFiles()
@@ -504,24 +593,27 @@ namespace Updater
     {
         std::thread([hWndParent, silent]()
         {
-            std::wstring tempDir = GetAppTempDirectory();
-            std::wstring jsonPath = tempDir + L"\\Version.json";
+            // Build micro-timestamp cache-buster
+            std::wstring cacheBuster = L"?t=" + std::to_wstring(GetTickCount64());
 
-            // 1. Delete old physical Version.json first
-            DeleteFileW(jsonPath.c_str());
+            std::string jsonContent;
+            // 1. Primary: Direct GitHub Pages CDN edge (devddd963.github.io)
+            bool downloaded = DownloadStringWinHttp(std::wstring(VERSION_JSON_PRIMARY_URL) + cacheBuster, jsonContent);
 
-            // 2. Download fresh Version.json physically into AppData\Temp
-            bool downloaded = DownloadFileWinHttp(VERSION_JSON_PRIMARY_URL, jsonPath);
-
-            // Fallback to github.com raw redirect if raw.githubusercontent.com fails
-            if (!downloaded)
+            // 2. Secondary: jsDelivr Edge CDN
+            if (!downloaded || jsonContent.empty())
             {
-                downloaded = DownloadFileWinHttp(VERSION_JSON_FALLBACK_URL, jsonPath);
+                downloaded = DownloadStringWinHttp(std::wstring(VERSION_JSON_FALLBACK_URL1) + cacheBuster, jsonContent);
             }
 
-            if (!downloaded || !PathFileExistsW(jsonPath.c_str()))
+            // 3. Tertiary: Direct GitHub Raw
+            if (!downloaded || jsonContent.empty())
             {
-                RemoveDirectoryW(tempDir.c_str());
+                downloaded = DownloadStringWinHttp(std::wstring(VERSION_JSON_FALLBACK_URL2) + cacheBuster, jsonContent);
+            }
+
+            if (!downloaded || jsonContent.empty())
+            {
                 if (!silent)
                 {
                     ShowModernMessageBox(hWndParent,
@@ -531,13 +623,9 @@ namespace Updater
                 return;
             }
 
-            // 3. Read and parse physical file
+            // Read and parse directly from memory buffer
             UpdateInfo info;
-            bool parsed = ParseVersionJsonFile(jsonPath, info);
-
-            // Option A: Clean up physical Version.json and Temp folder immediately right after reading into memory
-            DeleteFileW(jsonPath.c_str());
-            RemoveDirectoryW(tempDir.c_str());
+            bool parsed = ParseVersionJsonString(jsonContent, info);
 
             if (!parsed)
             {
