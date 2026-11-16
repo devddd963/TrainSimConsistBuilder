@@ -1,6 +1,6 @@
 {
   "version": "9.3.6",
-  "build": 99303,
+  "build": 99306,
   "changelog": "\nBug Fix: Improved Status Health Detection.",
   "download_url": "https://github.com/devddd963/TrainSimConsistBuilder/releases/latest/download/TrainSimConsistBuilder.zip"
 }
